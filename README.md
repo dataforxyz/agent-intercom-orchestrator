@@ -20,6 +20,85 @@ Cross-harness orchestration for wakeable coding agents using the Agent Intercom 
 
 This ranking describes the current Agent Intercom adapters, not the general quality of the models or harnesses.
 
+## Install the harness adapters
+
+The orchestrator will coordinate the existing Agent Intercom adapters. Install the adapters for the harnesses you want to connect.
+
+### Pi
+
+```bash
+pi install git:github.com/dataforxyz/agent-intercom-pi
+```
+
+Repository: [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi)
+
+### OpenCode
+
+```bash
+git clone https://github.com/dataforxyz/agent-intercom-opencode.git
+cd agent-intercom-opencode
+npm install
+npm run build
+```
+
+OpenCode requires the built server plugin in `opencode.json` and the separate TUI plugin in `tui.json`. See the [complete setup guide](docs/creating-and-supervising-worker-agents.md#opencode).
+
+Repository: [`agent-intercom-opencode`](https://github.com/dataforxyz/agent-intercom-opencode)
+
+### Codex
+
+```bash
+npm install -g github:dataforxyz/agent-intercom-codex
+codex mcp add codex-intercom -- codex-intercom-mcp
+```
+
+Use `coi`, rather than plain `codex`, when the session must be wakeable.
+
+Repository: [`agent-intercom-codex`](https://github.com/dataforxyz/agent-intercom-codex)
+
+### Claude Code
+
+```bash
+npm install -g github:dataforxyz/agent-intercom-claude
+claude mcp add claude-intercom -- claude-intercom-mcp
+```
+
+Use `cci` or `ccim`, rather than plain Claude Code with MCP alone, when the session must be wakeable.
+
+Repository: [`agent-intercom-claude`](https://github.com/dataforxyz/agent-intercom-claude)
+
+Restart or reload already-running harness sessions after installing or updating an adapter. All peers must use the same `PI_CODING_AGENT_DIR` to join the same local broker.
+
+## How agents should use it
+
+Agent Intercom Orchestrator is intended to enforce a clear operating protocol, not merely start several chat sessions.
+
+1. **One manager owns the run.** The manager creates and stops persistent peers, assigns identities and exclusive lanes, resolves conflicts, and owns the final decision.
+2. **Give every peer a role.** Typical roles are builder, challenger, verifier, or proof advisor. A role includes scope, permissions, acceptance criteria, and forbidden actions.
+3. **Inspect inherited state first.** Before editing, workers report their branch, worktree status, existing commits, uncommitted files, and ownership boundary.
+4. **Use independent evidence.** Builders attach tests, commands, files, commits, screenshots, or other artifacts to completion claims. Challengers identify concrete missing proof or defects rather than offering vague disagreement.
+5. **Use `send` for work and progress.** Use `ask` only when the sender is blocked on a decision. An ask does not guarantee an immediate mid-turn interruption in every harness.
+6. **Do not recursively create persistent peers.** Workers may use built-in subagents, but only the designated manager creates Pi, OpenCode, `coi`, `cci`, tmux, sidecar, or other persistent intercom instances unless ownership is explicitly delegated.
+7. **Keep writing lanes exclusive.** Multiple agents may inspect the same work, but two implementation workers should not silently edit the same files or worktree.
+8. **Maintain compact durable notes.** Rewrite the current goal, evidence, objections, decisions, and risks as the run evolves. Do not rely on an endlessly appended transcript surviving repeated compaction.
+9. **Bound the loop.** Configure round, time, cost, and permission limits. Stop when the evidence contract passes, a real blocker is escalated, or a configured limit is reached.
+10. **Clean up deliberately.** Verify worker processes, tmux sessions, sidecars, identities, queued messages, and worktree state before declaring the orchestration complete.
+
+A minimal assignment should tell the worker:
+
+```text
+Role: builder | challenger | verifier
+Goal and acceptance criteria: ...
+Owned repository/worktree/files: ...
+Allowed tools and access: ...
+Forbidden reads/writes/external actions: ...
+Required evidence: ...
+Communication target: ...
+Stopping or escalation rule: ...
+```
+
+The complete operational protocol, aliases, safe/yolo profiles, launch commands, proof-advisor pattern, and supervisor checklist are in [Creating and supervising Agent Intercom workers](docs/creating-and-supervising-worker-agents.md).
+
 ## What this is
 
 Agent Intercom Orchestrator will launch and coordinate independent coding-agent sessions—initially Claude Code and Codex—through their wakeable Agent Intercom adapters.
