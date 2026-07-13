@@ -4,6 +4,16 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { LaunchProfile, OrchestratorConfig } from "./types.ts";
 
+function preferredLocalWrapper(name: string): string {
+  const path = join(homedir(), ".local", "bin", name);
+  try {
+    if (statSync(path).isFile()) return path;
+  } catch {
+    // Fall back to PATH for normal global package installations.
+  }
+  return name;
+}
+
 export const DEFAULT_CONFIG: OrchestratorConfig = {
   defaultHarness: "pi",
   defaultProfiles: {
@@ -13,25 +23,25 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
   profiles: {
     "codex-safe": {
       harness: "codex",
-      command: "coi",
+      command: preferredLocalWrapper("coi"),
       args: ["--no-tui", "--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
       description: "Wakeable Codex worker with a workspace-write sandbox",
     },
     "codex-minimal": {
       harness: "codex",
-      command: "coim",
+      command: preferredLocalWrapper("coim"),
       args: ["--no-tui"],
       description: "Wakeable Codex worker using a locally configured minimal profile",
     },
     "claude-safe": {
       harness: "claude",
-      command: "cci",
+      command: preferredLocalWrapper("cci"),
       args: ["--safe"],
       description: "Wakeable Claude Code worker with standard permission prompts",
     },
     "claude-minimal": {
       harness: "claude",
-      command: "ccim",
+      command: preferredLocalWrapper("ccim"),
       args: ["--safe"],
       description: "Wakeable minimal Claude Code worker",
     },
