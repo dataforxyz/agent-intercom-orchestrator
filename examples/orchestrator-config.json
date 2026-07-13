@@ -3,7 +3,7 @@
   "defaultProfiles": {
     "codex": "codex-safe",
     "claude": "claude-safe",
-    "opencode": "opencode"
+    "opencode": "opencode-run"
   },
   "leaseMinutes": 30,
   "heartbeatSeconds": 60,
@@ -38,11 +38,10 @@
       "command": "ccim",
       "args": ["--safe"]
     },
-    "opencode": {
+    "opencode-run": {
       "harness": "opencode",
       "command": "opencode",
-      "args": [],
-      "spawnable": false
+      "args": ["run", "--auto", "--format", "json"]
     }
   }
 }

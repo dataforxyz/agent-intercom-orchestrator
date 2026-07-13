@@ -99,11 +99,10 @@ export async function getUnitStatus(runner: CommandRunner, unit: string): Promis
   );
   if (result.code !== 0) return { exists: false };
   const values = parseSystemctlShow(result.stdout);
-  if (values.LoadState === "not-found") return { exists: false };
   const mainPid = Number(values.MainPID);
   const execMainStatus = Number(values.ExecMainStatus);
   return {
-    exists: true,
+    exists: values.LoadState !== "not-found",
     activeState: values.ActiveState,
     subState: values.SubState,
     ...(Number.isInteger(mainPid) && mainPid > 0 ? { mainPid } : {}),

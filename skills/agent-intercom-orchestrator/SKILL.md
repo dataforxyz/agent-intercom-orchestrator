@@ -13,7 +13,7 @@ Use `agent_fleet` instead of launching persistent harness processes directly.
 - Use unique worker ids.
 - Give each worker an exclusive scope and explicit role.
 - External workers start inside systemd user services so their MCP servers, sidecars, browsers, and other descendants can be stopped as one cgroup.
-- After an external worker is spawned, wait until its id appears in `intercom({ action: "list" })`, then send the recorded task with `intercom({ action: "send", ... })`.
+- After Codex or Claude is spawned, wait until its id appears in `intercom({ action: "list" })`, then send the recorded task with `intercom({ action: "send", ... })` or `ask`. OpenCode run workers receive the task as their initial prompt.
 - Use `send` for assignments and progress. Use `ask` only for blocking decisions.
 - Preview cleanup before executing it.
 - Never kill or forget sessions the orchestrator does not own.
@@ -66,7 +66,7 @@ agent_fleet({
 
 ## First-draft limitations
 
-- External task delivery is still a separate Intercom `send` after registration.
-- OpenCode is attach-only until a reliable persistent headless launcher is defined.
+- Codex and Claude task delivery is still a separate Intercom `send` after registration.
+- OpenCode spawning is one-shot through `opencode run`; a permanently idle, wakeable OpenCode server still needs a lifecycle driver.
 - Automatic registration checks need a general Agent Intercom event-bus RPC API.
 - Linux systemd user services are the only external process backend in this draft.

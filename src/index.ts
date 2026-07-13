@@ -256,7 +256,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       await launchUnit(runner, {
         unit,
         profile,
-        args: buildWorkerArgs(harness, profile, id, cwd, role),
+        args: buildWorkerArgs(harness, profile, id, cwd, role, task),
         cwd,
         maxRuntime: config.maxRuntime,
         stopTimeoutSeconds: config.stopTimeoutSeconds,
@@ -281,11 +281,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     name: "agent_fleet",
     label: "Agent Fleet",
     description:
-      "Create and manage owned Pi, Codex, Claude Code, and OpenCode workers. External workers run in systemd user services so their sidecars and child processes can be stopped as one cgroup. Use spawn, list, status, stop, cleanup, doctor, logs, renew, or forget. External spawn records the assignment but does not send it yet; after spawn, use the intercom tool to send the task to the returned intercom target.",
+      "Create and manage owned Pi, Codex, Claude Code, and OpenCode workers. External workers run in systemd user services so their sidecars and child processes can be stopped as one cgroup. Use spawn, list, status, stop, cleanup, doctor, logs, renew, or forget. Codex and Claude spawn record the assignment for a later Intercom send. OpenCode run workers receive the assignment as their initial prompt.",
     promptSnippet: "Create, inspect, stop, and clean up owned cross-harness workers",
     promptGuidelines: [
       "Use agent_fleet to create or stop persistent workers; do not launch coi, cci, OpenCode, tmux, or sidecars directly when agent_fleet can own their lifecycle.",
-      "After agent_fleet spawns an external worker, wait for it to appear in intercom list and send the recorded task with intercom send.",
+      "After agent_fleet spawns Codex or Claude, wait for it to appear in intercom list and send the recorded task with intercom send. OpenCode run workers receive the task at launch.",
       "Use agent_fleet cleanup in preview mode before execute mode, and never kill sessions the fleet does not own.",
     ],
     parameters: AgentFleetParams,
@@ -301,9 +301,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           ? await spawnPi({ ...params, harness }, ctx)
           : await spawnExternal({ ...params, harness }, ctx);
         await updateStatus(ctx);
-        const next = worker.backend === "systemd"
-          ? `\nNext: wait for '${worker.intercomTarget}' in intercom list, then send this task with intercom send:\n${worker.task}`
-          : "";
+        const next = worker.backend !== "systemd"
+          ? ""
+          : worker.harness === "opencode"
+            ? "\nThe task was passed to this one-shot OpenCode run as its initial prompt."
+            : `\nNext: wait for '${worker.intercomTarget}' in intercom list, then send this task with intercom send:\n${worker.task}`;
         return textResult(`Started ${formatWorker(worker)}${next}`, { worker });
       }
 

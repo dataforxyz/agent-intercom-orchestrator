@@ -19,6 +19,7 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
   defaultProfiles: {
     codex: "codex-safe",
     claude: "claude-safe",
+    opencode: "opencode-run",
   },
   profiles: {
     "codex-safe": {
@@ -45,12 +46,11 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
       args: ["--safe"],
       description: "Wakeable minimal Claude Code worker",
     },
-    opencode: {
+    "opencode-run": {
       harness: "opencode",
-      command: "opencode",
-      args: [],
-      spawnable: false,
-      description: "Attach-only in the first draft; persistent headless launch still needs a host-specific runner",
+      command: preferredLocalWrapper("opencode"),
+      args: ["run", "--auto", "--format", "json"],
+      description: "One-shot OpenCode worker; the assignment is passed as its initial headless run prompt",
     },
   },
   leaseMinutes: 30,

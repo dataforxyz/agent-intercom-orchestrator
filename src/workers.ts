@@ -24,6 +24,7 @@ export function buildWorkerArgs(
   workerId: string,
   cwd: string,
   role: string,
+  task?: string,
 ): string[] {
   const args = [...(profile.args ?? [])];
   if (harness === "codex" || harness === "claude") {
@@ -36,6 +37,11 @@ export function buildWorkerArgs(
       cwd,
       "--instructions",
       `You are the ${role} worker managed by Agent Intercom. Wait for assignments through Intercom. Report blockers early and include evidence with completion claims.`,
+    );
+  } else if (harness === "opencode") {
+    if (!task) throw new Error("OpenCode run workers require an initial task");
+    args.push(
+      `You are the ${role} worker '${workerId}' managed by Agent Intercom. Complete this assignment, report blockers early, and include evidence with completion claims.\n\n${task}`,
     );
   }
   return args;
@@ -59,6 +65,8 @@ export function buildWorkerEnvironment(
 export function stateFromUnit(status: UnitStatus, previous: WorkerState): WorkerState {
   if (!status.exists) {
     if (previous === "stopped" || previous === "completed") return previous;
+    if (status.result && status.result !== "success") return "failed";
+    if (status.execMainStatus === 0 && status.result === "success") return "completed";
     return "lost";
   }
   if (status.activeState === "active") return "running";

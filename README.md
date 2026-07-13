@@ -6,7 +6,7 @@ One agent builds and tries to prove the work is finished. Another agent challeng
 
 A manager controls the agents, evidence, limits, context resets, and stopping rule so the useful disagreement does not turn into an endless argument.
 
-> **Status:** A first-draft Pi extension now provides an `agent_fleet` tool for owned worker lifecycle, systemd-cgroup cleanup, leases, diagnostics, and optional `pi-subagents` RPC. External task delivery is still a separate Intercom `send` after registration.
+> **Status:** A first-draft Pi extension now provides an `agent_fleet` tool for owned worker lifecycle, systemd-cgroup cleanup, leases, diagnostics, and optional `pi-subagents` RPC. Codex and Claude receive tasks through Intercom after registration; one-shot OpenCode runs receive the task at launch.
 
 ## First Draft
 
@@ -32,7 +32,7 @@ agent_fleet({ action: "doctor" })
 agent_fleet({ action: "list" })
 ```
 
-External Codex and Claude workers launch in transient systemd user services with `KillMode=control-group`, a maximum runtime, a renewable lease, and an owned worker record. Stopping the unit stops the wrapper, MCP servers, sidecars, browsers, and other descendants that remain in its cgroup. Pi workers delegate to `pi-subagents` through its in-process RPC API when that package is installed. OpenCode remains attach-only in this draft.
+External Codex, Claude, and one-shot OpenCode workers launch in transient systemd user services with `KillMode=control-group`, a maximum runtime, a renewable lease, and an owned worker record. Stopping the unit stops the wrapper, MCP servers, sidecars, browsers, and other descendants that remain in its cgroup. Pi workers delegate to `pi-subagents` through its in-process RPC API when that package is installed. A permanently idle, wakeable OpenCode server remains future work.
 
 See [`examples/orchestrator-config.json`](examples/orchestrator-config.json) and the bundled Agent Skill for the current API and limitations.
 

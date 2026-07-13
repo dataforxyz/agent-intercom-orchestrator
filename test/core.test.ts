@@ -28,12 +28,14 @@ test("worker ids reject shell-like input", () => {
   assert.throws(() => validateWorkerId("x"));
 });
 
-test("Codex and Claude launch args include stable identity", () => {
+test("harness launch args include identity or the initial task", () => {
   const codex = DEFAULT_CONFIG.profiles["codex-safe"];
   const claude = DEFAULT_CONFIG.profiles["claude-safe"];
-  assert.ok(codex && claude);
+  const opencode = DEFAULT_CONFIG.profiles["opencode-run"];
+  assert.ok(codex && claude && opencode);
   const codexArgs = buildWorkerArgs("codex", codex, "worker-a", "/repo", "builder");
   const claudeArgs = buildWorkerArgs("claude", claude, "worker-b", "/repo", "challenger");
+  const opencodeArgs = buildWorkerArgs("opencode", opencode, "worker-c", "/repo", "tester", "Return OPEN_OK");
   assert.deepEqual(codexArgs.slice(codexArgs.indexOf("--name"), codexArgs.indexOf("--name") + 4), [
     "--name",
     "worker-a",
@@ -43,6 +45,8 @@ test("Codex and Claude launch args include stable identity", () => {
   assert.ok(codexArgs.includes("--instructions"));
   assert.ok(claudeArgs.includes("--safe"));
   assert.ok(claudeArgs.includes("worker-b"));
+  assert.equal(opencodeArgs[0], "run");
+  assert.match(opencodeArgs.at(-1) ?? "", /Return OPEN_OK/);
 });
 
 test("unit status maps to normalized worker states", () => {
@@ -50,6 +54,8 @@ test("unit status maps to normalized worker states", () => {
   assert.equal(stateFromUnit({ exists: true, activeState: "failed", result: "exit-code" }, "running"), "failed");
   assert.equal(stateFromUnit({ exists: true, activeState: "inactive", execMainStatus: 0 }, "running"), "completed");
   assert.equal(stateFromUnit({ exists: false }, "running"), "lost");
+  assert.equal(stateFromUnit({ exists: false, result: "success", execMainStatus: 0 }, "running"), "completed");
+  assert.equal(stateFromUnit({ exists: false, result: "exit-code", execMainStatus: 1 }, "running"), "failed");
   assert.equal(stateFromUnit({ exists: false }, "stopped"), "stopped");
 });
 
