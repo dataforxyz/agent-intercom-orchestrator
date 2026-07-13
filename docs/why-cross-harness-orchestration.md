@@ -1,166 +1,115 @@
-# Why cross-harness agent orchestration works
+# Why this works
 
-This document turns the original working notes behind Agent Intercom Orchestrator into a testable engineering model. Some of the ideas began as observations from repeated use rather than formal claims about model behavior. The system should therefore measure results and require evidence instead of assuming the theory is always correct.
+AI models tend to keep going when someone tells them they are wrong, stopped early, missed something, or have not proved they are finished.
 
-## The problem with one agent reviewing itself
+One agent says the work is done. Another says it is not. The first now has a reason to check again, defend the result, find proof, or make another attempt. The second has a reason to inspect that answer and respond again.
 
-A single coding agent can plan, implement, test, review, and declare its own work complete. That is convenient, but every phase shares much of the same framing:
+That pressure can carry the work past the point where one agent would normally stop.
 
-- the same conversation history
-- the same interpretation of the task
-- the same model tendencies
-- the same harness behavior
-- the same mistakes carried through compaction summaries
-- an incentive to reconcile new evidence with its earlier conclusion
+## How I got to this understanding
 
-Self-review still catches defects, but it is not independent review. Asking the same session to “double-check” often produces another explanation of why its existing answer is acceptable.
+I did not start with a multi-agent theory. I started by noticing that agents stopped before the work was actually finished.
 
-Built-in subagents improve parallelism, but they usually remain children of the same harness and parent workflow. The parent assigns their scope, receives their results, and decides what to trust. A child may challenge the parent, but the structure still encourages cooperation with the parent’s framing rather than sustained peer-level disagreement.
+At first I responded by explaining exactly what the agent had done wrong. I pointed out the missing work, the bad assumption, the check it had skipped, or the reason its claim of completion was false. The agent would respond to the criticism, inspect the task again, and often find or fix more work.
 
-## Independent peers create useful pressure
+After doing that repeatedly, I started shortening the message. Instead of writing the full explanation again, I would say things such as:
 
-Agent Intercom connects independent sessions as peers. Each can have its own:
+- fix it
+- you did not finish
+- please finish
+- you stopped early
 
-- harness
-- model provider and model version
-- context window and compaction history
-- system instructions and role
-- repository view or worktree
-- tools and permission boundaries
-- completion criteria
+Those shorter commands still made the agent continue.
 
-The important property is not merely “multiple agents.” It is **independent responsibility**.
+Then I reduced it even further. I replied with literally `lol` or `:(`. I also tried swearing and other tiny signals that I did not accept the answer. Even when I did not explain the defect again, the agent would often reopen the problem, inspect its work, and find what it had skipped.
 
-A builder is responsible for producing a working result. A challenger is responsible for finding unsupported claims, missing cases, regressions, and incomplete proof. Neither is subordinate to the other, and neither can close the task merely by asserting that it is done.
+That progression changed how I understood what was happening. I went from a detailed explanation of the mistake, to a simple command to fix it, to almost no semantic instruction at all. The response still worked because the agent could tell that its answer had not been accepted and there was still something unresolved.
 
-## Using the desire to respond
+The model wanted to explain itself, correct the objection, prove it was finished, or have the last word. The detailed correction could help direct it, but the pressure to continue did not depend on the correction being long or carefully written.
 
-In practice, coding models tend to respond when another participant says that something is missing, incorrect, or insufficiently proven. The exact wording often matters less than creating a credible unresolved disagreement.
+I also noticed that wording changes the possible response. My normal typing includes strange punctuation, misspellings, and accidental splits such as `get sis` instead of `gets is`. The model would be unlikely to generate that exact wording for itself. That difference can push its next response onto another path.
 
-This can be useful:
+Bad spelling is not magic, and prompts do not need to be unreadable. The point is that polished wording matters less than I first thought, and variation should not automatically be removed. We are trying to increase the possible outcomes in the right direction.
 
-1. The builder claims completion.
-2. The challenger rejects a specific claim or asks for proof.
-3. The builder either fixes the issue or produces stronger evidence.
-4. The challenger inspects that evidence and looks for the next unsupported assumption.
-5. The loop continues until an external completion contract is satisfied.
+The next step was replacing my manual nudges with another agent. If one agent is trying to say the work is finished and another keeps saying it is not, they can create the same pressure for each other.
 
-Different model providers or model versions often produce more varied objections than two copies of the same model. Different harnesses add another source of variation because they expose different tools, context, prompts, session mechanics, and interaction patterns.
+Testing that idea exposed the rest:
 
-This is a working hypothesis, not a scientific guarantee. The orchestrator should compare outcomes across pairings and record which objections led to real fixes.
+- the same model is more likely to agree with itself
+- different model versions create more distance
+- different model creators create more distance again
+- different harnesses change behavior through their prompts, tools, context, and permissions
+- built-in subagents do not challenge their creator in the same way
+- long contexts eventually become unreliable, so Ralph-style resets are still needed
 
-## Why wording variation can matter
+The orchestrator comes from that sequence. It automates the part that worked: keep useful disagreement alive long enough to force another real pass, then stop or reset before it becomes noise.
 
-Models respond not only to the literal request but also to its framing, tone, ordering, and linguistic shape. Repeating the same polished review prompt can produce highly correlated answers. Variation may expose other continuations and therefore other checks.
+## Why different models and harnesses help
 
-Useful controlled variation includes:
+Two copies of the same model have similar tendencies and are more likely to agree. Different versions add some distance. Different providers add more.
 
-- direct versus skeptical review language
-- formal acceptance criteria versus conversational objections
-- different ordering of evidence
-- different model or provider families
-- deliberate separation of context
-- fresh summaries rewritten from the current evidence
+Harnesses add another difference. Claude Code, Codex, Pi, and OpenCode give models different system instructions, tools, contexts, permissions, and session histories. Even the same underlying model can take another path in another harness.
 
-The system does not need intentionally bad spelling to function, and it should not treat unusual wording as magic. The broader lesson is that prompt diversity can be an experimental input. Artifact quality, tests, and reproducible observations remain the output that matters.
+More difference means more possible responses and a better chance that one agent notices what the other keeps missing.
 
-## Why the loop must be bounded
+## Why subagents are not the same
 
-The same tendency to continue responding can create an endless argument. More turns are not automatically better. Eventually agents can repeat objections, optimize for winning the exchange, or consume context without improving the work.
+A subagent knows the parent created it to help with the parent’s task. The parent remains in charge, receives the result, and decides what to accept. That is useful for parallel work, but it does not create the same pressure as an independent peer.
 
-Every run therefore needs explicit bounds:
+A separate Claude, Codex, Pi, or OpenCode session has its own context and its own desire to answer. It can keep rejecting another agent’s claim instead of acting like a temporary helper.
 
-- maximum challenge rounds
-- elapsed-time limit
-- model/token/cost budget
-- a completion contract
-- evidence requirements
-- a deadlock rule
-- a human escalation path
-- pause and cancellation controls
+Built-in subagents should still handle parallel research and implementation. They just do not replace an independent challenger.
 
-The system stops because the contract passes or a configured bound is reached—not because one model got the last word.
+## Give the agents opposing jobs
 
-## Evidence beats agreement
+The simplest pairing is:
 
-Agreement is weak proof. Two agents can confidently agree on the same incorrect assumption.
+- the builder is trying to prove the work is finished
+- the challenger is trying to prove that it is not
 
-A completion claim should cite artifacts such as:
+The builder supplies the result and evidence. The challenger looks for a missing case, weak claim, untested path, or reason the proof is not enough.
 
-- changed files and commit hashes
-- clean worktree state
-- tests, typechecks, builds, and lint output
-- browser screenshots or exported sessions
-- API responses and route coverage
-- reproduction and regression checks
-- known limitations and unverified areas
+If the challenger is right, the builder returns to work. If the objection is wrong, the builder proves it. Either way, the work receives another serious check. The manager should not stop merely because the builder says `done`.
 
-A challenger’s objection should also be concrete. “This seems wrong” is not enough. It should identify a claim, missing artifact, failing command, untested path, contradiction, or risk that can be investigated.
+## Ralph is still needed
 
-## Context compaction and durable notes
+After enough context compactions, agents can become confused, repeat themselves, or lose the reasons behind decisions. Two agents arguing forever inside growing contexts does not solve that.
 
-Long-running sessions eventually compact their context. Repeated compaction can distort priorities, preserve obsolete assumptions, or lose the reason behind a decision.
+A better pattern is:
 
-A Ralph-style loop helps by creating paced iterations, explicit task state, context resets, and periodic reflection. Agent Intercom Orchestrator should complement that structure rather than replace it.
+1. Let the agents challenge each other for several rounds.
+2. Rewrite the notes with the current goal, evidence, objections, and decisions.
+3. Remove stale explanations instead of endlessly appending messages.
+4. Start the next Ralph context from those rewritten notes.
+5. Optionally let another model perform cleanup between loops.
 
-A strong combined workflow is:
+Ralph provides the resets. Intercom adds cross-model pressure between them.
 
-1. Run several bounded builder/challenger exchanges.
-2. Rewrite—not merely append—the durable task notes.
-3. Record current goals, accepted evidence, open objections, decisions, and risks.
-4. Start the next Ralph iteration or context window from those notes.
-5. Optionally use a different model or harness for a cleanup/review pass between iterations.
+## A manager controls the pressure
 
-Rewriting notes matters because an endlessly appended log eventually becomes another noisy context. The durable document should represent the best current understanding.
+The desire to answer can also create a pointless endless argument. A manager must own the task, roles, proof, limits, and stopping rule.
 
-## Why cross-harness peers differ from subagents
+Pi is currently the best manager because intercom is native and Pi can supervise messages, processes, worktrees, and other harnesses directly. OpenCode is next. Codex and Claude work well as workers and challengers, but their wake behavior relies more on wrappers, sidecars, headless turns, or Monitor.
 
-Built-in subagents remain valuable. They are excellent for scoped research, parallel implementation, and independent test execution inside one worker. They should not, however, be confused with persistent peer supervisors.
+## Intercom still needs better urgency
 
-| Built-in subagent | Intercom peer |
-|---|---|
-| Created and controlled by a parent harness | Independent session with its own lifecycle |
-| Usually scoped to one delegated result | Can maintain a long-running role and history |
-| Parent decides how to interpret the result | Can directly challenge and message other peers |
-| Shares more framing with the parent | Can use another harness, provider, or model |
-| Good for parallel task execution | Good for supervision, challenge, and proof review |
+An agent can send an `ask` and wait while the receiver takes too long to notice it. The sender is held up even though the other agent has not reacted.
 
-The recommended pattern is hierarchical only at the instance boundary:
+Intercom needs clearer priority:
 
-- the primary manager creates persistent peer instances
-- each worker may use its own built-in subagents
-- workers do not recursively create more persistent intercom workers
-- one manager remains responsible for lifecycle, ownership, and stopping
+- normal — wait for the next safe turn
+- urgent — show it at the earliest possible point
+- stop — pause or cancel the work
 
-## Interruptions and urgency
+Not every harness supports a true mid-turn interruption. Queued, displayed, injected, and acted on are different states and should be reported honestly.
 
-A message is not always an immediate interruption. A harness may be:
+## The whole idea
 
-- idle and ready for a new turn
-- busy in a tool call
-- busy generating
-- unable to inject into an active turn
-- limited to a pending-message queue
+1. One model says the work is done.
+2. Another says it is not.
+3. Both now have a reason to continue.
+4. Different models and harnesses increase the possible responses.
+5. More useful attempts create more chances to catch what was missed.
+6. A manager and Ralph-style resets stop the process from becoming endless context garbage.
 
-Intercom must report actual delivery state. Future orchestration should distinguish:
-
-- `normal`: deliver at the next safe turn boundary
-- `urgent`: visibly request the earliest safe interruption
-- `stop`: pause or cancel managed work
-
-No adapter should claim it interrupted a model if the host only queued the message. The orchestrator can add more safe checkpoints, but host capabilities determine whether a true mid-turn interruption is possible.
-
-## The intended outcome
-
-The objective is not to make agents argue for entertainment. It is to increase the probability that incomplete work receives another serious pass before the user accepts it.
-
-A successful run produces:
-
-- a completed task or a precise blocker
-- independent objections and their dispositions
-- reproducible evidence
-- explicit remaining risks
-- a compact durable handoff
-- no orphaned workers or hidden open items
-
-That is the foundation for Agent Intercom Orchestrator: independent peers, controlled variation, evidence-driven disagreement, and bounded execution.
+The system captures the model’s desire to answer and have the last word, then controls how long that pressure continues and whether it is still improving the work.
