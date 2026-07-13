@@ -19,6 +19,7 @@
     "git:github.com/dataforxyz/pi-spend",
     "npm:pi-prompt-template-model",
     "git:github.com/dataforxyz/agent-intercom-pi",
+    "npm:pi-subagents",
     "npm:pi-safe-compact",
     "npm:pi-mcp-adapter",
     "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",

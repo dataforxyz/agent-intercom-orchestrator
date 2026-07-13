@@ -1,0 +1,48 @@
+{
+  "defaultHarness": "pi",
+  "defaultProfiles": {
+    "codex": "codex-safe",
+    "claude": "claude-safe",
+    "opencode": "opencode"
+  },
+  "leaseMinutes": 30,
+  "heartbeatSeconds": 60,
+  "maxRuntime": "2h",
+  "stopTimeoutSeconds": 5,
+  "cleanupExpiredOnStart": true,
+  "cleanupOnShutdown": true,
+  "profiles": {
+    "codex-safe": {
+      "harness": "codex",
+      "command": "coi",
+      "args": [
+        "--no-tui",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "on-request"
+      ]
+    },
+    "codex-minimal": {
+      "harness": "codex",
+      "command": "coim",
+      "args": ["--no-tui"]
+    },
+    "claude-safe": {
+      "harness": "claude",
+      "command": "cci",
+      "args": ["--safe"]
+    },
+    "claude-minimal": {
+      "harness": "claude",
+      "command": "ccim",
+      "args": ["--safe"]
+    },
+    "opencode": {
+      "harness": "opencode",
+      "command": "opencode",
+      "args": [],
+      "spawnable": false
+    }
+  }
+}

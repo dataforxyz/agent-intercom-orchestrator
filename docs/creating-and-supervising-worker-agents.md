@@ -111,6 +111,7 @@ The important pieces are:
 | Package | Purpose |
 |---|---|
 | [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi) | Native Intercom tools, inbound turns, status, and UI |
+| [`pi-subagents`](https://github.com/nicobailon/pi-subagents) | Pi child-agent runtime used by the orchestrator's Pi driver through its RPC API |
 | [`pi-extensions`](https://github.com/dataforxyz/pi-extensions) | Ralph loop plus the selected UI, guidance, recap, and usage extensions |
 | [`pi-return-on`](https://github.com/dataforxyz/pi-return-on) | Wake the manager when a timer, process, file, port, URL, or other condition is ready |
 | [`phone-pi`](https://github.com/a2ajinkya/phone-pi) | Provides the `mobile-persona.ts` extension with `/mobile` and `/default` |
@@ -146,6 +147,7 @@ The following is a portable copy of the package and Return On portion of the man
     "git:github.com/dataforxyz/pi-spend",
     "npm:pi-prompt-template-model",
     "git:github.com/dataforxyz/agent-intercom-pi",
+    "npm:pi-subagents",
     "npm:pi-safe-compact",
     "npm:pi-mcp-adapter",
     "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",
@@ -177,6 +179,7 @@ pi install git:github.com/dataforxyz/pi-extensions
 pi install git:github.com/dataforxyz/pi-spend
 pi install npm:pi-prompt-template-model
 pi install git:github.com/dataforxyz/agent-intercom-pi
+pi install npm:pi-subagents
 pi install npm:pi-safe-compact
 pi install npm:pi-mcp-adapter
 pi install git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19

@@ -1,0 +1,56 @@
+{
+  "name": "agent-intercom-orchestrator",
+  "version": "0.1.0",
+  "description": "Pi extension for creating and managing Agent Intercom workers across Pi, Codex, Claude Code, and OpenCode",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dataforxyz/agent-intercom-orchestrator.git"
+  },
+  "homepage": "https://github.com/dataforxyz/agent-intercom-orchestrator#readme",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agents",
+    "agent-intercom",
+    "orchestration",
+    "codex",
+    "claude-code",
+    "opencode"
+  ],
+  "files": [
+    "src/**/*.ts",
+    "skills/**/*",
+    "examples/**/*",
+    "docs/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^22.15.0",
+    "typebox": "^1.1.24",
+    "typescript": "^5.9.3"
+  }
+}

@@ -6,7 +6,35 @@ One agent builds and tries to prove the work is finished. Another agent challeng
 
 A manager controls the agents, evidence, limits, context resets, and stopping rule so the useful disagreement does not turn into an endless argument.
 
-> **Status:** The Agent Intercom harness adapters work today. The automated orchestrator CLI is still being designed. The documented workflow can already be run manually with Pi, tmux, and the wakeable adapters.
+> **Status:** A first-draft Pi extension now provides an `agent_fleet` tool for owned worker lifecycle, systemd-cgroup cleanup, leases, diagnostics, and optional `pi-subagents` RPC. External task delivery is still a separate Intercom `send` after registration.
+
+## First Draft
+
+Install from the checkout while developing:
+
+```bash
+pi -e ./src/index.ts
+```
+
+Or install the Git package after it is published:
+
+```bash
+pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+pi install npm:pi-subagents
+```
+
+`pi-subagents` is required only when the orchestrator should create Pi child agents. Codex and Claude lifecycle management does not depend on it.
+
+Start with:
+
+```typescript
+agent_fleet({ action: "doctor" })
+agent_fleet({ action: "list" })
+```
+
+External Codex and Claude workers launch in transient systemd user services with `KillMode=control-group`, a maximum runtime, a renewable lease, and an owned worker record. Stopping the unit stops the wrapper, MCP servers, sidecars, browsers, and other descendants that remain in its cgroup. Pi workers delegate to `pi-subagents` through its in-process RPC API when that package is installed. OpenCode remains attach-only in this draft.
+
+See [`examples/orchestrator-config.json`](examples/orchestrator-config.json) and the bundled Agent Skill for the current API and limitations.
 
 ## Start Here
 
@@ -38,7 +66,7 @@ The builder saying `done` starts the review. It does not end the run.
 
 ## Origin and Thanks
 
-The Agent Intercom family grew from [Nico Bailon's original `pi-intercom`](https://github.com/nicobailon/pi-intercom). Thank you to Nico and the original contributors for creating the Pi extension and the foundation this work builds on.
+The Agent Intercom family grew from [Nico Bailon's original `pi-intercom`](https://github.com/nicobailon/pi-intercom), and the Pi worker driver uses the public RPC API from Nico's [`pi-subagents`](https://github.com/nicobailon/pi-subagents). Thank you to Nico and the original contributors for creating both foundations.
 
 ## License
 
