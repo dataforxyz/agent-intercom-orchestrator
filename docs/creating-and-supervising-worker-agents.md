@@ -102,6 +102,120 @@ intercom({ action: "status" })
 intercom({ action: "list" })
 ```
 
+### Full Pi manager stack
+
+Installing only `agent-intercom-pi` gives Pi the Intercom tools. The manager setup used for this workflow also includes Ralph loops, background return conditions, compaction helpers, usage/cost tools, prompt templates, MCP support, and the `/mobile` persona switch.
+
+The important pieces are:
+
+| Package | Purpose |
+|---|---|
+| [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi) | Native Intercom tools, inbound turns, status, and UI |
+| [`pi-extensions`](https://github.com/dataforxyz/pi-extensions) | Ralph loop plus the selected UI, guidance, recap, and usage extensions |
+| [`pi-return-on`](https://github.com/dataforxyz/pi-return-on) | Wake the manager when a timer, process, file, port, URL, or other condition is ready |
+| [`phone-pi`](https://github.com/a2ajinkya/phone-pi) | Provides the `mobile-persona.ts` extension with `/mobile` and `/default` |
+| [`pi-spend`](https://github.com/dataforxyz/pi-spend) | Usage and spend visibility |
+| [`pi-openai-fast`](https://github.com/dataforxyz/pi-openai-fast) | Optional custom OpenAI/Codex provider behavior used by this setup |
+| [`pi-rtk-optimizer`](https://github.com/MasuRii/pi-rtk-optimizer) | Reduces noisy tool output |
+| [`pi-must-have-extension`](https://www.npmjs.com/package/pi-must-have-extension) | General Pi workflow utilities |
+| [`pi-prompt-template-model`](https://www.npmjs.com/package/pi-prompt-template-model) | Prompt templates with model selection and orchestration features |
+| [`pi-safe-compact`](https://www.npmjs.com/package/pi-safe-compact) | Safer context compaction behavior |
+| [`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter) | MCP server integration |
+
+The following is a portable copy of the package and Return On portion of the manager's `~/.pi/agent/settings.json`. The same configuration is available as [`examples/pi-manager-settings.json`](../examples/pi-manager-settings.json). Merge it with your existing model, provider, theme, and authentication settings rather than replacing those values blindly:
+
+```json
+{
+  "packages": [
+    "git:github.com/MasuRii/pi-rtk-optimizer",
+    "npm:pi-must-have-extension",
+    "git:github.com/dataforxyz/pi-return-on",
+    {
+      "source": "git:github.com/dataforxyz/pi-extensions",
+      "extensions": [
+        "agent-guidance/agent-guidance.ts",
+        "code-actions/index.ts",
+        "files-widget/index.ts",
+        "raw-paste/index.ts",
+        "pi-ralph-wiggum/index.ts",
+        "session-recap/index.ts",
+        "tab-status/tab-status.ts",
+        "usage-extension/index.ts"
+      ]
+    },
+    "git:github.com/dataforxyz/pi-spend",
+    "npm:pi-prompt-template-model",
+    "git:github.com/dataforxyz/agent-intercom-pi",
+    "npm:pi-safe-compact",
+    "npm:pi-mcp-adapter",
+    "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",
+    {
+      "source": "git:github.com/a2ajinkya/phone-pi",
+      "extensions": [
+        "extensions/mobile-persona.ts"
+      ],
+      "skills": []
+    }
+  ],
+  "returnOn": {
+    "defaultTimeout": "10m",
+    "maxTimeout": "2h",
+    "defaultDeliveryMode": "wake",
+    "defaultDeliveryNotify": "summary",
+    "triggerParentOnSummary": false
+  }
+}
+```
+
+Review third-party package code before installing it because Pi extensions run with the same machine access as Pi. Install any package that is not already present, then keep the filtered object entries above in `settings.json`:
+
+```bash
+pi install git:github.com/MasuRii/pi-rtk-optimizer
+pi install npm:pi-must-have-extension
+pi install git:github.com/dataforxyz/pi-return-on
+pi install git:github.com/dataforxyz/pi-extensions
+pi install git:github.com/dataforxyz/pi-spend
+pi install npm:pi-prompt-template-model
+pi install git:github.com/dataforxyz/agent-intercom-pi
+pi install npm:pi-safe-compact
+pi install npm:pi-mcp-adapter
+pi install git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19
+pi install git:github.com/a2ajinkya/phone-pi
+```
+
+`pi install` initially adds an unfiltered package entry. After installation, restore the filtered `pi-extensions` and `phone-pi` objects from the JSON example so Pi loads only the listed resources. Then restart Pi and verify the package list:
+
+```bash
+pi list
+```
+
+#### `/mobile` and `/default`
+
+The `/mobile` command comes from [`a2ajinkya/phone-pi`](https://github.com/a2ajinkya/phone-pi), specifically [`extensions/mobile-persona.ts`](https://github.com/a2ajinkya/phone-pi/blob/master/extensions/mobile-persona.ts).
+
+The extension switches Pi to a user-supplied mobile system prompt stored at:
+
+```text
+~/.pi/agent/SYSTEM-mobile.md
+```
+
+Create that file with the instructions you want Pi to use on a phone or constrained terminal. A copyable version is included at [`examples/SYSTEM-mobile.md`](../examples/SYSTEM-mobile.md). For example:
+
+```markdown
+You are running in a mobile terminal. Keep responses compact, avoid wide tables,
+prefer short commands, minimize output, and ask before starting long interactive
+or resource-heavy operations.
+```
+
+Use:
+
+```text
+/mobile   enable the mobile persona
+/default  return to Pi's normal system prompt
+```
+
+The setting persists through `~/.pi/agent/.mobile-persona` until `/default` removes it. If `SYSTEM-mobile.md` does not exist, enabling `/mobile` will leave the next agent start without a prompt file to load, so create the file before using the command.
+
 ### OpenCode
 
 Clone and build the adapter:

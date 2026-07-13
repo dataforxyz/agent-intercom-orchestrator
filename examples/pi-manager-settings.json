@@ -1,0 +1,40 @@
+{
+  "packages": [
+    "git:github.com/MasuRii/pi-rtk-optimizer",
+    "npm:pi-must-have-extension",
+    "git:github.com/dataforxyz/pi-return-on",
+    {
+      "source": "git:github.com/dataforxyz/pi-extensions",
+      "extensions": [
+        "agent-guidance/agent-guidance.ts",
+        "code-actions/index.ts",
+        "files-widget/index.ts",
+        "raw-paste/index.ts",
+        "pi-ralph-wiggum/index.ts",
+        "session-recap/index.ts",
+        "tab-status/tab-status.ts",
+        "usage-extension/index.ts"
+      ]
+    },
+    "git:github.com/dataforxyz/pi-spend",
+    "npm:pi-prompt-template-model",
+    "git:github.com/dataforxyz/agent-intercom-pi",
+    "npm:pi-safe-compact",
+    "npm:pi-mcp-adapter",
+    "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",
+    {
+      "source": "git:github.com/a2ajinkya/phone-pi",
+      "extensions": [
+        "extensions/mobile-persona.ts"
+      ],
+      "skills": []
+    }
+  ],
+  "returnOn": {
+    "defaultTimeout": "10m",
+    "maxTimeout": "2h",
+    "defaultDeliveryMode": "wake",
+    "defaultDeliveryNotify": "summary",
+    "triggerParentOnSummary": false
+  }
+}
