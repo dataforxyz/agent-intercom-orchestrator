@@ -2,13 +2,15 @@
 
 This whole thing started because AI kept stopping early.
 
-It would do most of the task, then tell me it was finished. So I would explain what it did wrong. I would point out the part it skipped, the thing it didn't check, or why what it said was done was not actually done.
+It would do most of the task, then tell me it was finished. Codex would say would you like me to more. claude would say i finished and its the best. 
+
+So I would explain what it did wrong. I would point out the part it skipped, the thing it didn't check, or why what it said was done was not actually done.
 
 Then it would go back and usually find more work.
 
 At first, I thought the explanation was what made it work. Like I had to understand the problem and write a good correction so the AI knew exactly what to fix.
 
-But after doing this over and over, I got lazy. Instead of explaining everything again, I started saying stuff like:
+But after doing this over and over, I got lazy. Instead of explaining everything again, I started queing stuff like:
 
 - Fix it
 - You didn't finish
@@ -31,7 +33,7 @@ There was still something unresolved, and the AI wanted to respond to it. It wan
 
 ## So What If Another AI Does That Instead of Me?
 
-Once I noticed this, I started thinking about how to keep it going without me sitting there typing `lol` every time an agent stopped early.
+Once I noticed this, I started thinking about how to keep it going without me dumb queing `lol` every time an agent stopped early.
 
 One AI is trying to say the work is done. Another AI is trying to say no, it isn't.
 
@@ -44,6 +46,8 @@ Really, either answer is useful because it forces another pass.
 This is not about making two agents politely agree with each other. Agreeing too fast is the problem.
 
 We want one trying to finish and one refusing to believe it without proof.
+
+So one agent is told this will be wrong get proof if it is right. The other is told this doesnt exsist or is broken make it work. 
 
 ## Using the Same Model Is Not as Interesting
 
@@ -59,7 +63,7 @@ The same model inside Pi is not exactly the same as that model inside Codex, Cla
 
 All of those differences increase the number of possible outcomes.
 
-We don't need every answer to be correct. We need more chances for one of the answers to find the thing everybody else missed.
+We don't need every answer to be correct. We less chance they are wrong the same way.
 
 ## Subagents Don't Do the Same Thing
 
@@ -77,7 +81,7 @@ We should still use subagents for research and parallel work. They just don't re
 
 This also made me think differently about spelling and punctuation.
 
-I don't write like an AI. Sometimes I misspell stuff, don't use punctuation, or split a word in a weird place. I might type `get sis` when I meant `gets is`.
+I don't write like an AI. Sometimes I misspell stuff, don't use punctuation, or spli ta word in a we ird place.
 
 An AI would probably never create that exact message for itself.
 
@@ -93,7 +97,7 @@ There is a limit to this.
 
 After enough compactions, agents start getting weird. They forget why something happened, repeat old ideas, or get stuck inside a bad summary. Letting two giant contexts argue forever will eventually make both of them worse.
 
-Ralph is still better for the long loop because it resets the context.
+Ralph is still better for the long loop because it resets the context. A couple compactions in a single loop is just fine. I find 5-10 compactions when things start to get weird.
 
 Intercom can be used between those resets. Let the agents go back and forth for a while. Then rewrite the notes with what is actually true now. Keep the goal, the proof, and the things that are still wrong. Remove the old garbage. Then start the next Ralph loop from that.
 
@@ -101,7 +105,7 @@ Another thing I want to test is having a different model do a cleanup between Ra
 
 ## Somebody Still Has to Be the Manager
 
-If both models want the last word, they can also argue forever about nothing.
+If both models want the last word, they can also argue forever about nothing. So you cant have them talk directly as if its the user. It has to be a tool call cause then they can both have the last word after talling each other they are done. 
 
 So there still needs to be a manager that decides:
 
@@ -117,16 +121,6 @@ Right now, Pi is the best manager for this. Intercom is native, and incoming mes
 OpenCode is probably second because its plugin can inject the messages back into the session.
 
 Claude and Codex work, but their implementations have more stuff in the middle. Codex needs the `coi` wrapper and App Server. Claude needs `cci`, headless `claude -p`, or the Monitor setup. They are still good workers and challengers. They just are not as clean for being the main manager.
-
-## Intercom Still Has One Problem Here
-
-Sometimes an agent sends an `ask`, then gets held up while the other agent takes forever to even know there is a message.
-
-There should be more stop points and some way to say this message is urgent.
-
-Normal can wait for the next safe point. Urgent should show up as soon as the harness can do it. Stop should tell the worker to pause or cancel what it is doing.
-
-Not every harness can really interrupt the middle of a turn. That is fine, but Intercom should be clear about the difference between a message being queued and the agent actually seeing it.
 
 ## That Is the Idea
 
