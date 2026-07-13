@@ -2,6 +2,8 @@
 
 This guide explains how to install each Agent Intercom adapter, choose a manager harness, create persistent workers, define ownership and permissions, require proof, and clean up safely.
 
+For a copyable prompt that turns these rules into instructions for a Pi manager, see [Example Manager Prompt](example-manager-prompt.md).
+
 ## Recommended manager order
 
 For the current implementations:
