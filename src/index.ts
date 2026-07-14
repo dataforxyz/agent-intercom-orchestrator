@@ -120,6 +120,10 @@ function formatWorkers(workers: WorkerRecord[]): string {
   return workers.length === 0 ? "No managed workers." : workers.map(formatWorker).join("\n");
 }
 
+export function workersAttachedToManager(workers: WorkerRecord[], sessionId: string): WorkerRecord[] {
+  return workers.filter((worker) => worker.managerSessionId === sessionId);
+}
+
 function extractWorkers(state: WorkerStateFile, id?: string): WorkerRecord[] {
   if (!id) return [...state.workers];
   const worker = state.workers.find((candidate) => candidate.id === id);
@@ -184,8 +188,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const updateStatus = async (ctx = currentCtx) => {
     if (!ctx) return;
     const state = await store.read();
-    const running = state.workers.filter((worker) => isLiveState(worker.state)).length;
-    const stale = state.workers.filter((worker) => cleanupReason(worker)).length;
+    const attached = workersAttachedToManager(state.workers, managerSessionId(ctx));
+    const running = attached.filter((worker) => isLiveState(worker.state)).length;
+    const stale = attached.filter((worker) => cleanupReason(worker)).length;
     ctx.ui.setStatus(STATUS_KEY, running === 0 && stale === 0 ? undefined : `agents ${running}${stale ? ` · stale ${stale}` : ""}`);
   };
 
@@ -542,11 +547,15 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("agents", {
-    description: "Show managed Agent Intercom coworkers",
-    handler: async (_args, ctx) => {
+    description: "Show coworkers attached to this Pi session; use /agents all for every managed worker",
+    handler: async (args, ctx) => {
       if (!config) await loadConfig();
-      const text = formatWorkers(await reconcile());
-      if (ctx.hasUI) await ctx.ui.editor("Managed coworkers", text);
+      const workers = await reconcile();
+      const visible = args.trim().toLowerCase() === "all"
+        ? workers
+        : workersAttachedToManager(workers, managerSessionId(ctx));
+      const text = formatWorkers(visible);
+      if (ctx.hasUI) await ctx.ui.editor(args.trim().toLowerCase() === "all" ? "All managed coworkers" : "Coworkers attached to this Pi", text);
       else ctx.ui.notify(text, "info");
     },
   });

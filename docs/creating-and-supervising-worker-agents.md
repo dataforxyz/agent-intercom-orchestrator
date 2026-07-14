@@ -385,6 +385,8 @@ agent_fleet({ action: "adopt", id: "architecture-advisor" })
 
 Stop and renew refuse live workers owned by another manager session until this handoff occurs. `adopt` is an explicit transfer and does not try to prove that the previous manager is offline, so coordinate it rather than using it to steal a coworker from another live manager.
 
+The Pi footer and `/agents` are scoped by `managerSessionId`, following the same parent-session idea used by `pi-subagents`: each Pi TUI sees only coworkers it spawned or adopted. Use `/agents all` or the `agent_fleet` `list` action when you intentionally need the global owned-worker inventory.
+
 Leases are the final garbage-collection boundary: startup cleanup and `/agents-cleanup` may stop any orchestrator-owned worker after its lease expires, even when its original manager session is gone. Completed one-shot units are retired automatically after reconciliation so their retained exit status does not accumulate in systemd.
 
 This prevents:

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_CONFIG, mergeConfig, readConfig, writeConfig, writeConfigDefaults } from "../src/config.ts";
-import { parsePiModels } from "../src/index.ts";
+import { parsePiModels, workersAttachedToManager } from "../src/index.ts";
 import { WorkerStore } from "../src/store.ts";
 import { launchUnit, makeUnitName, parseDurationToSeconds, sanitizeUnitPart } from "../src/systemd.ts";
 import type { WorkerRecord } from "../src/types.ts";
@@ -98,6 +98,18 @@ test("unit status maps to normalized worker states", () => {
   assert.equal(stateFromUnit({ exists: false }, "running"), "lost");
   assert.equal(stateFromUnit({ exists: false }, "completed"), "completed");
   assert.equal(stateFromUnit({ exists: false }, "stopped"), "stopped");
+});
+
+test("Pi agent-info views only include workers attached to that manager session", () => {
+  const first = createSystemdRecord({
+    id: "first-worker", runId: "run-a", harness: "pi", role: "advisor", task: "a", cwd: "/tmp", profile: "pi-peer",
+    unit: "first.service", managerSessionId: "pi-session-a", config: DEFAULT_CONFIG,
+  });
+  const second = createSystemdRecord({
+    id: "second-worker", runId: "run-b", harness: "codex", role: "builder", task: "b", cwd: "/tmp", profile: "codex-safe",
+    unit: "second.service", managerSessionId: "pi-session-b", config: DEFAULT_CONFIG,
+  });
+  assert.deepEqual(workersAttachedToManager([first, second], "pi-session-a").map((worker) => worker.id), ["first-worker"]);
 });
 
 test("cleanup only selects owned live workers with expired leases", () => {
