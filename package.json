@@ -2,7 +2,7 @@
   "name": "agent-intercom-orchestrator",
   "version": "0.1.0",
   "description": "Pi extension for creating and managing independent Agent Intercom coworkers across Pi, Codex, Claude Code, and OpenCode",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "bin": {
     "agent-intercom-fleet": "./src/agent-fleet-cli.mjs"
@@ -29,7 +29,9 @@
     "examples/**/*",
     "docs/**/*",
     "README.md",
-    "LICENSE"
+    "CHANGELOG.md",
+    "LICENSE",
+    "COPYRIGHT"
   ],
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts",

@@ -111,4 +111,8 @@ The Agent Intercom family grew from [Nico Bailon's original `pi-intercom`](https
 
 ## License
 
-MIT
+Agent Intercom Orchestrator is licensed under the [GNU Affero General Public
+License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`). If you modify this
+software and make the modified version available to users over a network, the
+AGPL requires you to offer those users the corresponding source code. Versions
+already published under MIT remain available under their original terms.
