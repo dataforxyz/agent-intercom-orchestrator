@@ -6,7 +6,7 @@ One agent builds and tries to prove the work is finished. Another agent challeng
 
 A manager controls the agents, evidence, limits, context resets, and stopping rule so the useful disagreement does not turn into an endless argument.
 
-> **Status:** A first-draft Pi extension now provides an `agent_fleet` tool for owned coworker lifecycle, systemd-cgroup cleanup, leases, model and effort selection, diagnostics, enumeration, and interactive defaults. Pi, Codex, Claude, and OpenCode can all run as persistent Intercom peers; OpenCode also has a one-shot profile.
+> **Status:** The orchestrator provides one `agent_fleet` lifecycle implementation for Pi and opt-in OpenCode managers, with systemd-cgroup cleanup, leases, adoption, durable OpenCode readiness/session resume, model and variant selection, diagnostics, enumeration, and interactive Pi defaults. Pi, Codex, Claude, and OpenCode can all run as persistent Intercom peers; OpenCode also has a one-shot profile.
 
 ## First Draft
 
@@ -52,7 +52,24 @@ See [`examples/orchestrator-config.json`](examples/orchestrator-config.json) and
 | Codex | [`agent-intercom-codex`](https://github.com/dataforxyz/agent-intercom-codex) | Wakeable builder through `coi` |
 | Claude Code | [`agent-intercom-claude`](https://github.com/dataforxyz/agent-intercom-claude) | Wakeable challenger or worker through `cci` |
 
-The [worker guide](docs/creating-and-supervising-worker-agents.md#install-the-adapters) contains the complete installation instructions for all four harnesses.
+The [worker guide](docs/creating-and-supervising-worker-agents.md#install-the-adapters) contains the complete installation instructions for all four harnesses, including enabling OpenCode as the primary manager.
+
+## Pi and OpenCode manager parity
+
+Pi and OpenCode now use the same worker store and lifecycle implementation. Pi exposes it through the extension tool, scoped footer, and `/agents*` commands. OpenCode exposes it through an opt-in native tool that invokes the packaged `agent-intercom-fleet` CLI.
+
+```bash
+cd /path/to/agent-intercom-orchestrator
+npm install
+npm link
+
+OPENCODE_INTERCOM_FLEET=1 \
+OPENCODE_INTERCOM_NAME=opencode-manager \
+OPENCODE_INTERCOM_SESSION_ID=opencode-manager \
+opencode
+```
+
+Only the chosen primary OpenCode manager should receive `OPENCODE_INTERCOM_FLEET=1`. See [`examples/opencode-manager-env.sh`](examples/opencode-manager-env.sh) for a reusable launcher. Owned workers suppress recursive fleet creation by default. Operational parity includes spawn, readiness, persistent OpenCode session resume, list/status/logs, leases, adoption, stop/forget, cleanup, cgroup verification, model enumeration, and model-specific OpenCode variants. Pi still has richer native menus and footer presentation; OpenCode provides the same ownership operations as tools rather than copying Pi's TUI.
 
 ## The Basic Loop
 

@@ -116,9 +116,9 @@ So there still needs to be a manager that decides:
 - When to make them stop
 - When to rewrite the notes and start another loop
 
-Right now, Pi is the best manager for this. Intercom is native, and incoming messages can become real visible turns. Pi can also watch the workers and the worktrees and stop things when they need to stop.
+Pi is still the nicest manager UI for this. Intercom is native, incoming messages become real visible turns, and the `/agents` menus and footer make the workers easy to see.
 
-OpenCode is probably second because its plugin can inject the messages back into the session.
+OpenCode can now manage the same fleet too. Its opt-in `agent_fleet` tool uses the exact same worker store, leases, adoption rules, systemd cgroups, logs, and cleanup as Pi. It also persists inbound messages, waits for real plugin/session readiness, and resumes the same OpenCode session after a restart. So the management behavior is equal now even though the screen and plugin APIs are different.
 
 Claude and Codex work, but their implementations have more stuff in the middle. Codex needs the `coi` wrapper and App Server. Claude needs `cci`, headless `claude -p`, or the Monitor setup. They are still good workers and challengers. They just are not as clean for being the main manager.
 

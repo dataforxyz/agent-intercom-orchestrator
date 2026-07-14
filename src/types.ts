@@ -65,6 +65,9 @@ export interface WorkerRecord {
   intercomTarget?: string;
   unit?: string;
   mainPid?: number;
+  externalSessionId?: string;
+  healthPath?: string;
+  runtimeStatePath?: string;
   createdAt: number;
   updatedAt: number;
   leaseExpiresAt: number;

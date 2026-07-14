@@ -4,6 +4,9 @@
   "description": "Pi extension for creating and managing independent Agent Intercom coworkers across Pi, Codex, Claude Code, and OpenCode",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "agent-intercom-fleet": "./src/agent-fleet-cli.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dataforxyz/agent-intercom-orchestrator.git"

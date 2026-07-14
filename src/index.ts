@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -37,6 +40,7 @@ const ACTIONS = [
   "capabilities",
   "profiles",
   "models",
+  "variants",
   "config",
 ] as const;
 const HARNESSES = ["pi", "codex", "claude", "opencode"] as const;
@@ -56,6 +60,7 @@ const AgentFleetParams = Type.Object({
   model: Type.Optional(Type.String({ description: "Harness model name or provider/model identifier" })),
   effort: Type.Optional(StringEnum(EFFORTS)),
   instructions: Type.Optional(Type.String({ description: "Additional standing instructions for the coworker" })),
+  fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
   execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup; false previews it" })),
   lines: Type.Optional(Type.Number({ description: "Journal lines for logs (1-500)" })),
 });
@@ -71,6 +76,7 @@ type FleetParams = {
   model?: string;
   effort?: Effort;
   instructions?: string;
+  fresh?: boolean;
   execute?: boolean;
   lines?: number;
 };
@@ -94,6 +100,49 @@ function managerSessionId(ctx: ExtensionContext): string {
   return ctx.sessionManager.getSessionId() || ctx.sessionManager.getSessionFile() || `process-${process.pid}`;
 }
 
+type OpenCodePeerHealth = {
+  runId?: string;
+  ready?: boolean;
+  connected?: boolean;
+  openCodeSessionId?: string;
+  serverUrl?: string;
+  status?: string;
+  error?: string;
+  updatedAt?: number;
+};
+
+async function readOpenCodePeerHealth(path: string): Promise<OpenCodePeerHealth | undefined> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as OpenCodePeerHealth;
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForOpenCodePeerHealth(path: string, runId: string, timeoutMs = 60000): Promise<OpenCodePeerHealth> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const health = await readOpenCodePeerHealth(path);
+    if (health?.runId === runId && health.error) throw new Error(`OpenCode peer failed readiness: ${health.error}`);
+    if (health?.runId === runId && health.ready === true && health.connected === true && health.openCodeSessionId) return health;
+    await delay(100);
+  }
+  throw new Error(`Timed out waiting for OpenCode peer readiness at ${path}`);
+}
+
+async function persistOpenCodePeerState(path: string, workerId: string, sessionId: string, cwd: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({
+    version: 1,
+    workerId,
+    sessionId,
+    directory: cwd,
+    updatedAt: Date.now(),
+  }, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
 function runnerFor(pi: ExtensionAPI): CommandRunner {
   return {
     async exec(command, args, options) {
@@ -112,8 +161,9 @@ function formatWorker(worker: WorkerRecord): string {
   const unit = worker.unit ? ` unit=${worker.unit}` : "";
   const model = worker.model ? ` model=${worker.model}` : "";
   const effort = worker.effort ? ` effort=${worker.effort}` : "";
+  const externalSession = worker.externalSessionId ? ` session=${worker.externalSessionId}` : "";
   const error = worker.lastError ? ` error=${worker.lastError}` : "";
-  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${error}`;
+  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${error}`;
 }
 
 function formatWorkers(workers: WorkerRecord[]): string {
@@ -129,6 +179,29 @@ function extractWorkers(state: WorkerStateFile, id?: string): WorkerRecord[] {
   const worker = state.workers.find((candidate) => candidate.id === id);
   if (!worker) throw new Error(`Unknown managed worker: ${id}`);
   return [worker];
+}
+
+export type OpenCodeModelInfo = { id: string; variants: string[] };
+
+export function parseOpenCodeModelsVerbose(output: string): OpenCodeModelInfo[] {
+  const result: OpenCodeModelInfo[] = [];
+  const lines = output.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const id = lines[index].trim();
+    if (!/^[^\s/]+\/[^\s]+$/.test(id)) continue;
+    let json = "";
+    for (index += 1; index < lines.length; index += 1) {
+      json += `${lines[index]}\n`;
+      try {
+        const parsed = JSON.parse(json) as { variants?: Record<string, unknown> };
+        result.push({ id, variants: Object.keys(parsed.variants ?? {}).sort() });
+        break;
+      } catch {
+        // Continue until the complete pretty-printed model object is buffered.
+      }
+    }
+  }
+  return result;
 }
 
 export function parsePiModels(output: string): string[] {
@@ -173,12 +246,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const agentDir = getAgentDir();
   const configPath = join(agentDir, "intercom", "orchestrator", "config.json");
   const statePath = join(agentDir, "intercom", "orchestrator", "workers.json");
+  const openCodePeerDir = join(agentDir, "intercom", "orchestrator", "opencode-peers");
   const store = new WorkerStore(statePath);
   const runner = runnerFor(pi);
   let config: OrchestratorConfig;
   let currentCtx: ExtensionContext | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
   const modelCache = new Map<Harness, { expiresAt: number; models: string[] }>();
+  let openCodeModelInfoCache: { expiresAt: number; models: OpenCodeModelInfo[] } | undefined;
 
   const loadConfig = async () => {
     config = await readConfig(configPath);
@@ -199,7 +274,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const observations = await Promise.all(
       snapshot.workers
         .filter((worker): worker is WorkerRecord & { unit: string } => Boolean(worker.unit))
-        .map(async (worker) => ({ id: worker.id, runId: worker.runId, unit: worker.unit, status: await getUnitStatus(runner, worker.unit) })),
+        .map(async (worker) => ({
+          id: worker.id,
+          runId: worker.runId,
+          unit: worker.unit,
+          status: await getUnitStatus(runner, worker.unit),
+          health: worker.healthPath ? await readOpenCodePeerHealth(worker.healthPath) : undefined,
+        })),
     );
     const { workers, retireUnits } = await store.mutate((state) => {
       const retireUnits: string[] = [];
@@ -207,6 +288,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         const worker = state.workers.find((candidate) => candidate.id === observation.id && candidate.runId === observation.runId && candidate.unit === observation.unit);
         if (!worker) continue;
         const nextState = stateFromUnit(observation.status, worker.state);
+        if (observation.health?.runId === worker.runId) {
+          worker.backendDetails = observation.health;
+          if (observation.health.openCodeSessionId) worker.externalSessionId = observation.health.openCodeSessionId;
+          if (observation.health.error) worker.lastError = observation.health.error;
+          else if (observation.health.ready && nextState !== "failed") worker.lastError = undefined;
+        }
         if (nextState !== worker.state || observation.status.mainPid !== worker.mainPid) {
           worker.state = nextState;
           worker.mainPid = observation.status.mainPid;
@@ -253,18 +340,27 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return candidates;
   };
 
+  const enumerateOpenCodeModelInfo = async (): Promise<OpenCodeModelInfo[]> => {
+    if (openCodeModelInfoCache && openCodeModelInfoCache.expiresAt > Date.now()) {
+      return structuredClone(openCodeModelInfoCache.models);
+    }
+    const profileName = config.defaultProfiles.opencode;
+    const command = profileName ? config.profiles[profileName]?.command : "opencode";
+    const executable = command ? resolveProfileCommand(command) : undefined;
+    if (!executable) return [];
+    const result = await runner.exec(executable, ["models", "--verbose"], { timeout: 30000 });
+    if (result.code !== 0) return [];
+    const models = parseOpenCodeModelsVerbose(result.stdout);
+    openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models };
+    return structuredClone(models);
+  };
+
   const enumerateModels = async (harness: Harness): Promise<string[]> => {
     const cached = modelCache.get(harness);
     if (cached && cached.expiresAt > Date.now()) return [...cached.models];
     const models = new Set(configuredModels(config, harness));
     if (harness === "opencode") {
-      const profileName = config.defaultProfiles.opencode;
-      const command = profileName ? config.profiles[profileName]?.command : "opencode";
-      const executable = command ? resolveProfileCommand(command) : undefined;
-      if (executable) {
-        const result = await runner.exec(executable, ["models"], { timeout: 30000 });
-        if (result.code === 0) for (const line of result.stdout.split("\n")) if (line.trim()) models.add(line.trim());
-      }
+      for (const info of await enumerateOpenCodeModelInfo()) models.add(info.id);
     } else {
       const piProfileName = config.defaultProfiles.pi;
       const piCommand = piProfileName ? config.profiles[piProfileName]?.command : "pi";
@@ -310,6 +406,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const spawnWorker = async (params: FleetParams, ctx: ExtensionContext): Promise<WorkerRecord> => {
     const resolved = resolveSpawn(params, ctx);
     const { harness, role, task, cwd, profileName, model, effort, instructions } = resolved;
+    if (harness === "opencode" && model && effort && effort !== "off") {
+      const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === model);
+      if (info && !info.variants.includes(effort)) {
+        throw new Error(`OpenCode model ${model} does not support variant ${effort}; available variants: ${info.variants.join(", ") || "none"}`);
+      }
+    }
     const profile = config.profiles[profileName];
     if (!profile) throw new Error(`Unknown launch profile: ${profileName}`);
     if (profile.harness !== harness) throw new Error(`Profile ${profileName} launches ${profile.harness}, not ${harness}`);
@@ -335,6 +437,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       managerSessionId: managerSessionId(ctx),
       config,
     });
+    const persistentOpenCode = harness === "opencode" && profile.mode === "persistent";
+    if (persistentOpenCode) {
+      worker.healthPath = join(openCodePeerDir, `${id}.health.json`);
+      worker.runtimeStatePath = join(openCodePeerDir, `${id}.state.json`);
+      await rm(worker.healthPath, { force: true });
+      if (params.fresh) await rm(worker.runtimeStatePath, { force: true });
+    }
     await store.upsert(worker);
     try {
       const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions });
@@ -354,12 +463,24 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         cwd,
         maxRuntime: profile.maxRuntime || config.maxRuntime,
         stopTimeoutSeconds: config.stopTimeoutSeconds,
-        environment: buildWorkerEnvironment(harness, id, role, model, {
-          runId,
-          unit,
-          managerSessionId: worker.managerSessionId,
-        }),
+        environment: {
+          ...buildWorkerEnvironment(harness, id, role, model, {
+            runId,
+            unit,
+            managerSessionId: worker.managerSessionId,
+          }),
+          ...(persistentOpenCode ? {
+            AGENT_INTERCOM_OPENCODE_HEALTH_PATH: worker.healthPath!,
+            AGENT_INTERCOM_OPENCODE_STATE_PATH: worker.runtimeStatePath!,
+          } : {}),
+        },
       });
+      if (persistentOpenCode) {
+        const health = await waitForOpenCodePeerHealth(worker.healthPath!, runId);
+        worker.externalSessionId = health.openCodeSessionId;
+        worker.backendDetails = health;
+        await persistOpenCodePeerState(worker.runtimeStatePath!, id, health.openCodeSessionId!, cwd);
+      }
       const status = await getUnitStatus(runner, unit);
       worker.state = stateFromUnit(status, "provisioning");
       worker.mainPid = status.mainPid;
@@ -367,6 +488,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       await store.upsert(worker);
       return worker;
     } catch (error) {
+      await stopUnit(runner, unit).catch(() => undefined);
       worker.state = "failed";
       worker.updatedAt = Date.now();
       worker.lastError = error instanceof Error ? error.message : String(error);
@@ -534,8 +656,22 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "models") {
         const harness = params.harness || config.defaultHarness;
+        if (harness === "opencode") {
+          const info = await enumerateOpenCodeModelInfo();
+          const text = info.length
+            ? `opencode models:\n${info.map((model) => `${model.id}${model.variants.length ? ` [${model.variants.join(", ")}]` : " [no variants]"}`).join("\n")}`
+            : "No opencode models could be enumerated.";
+          return textResult(text, { harness, models: info.map((model) => model.id), modelInfo: info });
+        }
         const models = await enumerateModels(harness);
         return textResult(models.length ? `${harness} models:\n${models.join("\n")}` : `No ${harness} models could be enumerated.`, { harness, models });
+      }
+
+      if (params.action === "variants") {
+        if (!params.model) throw new Error("variants requires model");
+        const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === params.model);
+        if (!info) throw new Error(`OpenCode model not found: ${params.model}`);
+        return textResult(info.variants.length ? `${info.id} variants:\n${info.variants.join("\n")}` : `${info.id} has no configured variants.`, { model: info.id, variants: info.variants });
       }
 
       if (params.action === "config") return textResult(formatConfig(config, configPath), { config, configPath });
@@ -576,9 +712,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const requested = args.trim();
       const harness = HARNESSES.includes(requested as Harness) ? requested as Harness : config.defaultHarness;
       const models = await enumerateModels(harness);
-      const text = models.length ? models.join("\n") : `No ${harness} models could be enumerated.`;
-      if (ctx.hasUI) await ctx.ui.editor(`${harness} models`, text);
-      else ctx.ui.notify(text, "info");
+      const text = harness === "opencode"
+        ? (await enumerateOpenCodeModelInfo()).map((model) => `${model.id}${model.variants.length ? ` [${model.variants.join(", ")}]` : " [no variants]"}`).join("\n")
+        : models.join("\n");
+      const display = text || `No ${harness} models could be enumerated.`;
+      if (ctx.hasUI) await ctx.ui.editor(`${harness} models`, display);
+      else ctx.ui.notify(display, "info");
     },
   });
 
@@ -605,9 +744,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const modelOptions = ["(harness default)", ...models];
       const modelChoice = await ctx.ui.select("Model", preferredFirst(modelOptions, defaultModel || "(harness default)"));
       if (!modelChoice) return;
-      const effortChoice = await ctx.ui.select("Effort", preferredFirst(["(harness default)", ...HARNESS_EFFORTS[harness]], preset?.effort || config.defaultEfforts[harness] || "(harness default)"));
+      let effortOptions: string[] = ["(harness default)", ...HARNESS_EFFORTS[harness]];
+      let defaultEffort = preset?.effort || config.defaultEfforts[harness] || "(harness default)";
+      if (harness === "opencode" && modelChoice !== "(harness default)") {
+        const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === modelChoice);
+        const variants = info?.variants.filter((variant): variant is Effort => EFFORTS.includes(variant as Effort)) ?? [];
+        effortOptions = ["(model default)", "off", ...variants];
+        if (!effortOptions.includes(defaultEffort)) defaultEffort = "(model default)";
+      }
+      const effortChoice = await ctx.ui.select("Effort / model variant", preferredFirst(effortOptions, defaultEffort));
       if (!effortChoice) return;
-      const effort = effortChoice === "(harness default)" ? undefined : effortChoice as Effort;
+      const effort = effortChoice === "(harness default)" || effortChoice === "(model default)" ? undefined : effortChoice as Effort;
       const suggestedId = `${harness}-${role}-${newRunId().slice(0, 6)}`;
       const id = (await ctx.ui.input("Worker id", suggestedId))?.trim() || suggestedId;
       const cwd = (await ctx.ui.input("Working directory", ctx.cwd))?.trim() || ctx.cwd;
@@ -651,6 +798,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           await writeConfigDefaults(configPath, draft);
           config = draft;
           modelCache.clear();
+          openCodeModelInfoCache = undefined;
           ctx.ui.notify(`Saved Agent Fleet defaults to ${configPath}`, "info");
           return;
         }

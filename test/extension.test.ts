@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -51,6 +51,86 @@ test("reconciliation retires completed one-shot units after preserving their com
     const saved = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(saved.workers[0].state, "completed");
     assert.equal(stopped, true);
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("persistent OpenCode spawn persists resumable state before returning ready", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-opencode-state-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    const executable = join(agentDir, "fake-opencode");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+    await writeFile(join(orchestratorDir, "config.json"), JSON.stringify({
+      profiles: {
+        "opencode-peer": { harness: "opencode", command: executable, args: [], mode: "persistent", maxRuntime: "12h" },
+      },
+    }));
+
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      async exec(command: string, args: string[]) {
+        if (command === "systemd-run") {
+          const environment = Object.fromEntries(args
+            .filter((arg) => arg.startsWith("--setenv="))
+            .map((arg) => {
+              const value = arg.slice("--setenv=".length);
+              const separator = value.indexOf("=");
+              return [value.slice(0, separator), value.slice(separator + 1)];
+            }));
+          await mkdir(join(orchestratorDir, "opencode-peers"), { recursive: true });
+          await writeFile(environment.AGENT_INTERCOM_OPENCODE_HEALTH_PATH, JSON.stringify({
+            version: 1,
+            runId: environment.AGENT_INTERCOM_RUN_ID,
+            ready: true,
+            connected: true,
+            openCodeSessionId: "ses_immediate_state",
+            status: "idle",
+          }));
+          return commandResult();
+        }
+        if (command === "systemctl" && args.includes("show") && args.includes("--property=LoadState,ActiveState,SubState,MainPID,Result,ExecMainStatus")) {
+          return { ...commandResult(), stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\n" };
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: "/tmp", mode: "rpc", hasUI: false,
+      sessionManager: { getSessionId: () => "opencode-state-manager", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?opencode-state=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+
+    const result = await tools.get("agent_fleet").execute(
+      "spawn-opencode-state",
+      { action: "spawn", harness: "opencode", profile: "opencode-peer", id: "state-race", cwd: "/tmp", task: "wait" },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.match(result.content[0].text, /session=ses_immediate_state/);
+    const state = JSON.parse(await readFile(join(orchestratorDir, "opencode-peers", "state-race.state.json"), "utf8"));
+    assert.equal(state.workerId, "state-race");
+    assert.equal(state.sessionId, "ses_immediate_state");
+    assert.equal(state.directory, "/tmp");
+
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

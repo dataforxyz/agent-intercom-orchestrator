@@ -10,7 +10,7 @@
     "pi": "codex/gpt-5.6-sol",
     "codex": "gpt-5.6-sol",
     "claude": "opus",
-    "opencode": "opencode/claude-sonnet-5"
+    "opencode": "anthropic/claude-fable-5"
   },
   "defaultEfforts": {
     "pi": "high",

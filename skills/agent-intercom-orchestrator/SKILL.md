@@ -1,6 +1,6 @@
 ---
 name: agent-intercom-orchestrator
-description: Create and manage owned independent Pi, Codex, Claude Code, and OpenCode coworkers with model/effort selection and lifecycle cleanup through the agent_fleet tool. Use when delegating persistent work, creating advisors or builder/challenger pairs, inspecting worker status, choosing models, editing defaults, or cleaning expired workers.
+description: Create and manage owned independent Pi, Codex, Claude Code, and OpenCode coworkers from Pi or an opt-in OpenCode manager, with model/variant selection, durable OpenCode session resume, and lifecycle cleanup through the shared agent_fleet tool. Use when delegating persistent work, creating advisors or builder/challenger pairs, inspecting worker status, choosing models, editing defaults, or cleaning expired workers.
 ---
 
 # Agent Intercom Orchestrator
@@ -14,7 +14,7 @@ Use `agent_fleet` instead of launching persistent harness processes directly.
 - Use unique worker ids and give each coworker an exclusive scope and explicit role.
 - All harnesses start inside systemd user services so MCP servers, sidecars, browsers, and other descendants stop with the owned cgroup.
 - After Pi, Codex, or Claude is spawned, wait for its id in `intercom({ action: "list" })`, then send the task with `intercom({ action: "send", ... })` or `ask`. OpenCode receives its initial task at launch; persistent OpenCode peers remain wakeable afterward.
-- Use `capabilities`, `profiles`, `models`, or `config` instead of guessing options.
+- Use `capabilities`, `profiles`, `models`, `variants`, or `config` instead of guessing options. OpenCode variants are model-specific.
 - Preview cleanup before executing it. Never kill or forget sessions the orchestrator does not own.
 
 ## Discover options
@@ -25,6 +25,8 @@ agent_fleet({ action: "capabilities" })
 agent_fleet({ action: "profiles" })
 agent_fleet({ action: "profiles", harness: "pi" })
 agent_fleet({ action: "models", harness: "pi" })
+agent_fleet({ action: "models", harness: "opencode" })
+agent_fleet({ action: "variants", model: "anthropic/claude-fable-5" })
 agent_fleet({ action: "config" })
 agent_fleet({ action: "list" })
 ```
@@ -82,12 +84,27 @@ agent_fleet({
   profile: "opencode-peer",
   id: "opencode-check-api",
   role: "tester",
-  model: "opencode/claude-sonnet-5",
+  model: "anthropic/claude-fable-5",
   effort: "high",
   cwd: "/path/to/worktree",
   task: "Run the smoke checks and report evidence through Intercom."
 })
 ```
+
+Persistent OpenCode spawn waits for broker/plugin/session readiness and records the OpenCode session ID. Reusing the worker ID resumes that session; pass `fresh: true` only for intentional clean context.
+
+## OpenCode as primary manager
+
+Install or link the orchestrator package bin, then start exactly one primary OpenCode manager with:
+
+```bash
+OPENCODE_INTERCOM_FLEET=1 \
+OPENCODE_INTERCOM_NAME=opencode-manager \
+OPENCODE_INTERCOM_SESSION_ID=opencode-manager \
+opencode
+```
+
+The OpenCode `agent_fleet` tool invokes the packaged `agent-intercom-fleet` CLI and uses the same state, ownership, leases, readiness, and systemd cleanup as Pi. Owned workers suppress recursive fleet registration by default.
 
 ## Lifecycle
 

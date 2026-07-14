@@ -1,8 +1,8 @@
 # Example Manager Prompt
 
-This is a reusable starting prompt for a Pi manager supervising persistent Agent Intercom workers. Replace every `<placeholder>` and remove sections that do not apply.
+This is a reusable starting prompt for a Pi or explicitly configured OpenCode manager supervising persistent Agent Intercom workers. Replace every `<placeholder>` and remove sections that do not apply.
 
-It can be adapted for an OpenCode manager, but Pi is currently preferred because Intercom is native, inbound messages can trigger visible turns, and Pi can directly supervise tmux, processes, worktrees, and the other harnesses.
+Pi provides native `/agents*` menus and a scoped footer. OpenCode can expose the same `agent_fleet` lifecycle operations by starting the primary manager with `OPENCODE_INTERCOM_FLEET=1` and the packaged `agent-intercom-fleet` CLI. Both use the same durable worker store and systemd ownership implementation.
 
 ```text
 You are the primary manager for this task. You own the plan, worker lifecycle,
@@ -59,8 +59,8 @@ HARNESS CHOICE
 
 Prefer the harness that fits the role:
 
-- Pi: primary manager, proof advisor, planner, or cross-repo supervisor
-- OpenCode: secondary manager, implementation worker, or visual reviewer
+- Pi: primary manager with native menus/footer, proof advisor, planner, or cross-repo supervisor
+- OpenCode: primary manager through opt-in `agent_fleet`, persistent implementation worker, or visual reviewer
 - Codex through `coi`: implementation worker; use a dedicated minimal profile
   such as `coim` when normal-profile tools are unnecessary
 - Claude Code through `cci` or `ccim`: independent challenger, reviewer, or
@@ -97,43 +97,41 @@ Suggested format:
 
 STARTING PERSISTENT WORKERS
 
-Keep persistent workers alive in tmux. Use commands appropriate to the local
-aliases and permission policy.
+Use `agent_fleet` rather than tmux when the orchestrator is installed. It owns the complete process tree in an exact systemd cgroup.
 
 Wakeable Codex example:
 
-  tmux new-session -d -s <worker-id> \
-    'cd <worktree> && coim --no-tui \
-      --name <worker-id> \
-      --id <worker-id> \
-      --cwd <worktree> \
-      --instructions "<role instructions>"'
+  agent_fleet({
+    action: "spawn", harness: "codex", profile: "codex-minimal",
+    id: "<worker-id>", role: "builder", cwd: "<worktree>",
+    model: "<model>", effort: "high", task: "<assignment>"
+  })
 
 Wakeable Claude example:
 
-  tmux new-session -d -s <worker-id> \
-    'cd <worktree> && cci --safe \
-      --name <worker-id> \
-      --id <worker-id> \
-      --cwd <worktree> \
-      --instructions "<role instructions>"'
+  agent_fleet({
+    action: "spawn", harness: "claude", profile: "claude-safe",
+    id: "<worker-id>", role: "challenger", cwd: "<worktree>",
+    model: "<model>", effort: "max", task: "<assignment>"
+  })
 
 Pi peer example:
 
-  tmux new-session -d -s <worker-id> \
-    -c <worktree> \
-    'pi --name <worker-id> --thinking high'
+  agent_fleet({
+    action: "spawn", harness: "pi", profile: "pi-peer",
+    id: "<worker-id>", role: "advisor", cwd: "<worktree>",
+    model: "<provider/model>", effort: "high", task: "<assignment>"
+  })
 
-OpenCode peer example:
+Persistent OpenCode example:
 
-  tmux new-session -d -s <worker-id> \
-    -c <worktree> \
-    'OPENCODE_INTERCOM_NAME=<worker-id> \
-     OPENCODE_INTERCOM_SESSION_ID=<worker-id> \
-     opencode'
+  agent_fleet({
+    action: "spawn", harness: "opencode", profile: "opencode-peer",
+    id: "<worker-id>", role: "reviewer", cwd: "<worktree>",
+    model: "<provider/model>", effort: "high", task: "<assignment>"
+  })
 
-If the local `coim` alias or function is not installed, use `coi` with the
-explicit minimal `CODEX_HOME`, sandbox, and approval flags instead of guessing.
+Reusing an OpenCode worker ID resumes its saved OpenCode session. Add `fresh: true` only when clean context is intentional. Query `agent_fleet({ action: "variants", model: "<provider/model>" })` instead of guessing an OpenCode effort variant.
 
 For long role instructions, store the prompt under `.agent/prompts/` and use a
 small launcher script or send the assignment through Intercom. Do not maintain
@@ -143,11 +141,11 @@ REGISTRATION AND PREFLIGHT
 
 After every launch:
 
-1. Confirm the tmux session exists.
-2. Confirm the process is alive.
-3. Call Intercom `list` and confirm the exact worker name/ID.
-4. Confirm the reported cwd is the assigned worktree.
-5. Confirm there is no duplicate identity.
+1. Call `agent_fleet` status and confirm the exact owned unit and process tree.
+2. Call Intercom `list` and confirm the exact worker name/ID.
+3. Confirm the reported cwd is the assigned worktree.
+4. Confirm there is no duplicate identity.
+5. For persistent OpenCode, require the recorded OpenCode session ID and ready health state; orchestrator spawn waits for these automatically.
 6. Send an explicit start message.
 
 The first worker response must include:
@@ -268,13 +266,12 @@ filed issue fully captures the remaining work without exposing private data.
 
 STOPPING AND CLEANUP
 
-Stop workers using exact tmux sessions, sockets, PIDs, or process groups. Avoid
-broad `pkill` patterns.
+Stop orchestrator-owned workers with exact `agent_fleet` stop/forget operations. Use exact tmux sessions, sockets, PIDs, or process groups only for intentionally unmanaged legacy workers. Avoid broad `pkill` patterns.
 
 After stopping a worker, verify:
 
-- tmux session is gone
-- worker process and sidecar are gone
+- the owned systemd cgroup is empty and the unit unloads
+- worker process, browser, MCP server, and sidecar are gone
 - Intercom no longer lists the identity
 - queued late messages are not mistaken for current work
 - worktree changes and commits have been inspected

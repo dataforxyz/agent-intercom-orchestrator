@@ -8,14 +8,13 @@ For a copyable prompt that turns these rules into instructions for a Pi manager,
 
 For the current implementations:
 
-1. **Pi** — best primary manager
-2. **OpenCode** — strong second choice
-3. **Codex through `coi`** — capable manager, strongest as a wakeable worker
-4. **Claude Code through `cci`** — capable worker and advisor, with more host-level wake limitations
+1. **Pi or an explicitly configured OpenCode manager** — shared lifecycle and ownership implementation
+2. **Codex through `coi`** — capable manager, strongest as a wakeable worker
+3. **Claude Code through `cci`** — capable worker and advisor, with more host-level wake limitations
 
 This ranking is about the present Agent Intercom integrations, not overall model quality.
 
-### Why Pi is the best manager
+### Why Pi remains the default manager UI
 
 Pi exposes the integration natively as an extension. It has:
 
@@ -31,18 +30,20 @@ Pi exposes the integration natively as an extension. It has:
 
 Those properties make Pi well suited to owning worker lifecycle, assigning lanes, receiving progress, resolving asks, and deciding when the run is complete.
 
-### Why OpenCode is second
+### Why OpenCode is now an operational peer
 
-OpenCode also has a native-feeling integration:
+OpenCode has equivalent manager and persistent-worker operations where its public APIs permit them:
 
-- server plugin with intercom tools
+- server plugin with native Intercom tools
 - separate TUI plugin with `/intercom`, `/intercom-id`, **Alt+M**, and **Alt+I**
-- inbound prompt injection into the active session
+- durable inbound persistence before acknowledgement, restart replay, unresolved-ask recovery, and duplicate-turn suppression
 - busy-session follow-up through `session.promptAsync`
-- receiver acknowledgement only after injection succeeds
-- no wrapper alias required once both plugins are configured
+- run-specific readiness and health metadata
+- stable OpenCode session capture and `--session` resume after worker restart
+- model-specific variant enumeration and validation
+- opt-in native `agent_fleet` backed by the same orchestrator store, leases, adoption, systemd cgroups, logs, and cleanup as Pi
 
-It ranks behind Pi because delivery depends on OpenCode's plugin and session APIs, and the server and TUI integrations must be installed separately. Pi's extension has more direct control over transcript rendering, lifecycle status, and turn triggering.
+Pi remains the default recommendation when its scoped footer and interactive `/agents*` menus are useful. OpenCode exposes equivalent lifecycle operations as model-callable tools and requires separate server/TUI plugin installation. The difference is presentation and host API shape, not a weaker ownership backend.
 
 ### Why Codex works but is less ideal as manager
 
@@ -254,7 +255,33 @@ Add the TUI plugin separately in `~/.config/opencode/tui.json`:
 
 Do not put `dist/tui.mjs` in `opencode.json`; OpenCode uses separate server and TUI plugin loaders. Restart OpenCode after changing either file.
 
-No wrapper alias is required. Once both plugins are loaded, normal `opencode` sessions have the integration.
+No wrapper alias is required for ordinary worker sessions. Once both plugins are loaded, normal `opencode` sessions have the integration.
+
+To make one OpenCode session the primary fleet manager, install or link the orchestrator CLI:
+
+```bash
+git clone https://github.com/dataforxyz/agent-intercom-orchestrator.git
+cd agent-intercom-orchestrator
+npm install
+npm link
+```
+
+Start the manager with a stable Intercom identity and explicit fleet opt-in:
+
+```bash
+OPENCODE_INTERCOM_FLEET=1 \
+OPENCODE_INTERCOM_NAME=opencode-manager \
+OPENCODE_INTERCOM_SESSION_ID=opencode-manager \
+opencode
+```
+
+If the CLI is not linked globally, also set:
+
+```bash
+AGENT_INTERCOM_FLEET_COMMAND=/absolute/path/to/agent-intercom-orchestrator/src/agent-fleet-cli.mjs
+```
+
+Do not put `OPENCODE_INTERCOM_FLEET=1` in a machine-wide environment inherited by every session. Owned workers suppress nested fleet registration through `AGENT_INTERCOM_OWNED=1`, but explicit manager configuration keeps ownership understandable.
 
 ### Codex
 
@@ -470,7 +497,9 @@ agent_fleet({
 })
 ```
 
-The owned launcher starts `opencode serve` on a private loopback port, creates an initialized session through `opencode run --attach`, and keeps the server alive. The OpenCode Intercom plugin injects later messages into that same session, so it behaves much more like the persistent Pi, Codex, and Claude peers. Use profile `opencode-run` when a cheaper one-shot assignment is preferable.
+The owned launcher starts an authenticated `opencode serve` on a private loopback port, initializes or resumes a stable session through `opencode run --attach --session`, and keeps the server alive. Spawn does not report success until the plugin publishes matching run-specific health with an Intercom connection and active OpenCode session ID. Inbound messages are persisted before acknowledgement and replayed after restart.
+
+Reusing `id: "opencode-advisor"` resumes its OpenCode session. Pass `fresh: true` to intentionally discard the saved session for that worker ID. Use `agent_fleet({ action: "variants", model: "anthropic/claude-fable-5" })` before selecting effort; known-invalid variants are rejected before a unit is created. Use profile `opencode-run` when a cheaper one-shot assignment is preferable.
 
 ## Long instructions belong in files
 
@@ -484,7 +513,7 @@ Then have the manager read and send it, or load it into the worker instructions 
 
 ## Verify registration before assigning work
 
-Launching a process does not prove that it registered correctly, and a `--no-tui` worker may wait silently until it receives a message.
+Launching a process does not prove that it registered correctly, and a `--no-tui` worker may wait silently until it receives a message. Orchestrator-owned persistent OpenCode peers are the exception: spawn waits for run-specific plugin, Intercom, and session readiness before returning. Independent/manual sessions still require the checks below.
 
 Check:
 

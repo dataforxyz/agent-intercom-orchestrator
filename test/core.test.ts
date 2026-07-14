@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_CONFIG, mergeConfig, readConfig, writeConfig, writeConfigDefaults } from "../src/config.ts";
-import { parsePiModels, workersAttachedToManager } from "../src/index.ts";
+import { parseOpenCodeModelsVerbose, parsePiModels, workersAttachedToManager } from "../src/index.ts";
 import { WorkerStore } from "../src/store.ts";
 import { launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit } from "../src/systemd.ts";
 import type { WorkerRecord } from "../src/types.ts";
@@ -187,6 +187,19 @@ test("configuration merges profiles, defaults, and role presets without dropping
   assert.ok(config.profiles["pi-peer"]);
   assert.ok(config.profiles["codex-safe"]);
   assert.equal(config.profiles["codex-yolo"].command, "/usr/local/bin/coi-yolo");
+});
+
+test("OpenCode verbose model parsing exposes model-specific variants", () => {
+  const output = [
+    "opencode/big-pickle",
+    JSON.stringify({ id: "big-pickle", variants: {} }, null, 2),
+    "anthropic/claude-fable-5",
+    JSON.stringify({ id: "claude-fable-5", variants: { low: {}, high: {}, max: {} } }, null, 2),
+  ].join("\n");
+  assert.deepEqual(parseOpenCodeModelsVerbose(output), [
+    { id: "opencode/big-pickle", variants: [] },
+    { id: "anthropic/claude-fable-5", variants: ["high", "low", "max"] },
+  ]);
 });
 
 test("Pi model table parsing returns provider-qualified model ids", () => {
