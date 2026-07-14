@@ -85,7 +85,7 @@ All adapters share the same local broker and runtime directory. A session can on
 ### Pi
 
 ```bash
-pi install git:github.com/dataforxyz/agent-intercom-pi
+pi install npm:@dataforxyz/agent-intercom-pi
 ```
 
 Restart Pi or run `/reload` in every already-open Pi session after an update.
@@ -108,7 +108,7 @@ intercom({ action: "list" })
 Install the orchestrator as a Pi package after `agent-intercom-pi`:
 
 ```bash
-pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
 This package loads two resources automatically:
@@ -133,8 +133,8 @@ The plugin requires Linux systemd user services. `doctor` reports missing harnes
 Update both Pi packages with:
 
 ```bash
-pi update --extension git:github.com/dataforxyz/agent-intercom-pi
-pi update --extension git:github.com/dataforxyz/agent-intercom-orchestrator
+pi update --extension npm:@dataforxyz/agent-intercom-pi
+pi update --extension npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
 After updating, run `/reload` and `doctor` again. For a temporary checkout test without modifying Pi settings, use `pi -e ./src/index.ts` from the orchestrator repository.
@@ -183,8 +183,8 @@ The following is a portable copy of the package and Return On portion of the man
     },
     "git:github.com/dataforxyz/pi-spend",
     "npm:pi-prompt-template-model",
-    "git:github.com/dataforxyz/agent-intercom-pi",
-    "git:github.com/dataforxyz/agent-intercom-orchestrator",
+    "npm:@dataforxyz/agent-intercom-pi",
+    "npm:@dataforxyz/agent-intercom-orchestrator",
     "npm:pi-safe-compact",
     "npm:pi-mcp-adapter",
     "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",
@@ -215,8 +215,8 @@ pi install git:github.com/dataforxyz/pi-return-on
 pi install git:github.com/dataforxyz/pi-extensions
 pi install git:github.com/dataforxyz/pi-spend
 pi install npm:pi-prompt-template-model
-pi install git:github.com/dataforxyz/agent-intercom-pi
-pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/agent-intercom-pi
+pi install npm:@dataforxyz/agent-intercom-orchestrator
 pi install npm:pi-safe-compact
 pi install npm:pi-mcp-adapter
 pi install git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19
@@ -258,22 +258,21 @@ The setting persists through `~/.pi/agent/.mobile-persona` until `/default` remo
 
 ### OpenCode
 
-Clone and build the adapter:
+Install the adapter under OpenCode's configuration directory:
 
 ```bash
-git clone https://github.com/dataforxyz/agent-intercom-opencode.git
-cd agent-intercom-opencode
-npm install
-npm run build
+mkdir -p ~/.config/opencode
+cd ~/.config/opencode
+npm install @dataforxyz/agent-intercom-opencode
 ```
 
-Add the server plugin to `~/.config/opencode/opencode.json`:
+Add the server plugin to `~/.config/opencode/opencode.json`, using your absolute home path:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "/absolute/path/to/agent-intercom-opencode/dist/plugin.mjs"
+    "/home/you/.config/opencode/node_modules/@dataforxyz/agent-intercom-opencode/dist/plugin.mjs"
   ]
 }
 ```
@@ -284,7 +283,7 @@ Add the TUI plugin separately in `~/.config/opencode/tui.json`:
 {
   "$schema": "https://opencode.ai/tui.json",
   "plugin": [
-    "/absolute/path/to/agent-intercom-opencode/dist/tui.mjs"
+    "/home/you/.config/opencode/node_modules/@dataforxyz/agent-intercom-opencode/dist/tui.mjs"
   ]
 }
 ```
@@ -293,13 +292,10 @@ Do not put `dist/tui.mjs` in `opencode.json`; OpenCode uses separate server and 
 
 No wrapper alias is required for ordinary worker sessions. Once both plugins are loaded, normal `opencode` sessions have the integration.
 
-To make one OpenCode session the primary fleet manager, install or link the orchestrator CLI:
+To make one OpenCode session the primary fleet manager, install the orchestrator CLI:
 
 ```bash
-git clone https://github.com/dataforxyz/agent-intercom-orchestrator.git
-cd agent-intercom-orchestrator
-npm install
-npm link
+npm install -g @dataforxyz/agent-intercom-orchestrator
 ```
 
 Start the manager with a stable Intercom identity and explicit fleet opt-in:
@@ -311,7 +307,7 @@ OPENCODE_INTERCOM_SESSION_ID=opencode-manager \
 opencode
 ```
 
-If the CLI is not linked globally, also set:
+For a source checkout instead, set:
 
 ```bash
 AGENT_INTERCOM_FLEET_COMMAND=/absolute/path/to/agent-intercom-orchestrator/src/agent-fleet-cli.mjs
@@ -324,7 +320,7 @@ Do not put `OPENCODE_INTERCOM_FLEET=1` in a machine-wide environment inherited b
 Install globally:
 
 ```bash
-npm install -g github:dataforxyz/agent-intercom-codex
+npm install -g @dataforxyz/agent-intercom-codex
 ```
 
 Register the MCP server:
@@ -350,7 +346,7 @@ coi --no-tui --name worker-a --id worker-a --cwd /path/to/repo
 Install globally:
 
 ```bash
-npm install -g github:dataforxyz/agent-intercom-claude
+npm install -g @dataforxyz/agent-intercom-claude
 ```
 
 Register the MCP server:

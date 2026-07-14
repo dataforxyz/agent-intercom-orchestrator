@@ -13,9 +13,11 @@ A manager controls the agents, evidence, limits, context resets, and stopping ru
 The orchestrator is a Pi package containing both the `agent_fleet` extension and its Agent Skill. It requires Linux with a working systemd user manager. Install the Pi Intercom adapter first so managed coworkers can communicate with the manager:
 
 ```bash
-pi install git:github.com/dataforxyz/agent-intercom-pi
-pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/agent-intercom-pi
+pi install npm:@dataforxyz/agent-intercom-orchestrator
 ```
+
+For Git-pinned installs, use `git:github.com/dataforxyz/agent-intercom-pi@v0.9.1` and `git:github.com/dataforxyz/agent-intercom-orchestrator@v0.9.1` instead.
 
 Restart Pi, or run `/reload` in every already-open Pi session. Confirm both packages are installed:
 
@@ -35,8 +37,8 @@ You should also have `/agents`, `/agents-new`, `/agents-config`, `/agents-models
 To update later:
 
 ```bash
-pi update --extension git:github.com/dataforxyz/agent-intercom-pi
-pi update --extension git:github.com/dataforxyz/agent-intercom-orchestrator
+pi update --extension npm:@dataforxyz/agent-intercom-pi
+pi update --extension npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
 For a one-run checkout test without installing:
@@ -82,9 +84,7 @@ The [worker guide](docs/creating-and-supervising-worker-agents.md#install-the-ad
 Pi and OpenCode now use the same worker store and lifecycle implementation. Pi exposes it through the extension tool, scoped footer, and `/agents*` commands. OpenCode exposes it through an opt-in native tool that invokes the packaged `agent-intercom-fleet` CLI.
 
 ```bash
-cd /path/to/agent-intercom-orchestrator
-npm install
-npm link
+npm install -g @dataforxyz/agent-intercom-orchestrator
 
 OPENCODE_INTERCOM_FLEET=1 \
 OPENCODE_INTERCOM_NAME=opencode-manager \

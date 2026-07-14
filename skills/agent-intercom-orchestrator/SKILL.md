@@ -12,8 +12,8 @@ Use `agent_fleet` instead of launching persistent harness processes directly.
 For a Pi manager, install the Intercom control plane and this package, then restart Pi or run `/reload`:
 
 ```bash
-pi install git:github.com/dataforxyz/agent-intercom-pi
-pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/agent-intercom-pi
+pi install npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
 Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The package automatically loads both this Agent Skill and the Pi extension that provides `agent_fleet` plus `/agents*`. Linux systemd user services are required.

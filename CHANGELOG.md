@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1 - 2026-07-14
+
+- Publish the package under the public npm scope `@dataforxyz/agent-intercom-orchestrator`.
+- Keep the Git repository and executable names unchanged.
+
 ## 0.9.0 - 2026-07-14
 
 - Align the Agent Intercom family on one coordinated `0.9.0` release line.
