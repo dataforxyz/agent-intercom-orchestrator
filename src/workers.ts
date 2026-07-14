@@ -1,6 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { Harness, LaunchProfile, OrchestratorConfig, UnitStatus, WorkerRecord, WorkerState } from "./types.ts";
+import type { Effort, Harness, LaunchProfile, OrchestratorConfig, UnitStatus, WorkerRecord, WorkerState } from "./types.ts";
+
+export const EFFORT_LEVELS: Effort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+export const HARNESS_EFFORTS: Record<Harness, Effort[]> = {
+  pi: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  opencode: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+};
 
 export function newRunId(): string {
   return randomUUID().replaceAll("-", "").slice(0, 12);
@@ -18,45 +27,90 @@ export function validateWorkerId(value: string): string {
   return id;
 }
 
-export function buildWorkerArgs(
-  harness: Exclude<Harness, "pi">,
-  profile: LaunchProfile,
-  workerId: string,
-  cwd: string,
-  role: string,
-  task?: string,
-): string[] {
+export function normalizeModelForHarness(harness: Harness, model: string | undefined): string | undefined {
+  const normalized = model?.trim();
+  if (!normalized) return undefined;
+  if (harness === "codex" && normalized.startsWith("codex/")) return normalized.slice("codex/".length);
+  if (harness === "claude" && normalized.startsWith("claude/")) return normalized.slice("claude/".length);
+  return normalized;
+}
+
+export function validateEffort(harness: Harness, effort: Effort | undefined): Effort | undefined {
+  if (!effort) return undefined;
+  if (!HARNESS_EFFORTS[harness].includes(effort)) {
+    throw new Error(`${harness} does not support effort '${effort}'. Choose: ${HARNESS_EFFORTS[harness].join(", ")}`);
+  }
+  return effort;
+}
+
+export function standingInstructions(role: string, task: string, instructions?: string): string {
+  return [
+    `You are the independent ${role} coworker managed by Agent Intercom. You are a peer, not a child subagent.`,
+    instructions,
+    `Standing assignment: ${task}`,
+    "Wait for work through Agent Intercom, report blockers early, and include evidence with completion claims.",
+  ].filter(Boolean).join("\n\n");
+}
+
+export function buildWorkerArgs(input: {
+  harness: Harness;
+  profile: LaunchProfile;
+  workerId: string;
+  cwd: string;
+  role: string;
+  task: string;
+  model?: string;
+  effort?: Effort;
+  instructions?: string;
+}): string[] {
+  const { harness, profile, workerId, cwd, role, task, model, effort, instructions } = input;
   const args = [...(profile.args ?? [])];
-  if (harness === "codex" || harness === "claude") {
-    args.push(
-      "--name",
-      workerId,
-      "--id",
-      workerId,
-      "--cwd",
-      cwd,
-      "--instructions",
-      `You are the ${role} worker managed by Agent Intercom. Wait for assignments through Intercom. Report blockers early and include evidence with completion claims.`,
-    );
-  } else if (harness === "opencode") {
-    if (!task) throw new Error("OpenCode run workers require an initial task");
-    args.push(
-      `You are the ${role} worker '${workerId}' managed by Agent Intercom. Complete this assignment, report blockers early, and include evidence with completion claims.\n\n${task}`,
-    );
+  const mandate = standingInstructions(role, task, instructions);
+
+  if (harness === "pi") {
+    args.push("--name", workerId, "--session-id", workerId);
+    if (model) args.push("--model", model);
+    if (effort) args.push("--thinking", effort);
+    args.push("--append-system-prompt", mandate);
+  } else if (harness === "codex") {
+    if (model) args.push("-c", `model=\"${model}\"`);
+    if (effort) args.push("-c", `model_reasoning_effort=\"${effort}\"`);
+    args.push("--name", workerId, "--id", workerId, "--cwd", cwd, "--instructions", mandate);
+  } else if (harness === "claude") {
+    if (model) args.push("--model", model);
+    if (effort) args.push("--effort", effort);
+    args.push("--name", workerId, "--id", workerId, "--cwd", cwd, "--instructions", mandate);
+  } else {
+    if (model) args.push("--model", model);
+    if (effort && effort !== "off") args.push("--variant", effort);
+    args.push(mandate);
   }
   return args;
 }
 
 export function buildWorkerEnvironment(
-  harness: Exclude<Harness, "pi">,
+  harness: Harness,
   workerId: string,
   role: string,
+  model?: string,
 ): Record<string, string> {
   if (harness === "opencode") {
     return {
       OPENCODE_INTERCOM_NAME: workerId,
       OPENCODE_INTERCOM_SESSION_ID: workerId,
       AGENT_INTERCOM_ROLE: role,
+    };
+  }
+  if (harness === "pi") {
+    return {
+      AGENT_INTERCOM_ROLE: role,
+      AGENT_INTERCOM_ORCHESTRATOR_DISABLED: "1",
+    };
+  }
+  if (harness === "codex") {
+    return {
+      AGENT_INTERCOM_ROLE: role,
+      ...(model ? { CODEX_INTERCOM_MODEL: model } : {}),
     };
   }
   return { AGENT_INTERCOM_ROLE: role };
@@ -69,6 +123,7 @@ export function stateFromUnit(status: UnitStatus, previous: WorkerState): Worker
     if (status.execMainStatus === 0 && status.result === "success") return "completed";
     return "lost";
   }
+  if (status.activeState === "active" && status.subState === "exited") return "completed";
   if (status.activeState === "active") return "running";
   if (status.activeState === "activating" || status.activeState === "reloading") return "provisioning";
   if (status.activeState === "failed" || (status.result && status.result !== "success")) return "failed";
@@ -82,11 +137,14 @@ export function stateFromUnit(status: UnitStatus, previous: WorkerState): Worker
 export function createSystemdRecord(input: {
   id: string;
   runId: string;
-  harness: Exclude<Harness, "pi">;
+  harness: Harness;
   role: string;
   task: string;
   cwd: string;
   profile: string;
+  model?: string;
+  effort?: Effort;
+  instructions?: string;
   unit: string;
   managerSessionId: string;
   config: OrchestratorConfig;
@@ -102,6 +160,9 @@ export function createSystemdRecord(input: {
     task: input.task,
     cwd: resolve(input.cwd),
     profile: input.profile,
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.effort ? { effort: input.effort } : {}),
+    ...(input.instructions ? { instructions: input.instructions } : {}),
     state: "provisioning",
     owned: true,
     managerSessionId: input.managerSessionId,

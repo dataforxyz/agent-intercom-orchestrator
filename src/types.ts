@@ -1,5 +1,5 @@
 export type Harness = "pi" | "codex" | "claude" | "opencode";
-export type WorkerBackend = "systemd" | "pi-subagents";
+export type WorkerBackend = "systemd";
 export type WorkerState =
   | "provisioning"
   | "running"
@@ -11,19 +11,34 @@ export type WorkerState =
   | "stopped"
   | "lost";
 
+export type Effort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface LaunchProfile {
-  harness: Exclude<Harness, "pi">;
+  harness: Harness;
   command: string;
   args?: string[];
   env?: Record<string, string>;
   spawnable?: boolean;
   description?: string;
+  mode?: "persistent" | "one-shot";
+  maxRuntime?: string;
+}
+
+export interface RolePreset {
+  harness?: Harness;
+  profile?: string;
+  model?: string;
+  effort?: Effort;
+  instructions?: string;
 }
 
 export interface OrchestratorConfig {
   defaultHarness: Harness;
-  defaultProfiles: Partial<Record<Exclude<Harness, "pi">, string>>;
+  defaultProfiles: Partial<Record<Harness, string>>;
+  defaultModels: Partial<Record<Harness, string>>;
+  defaultEfforts: Partial<Record<Harness, Effort>>;
   profiles: Record<string, LaunchProfile>;
+  roles: Record<string, RolePreset>;
   leaseMinutes: number;
   heartbeatSeconds: number;
   maxRuntime: string;
@@ -41,13 +56,15 @@ export interface WorkerRecord {
   task: string;
   cwd: string;
   profile?: string;
+  model?: string;
+  effort?: Effort;
+  instructions?: string;
   state: WorkerState;
   owned: boolean;
   managerSessionId: string;
   intercomTarget?: string;
   unit?: string;
   mainPid?: number;
-  externalRunId?: string;
   createdAt: number;
   updatedAt: number;
   leaseExpiresAt: number;

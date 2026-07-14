@@ -1,9 +1,22 @@
 {
   "defaultHarness": "pi",
   "defaultProfiles": {
+    "pi": "pi-peer",
     "codex": "codex-safe",
     "claude": "claude-safe",
-    "opencode": "opencode-run"
+    "opencode": "opencode-peer"
+  },
+  "defaultModels": {
+    "pi": "codex/gpt-5.6-sol",
+    "codex": "gpt-5.6-sol",
+    "claude": "opus",
+    "opencode": "opencode/claude-sonnet-5"
+  },
+  "defaultEfforts": {
+    "pi": "high",
+    "codex": "high",
+    "claude": "high",
+    "opencode": "high"
   },
   "leaseMinutes": 30,
   "heartbeatSeconds": 60,
@@ -12,36 +25,75 @@
   "cleanupExpiredOnStart": true,
   "cleanupOnShutdown": true,
   "profiles": {
+    "pi-peer": {
+      "harness": "pi",
+      "command": "pi",
+      "args": ["--mode", "rpc", "--exclude-tools", "agent_fleet"],
+      "mode": "persistent",
+      "maxRuntime": "12h"
+    },
     "codex-safe": {
       "harness": "codex",
       "command": "coi",
-      "args": [
-        "--no-tui",
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "on-request"
-      ]
+      "args": ["--no-tui", "--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+      "mode": "persistent",
+      "maxRuntime": "12h"
     },
     "codex-minimal": {
       "harness": "codex",
       "command": "coim",
-      "args": ["--no-tui"]
+      "args": ["--no-tui"],
+      "mode": "persistent",
+      "maxRuntime": "12h"
     },
     "claude-safe": {
       "harness": "claude",
       "command": "cci",
-      "args": ["--safe"]
+      "args": ["--safe"],
+      "mode": "persistent",
+      "maxRuntime": "12h"
     },
     "claude-minimal": {
       "harness": "claude",
       "command": "ccim",
-      "args": ["--safe"]
+      "args": ["--safe"],
+      "mode": "persistent",
+      "maxRuntime": "12h"
+    },
+    "opencode-peer": {
+      "harness": "opencode",
+      "command": "opencode",
+      "args": [],
+      "mode": "persistent",
+      "maxRuntime": "12h"
     },
     "opencode-run": {
       "harness": "opencode",
       "command": "opencode",
-      "args": ["run", "--auto", "--format", "json"]
+      "args": ["run", "--auto", "--format", "json"],
+      "mode": "one-shot",
+      "maxRuntime": "2h"
+    }
+  },
+  "roles": {
+    "advisor": {
+      "harness": "pi",
+      "profile": "pi-peer",
+      "model": "claude/claude-opus-4-8",
+      "effort": "high",
+      "instructions": "Act as an independent advisor coworker. Challenge plans, inspect evidence, and do not edit unless explicitly asked."
+    },
+    "builder": {
+      "harness": "codex",
+      "profile": "codex-safe",
+      "effort": "high",
+      "instructions": "Implement the assigned scope and report verifiable evidence."
+    },
+    "challenger": {
+      "harness": "claude",
+      "profile": "claude-safe",
+      "effort": "high",
+      "instructions": "Challenge completion claims and identify missing evidence or defects."
     }
   }
 }

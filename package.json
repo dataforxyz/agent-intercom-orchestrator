@@ -1,7 +1,7 @@
 {
   "name": "agent-intercom-orchestrator",
   "version": "0.1.0",
-  "description": "Pi extension for creating and managing Agent Intercom workers across Pi, Codex, Claude Code, and OpenCode",
+  "description": "Pi extension for creating and managing independent Agent Intercom coworkers across Pi, Codex, Claude Code, and OpenCode",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -21,6 +21,7 @@
   ],
   "files": [
     "src/**/*.ts",
+    "src/**/*.mjs",
     "skills/**/*",
     "examples/**/*",
     "docs/**/*",

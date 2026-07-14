@@ -111,7 +111,7 @@ The important pieces are:
 | Package | Purpose |
 |---|---|
 | [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi) | Native Intercom tools, inbound turns, status, and UI |
-| [`pi-subagents`](https://github.com/nicobailon/pi-subagents) | Pi child-agent runtime used by the orchestrator's Pi driver through its RPC API |
+| [`agent-intercom-orchestrator`](https://github.com/dataforxyz/agent-intercom-orchestrator) | Owned cross-harness coworker lifecycle, models, effort, defaults, and cleanup |
 | [`pi-extensions`](https://github.com/dataforxyz/pi-extensions) | Ralph loop plus the selected UI, guidance, recap, and usage extensions |
 | [`pi-return-on`](https://github.com/dataforxyz/pi-return-on) | Wake the manager when a timer, process, file, port, URL, or other condition is ready |
 | [`phone-pi`](https://github.com/a2ajinkya/phone-pi) | Provides the `mobile-persona.ts` extension with `/mobile` and `/default` |
@@ -147,7 +147,7 @@ The following is a portable copy of the package and Return On portion of the man
     "git:github.com/dataforxyz/pi-spend",
     "npm:pi-prompt-template-model",
     "git:github.com/dataforxyz/agent-intercom-pi",
-    "npm:pi-subagents",
+    "git:github.com/dataforxyz/agent-intercom-orchestrator",
     "npm:pi-safe-compact",
     "npm:pi-mcp-adapter",
     "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",
@@ -179,7 +179,7 @@ pi install git:github.com/dataforxyz/pi-extensions
 pi install git:github.com/dataforxyz/pi-spend
 pi install npm:pi-prompt-template-model
 pi install git:github.com/dataforxyz/agent-intercom-pi
-pi install npm:pi-subagents
+pi install git:github.com/dataforxyz/agent-intercom-orchestrator
 pi install npm:pi-safe-compact
 pi install npm:pi-mcp-adapter
 pi install git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19
@@ -377,6 +377,14 @@ Only the primary manager should create or terminate persistent Pi, OpenCode, `co
 
 A worker may use built-in subagents inside its assigned harness, but it must not recursively create more persistent Agent Intercom peers unless the manager explicitly delegates instance ownership.
 
+After an intentional manager restart, the new Pi session can take responsibility for an existing live worker explicitly:
+
+```typescript
+agent_fleet({ action: "adopt", id: "architecture-advisor" })
+```
+
+Stop and forget refuse workers owned by another manager session until this handoff occurs.
+
 This prevents:
 
 - duplicate workers
@@ -386,79 +394,77 @@ This prevents:
 - workers replacing each other without a handoff
 - unclear responsibility for stopping the system
 
-## Start a persistent worker
+## Start an owned coworker
 
-`tmux` keeps a worker alive after the launching shell closes. Agent Intercom is the control channel.
+Install the orchestrator package in the manager Pi, then use `agent_fleet`. It creates a durable ownership record and launches the complete harness process tree inside a transient systemd user service. Do not use tmux when `agent_fleet` can own the lifecycle.
 
-### Wakeable Codex worker
+### Independent Pi advisor
 
-Safe/repo-limited profile, assuming the `coim` function above is available to the launched shell:
-
-```bash
-tmux new-session -d -s <worker-id> \
-  'cd <repo> && coim --no-tui \
-    --name <worker-id> \
-    --id <worker-id> \
-    --cwd <repo> \
-    --instructions "<instructions>"'
+```typescript
+agent_fleet({
+  action: "spawn",
+  harness: "pi",
+  profile: "pi-peer",
+  id: "architecture-advisor",
+  role: "advisor",
+  model: "claude/claude-opus-4-8",
+  effort: "high",
+  cwd: "/path/to/worktree",
+  task: "Challenge the architecture and inspect the evidence. Do not edit unless asked."
+})
 ```
 
-Trusted/yolo:
+This is a separate named Pi session running in RPC mode with stdin held open by the owned launcher. It has its own transcript, model, thinking effort, Intercom identity, lease, and systemd cgroup. It is a coworker, not a child subagent.
 
-```bash
-tmux new-session -d -s <worker-id> \
-  'cd <repo> && coim-yolo --no-tui \
-    --name <worker-id> \
-    --id <worker-id> \
-    --cwd <repo> \
-    --instructions "<instructions>"'
+### Wakeable Codex builder
+
+```typescript
+agent_fleet({
+  action: "spawn",
+  harness: "codex",
+  profile: "codex-safe",
+  id: "codex-builder",
+  role: "builder",
+  model: "gpt-5.6-sol",
+  effort: "high",
+  cwd: "/path/to/worktree",
+  task: "Implement the approved scope and report evidence."
+})
 ```
 
-### Wakeable Claude worker
+### Wakeable Claude challenger
 
-Safe:
-
-```bash
-tmux new-session -d -s <worker-id> \
-  'cd <repo> && cci --safe \
-    --name <worker-id> \
-    --id <worker-id> \
-    --cwd <repo> \
-    --instructions "<instructions>"'
+```typescript
+agent_fleet({
+  action: "spawn",
+  harness: "claude",
+  profile: "claude-safe",
+  id: "claude-challenger",
+  role: "challenger",
+  model: "opus",
+  effort: "max",
+  cwd: "/path/to/worktree",
+  task: "Try to disprove the builder's completion claim."
+})
 ```
 
-Minimal and safe:
+### Persistent OpenCode coworker
 
-```bash
-tmux new-session -d -s <worker-id> \
-  'cd <repo> && ccim --safe \
-    --name <worker-id> \
-    --id <worker-id> \
-    --cwd <repo> \
-    --instructions "<instructions>"'
+```typescript
+agent_fleet({
+  action: "spawn",
+  harness: "opencode",
+  profile: "opencode-peer",
+  id: "opencode-advisor",
+  role: "advisor",
+  model: "anthropic/claude-fable-5",
+  effort: "high",
+  cwd: "/path/to/worktree",
+  task: "Review the plan, then remain available for follow-up turns through Intercom."
+})
 ```
 
-### Pi peer or proof advisor
-
-```bash
-tmux new-session -d -s <worker-id> \
-  -c <repo> \
-  'pi --name <worker-id> --thinking high'
-```
-
-Pi does not need a special intercom wrapper when the package is installed.
-
-### OpenCode peer
-
-```bash
-tmux new-session -d -s <worker-id> \
-  -c <repo> \
-  'OPENCODE_INTERCOM_NAME=<worker-id> \
-   OPENCODE_INTERCOM_SESSION_ID=<worker-id> \
-   opencode'
-```
-
-The OpenCode plugins must already be configured.
+The owned launcher starts `opencode serve` on a private loopback port, creates an initialized session through `opencode run --attach`, and keeps the server alive. The OpenCode Intercom plugin injects later messages into that same session, so it behaves much more like the persistent Pi, Codex, and Claude peers. Use profile `opencode-run` when a cheaper one-shot assignment is preferable.
 
 ## Long instructions belong in files
 
