@@ -103,6 +103,42 @@ intercom({ action: "status" })
 intercom({ action: "list" })
 ```
 
+### Orchestrator Pi plugin
+
+Install the orchestrator as a Pi package after `agent-intercom-pi`:
+
+```bash
+pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+```
+
+This package loads two resources automatically:
+
+- `src/index.ts` — the Pi extension that registers `agent_fleet`, the `/agents*` commands, and the scoped worker footer
+- `skills/agent-intercom-orchestrator/SKILL.md` — manager guidance for choosing profiles and safely owning coworkers
+
+Restart Pi or run `/reload`. Confirm installation and runtime support:
+
+```bash
+pi list
+```
+
+```typescript
+agent_fleet({ action: "doctor" })
+agent_fleet({ action: "capabilities" })
+agent_fleet({ action: "profiles" })
+```
+
+The plugin requires Linux systemd user services. `doctor` reports missing harness commands or adapters. Install only the harnesses you intend to spawn, but keep `agent-intercom-pi` installed for the manager's Intercom control plane.
+
+Update both Pi packages with:
+
+```bash
+pi update --extension git:github.com/dataforxyz/agent-intercom-pi
+pi update --extension git:github.com/dataforxyz/agent-intercom-orchestrator
+```
+
+After updating, run `/reload` and `doctor` again. For a temporary checkout test without modifying Pi settings, use `pi -e ./src/index.ts` from the orchestrator repository.
+
 ### Full Pi manager stack
 
 Installing only `agent-intercom-pi` gives Pi the Intercom tools. The manager setup used for this workflow also includes Ralph loops, background return conditions, compaction helpers, usage/cost tools, prompt templates, MCP support, and the `/mobile` persona switch.

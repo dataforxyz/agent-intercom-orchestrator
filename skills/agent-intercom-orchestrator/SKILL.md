@@ -7,6 +7,17 @@ description: Create and manage owned independent Pi, Codex, Claude Code, and Ope
 
 Use `agent_fleet` instead of launching persistent harness processes directly.
 
+## Installation
+
+For a Pi manager, install the Intercom control plane and this package, then restart Pi or run `/reload`:
+
+```bash
+pi install git:github.com/dataforxyz/agent-intercom-pi
+pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+```
+
+Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The package automatically loads both this Agent Skill and the Pi extension that provides `agent_fleet` plus `/agents*`. Linux systemd user services are required.
+
 ## Core rules
 
 - Coworkers are independent Agent Intercom peers. A Pi advisor is not a child subagent.

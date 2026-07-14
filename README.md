@@ -8,18 +8,41 @@ A manager controls the agents, evidence, limits, context resets, and stopping ru
 
 > **Status:** The orchestrator provides one `agent_fleet` lifecycle implementation for Pi and opt-in OpenCode managers, with systemd-cgroup cleanup, leases, adoption, durable OpenCode readiness/session resume, model and variant selection, diagnostics, enumeration, and interactive Pi defaults. Pi, Codex, Claude, and OpenCode can all run as persistent Intercom peers; OpenCode also has a one-shot profile.
 
-## First Draft
+## Install the Pi plugin
 
-Install from the checkout while developing:
+The orchestrator is a Pi package containing both the `agent_fleet` extension and its Agent Skill. It requires Linux with a working systemd user manager. Install the Pi Intercom adapter first so managed coworkers can communicate with the manager:
+
+```bash
+pi install git:github.com/dataforxyz/agent-intercom-pi
+pi install git:github.com/dataforxyz/agent-intercom-orchestrator
+```
+
+Restart Pi, or run `/reload` in every already-open Pi session. Confirm both packages are installed:
+
+```bash
+pi list
+```
+
+Then verify the extension and local harness dependencies inside Pi:
+
+```typescript
+agent_fleet({ action: "doctor" })
+agent_fleet({ action: "capabilities" })
+```
+
+You should also have `/agents`, `/agents-new`, `/agents-config`, `/agents-models`, and `/agents-cleanup`. Install the Codex, Claude, and OpenCode adapters before spawning those harnesses; the [worker guide](docs/creating-and-supervising-worker-agents.md#install-the-adapters) has the complete commands.
+
+To update later:
+
+```bash
+pi update --extension git:github.com/dataforxyz/agent-intercom-pi
+pi update --extension git:github.com/dataforxyz/agent-intercom-orchestrator
+```
+
+For a one-run checkout test without installing:
 
 ```bash
 pi -e ./src/index.ts
-```
-
-Or install the Git package after it is published:
-
-```bash
-pi install git:github.com/dataforxyz/agent-intercom-orchestrator
 ```
 
 Start with:
@@ -48,7 +71,7 @@ See [`examples/orchestrator-config.json`](examples/orchestrator-config.json) and
 | Harness | Repository | Current best use |
 |---|---|---|
 | Pi | [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi) | Primary manager and proof advisor |
-| OpenCode | [`agent-intercom-opencode`](https://github.com/dataforxyz/agent-intercom-opencode) | Secondary manager or worker |
+| OpenCode | [`agent-intercom-opencode`](https://github.com/dataforxyz/agent-intercom-opencode) | Primary manager with opt-in fleet tools, or persistent worker |
 | Codex | [`agent-intercom-codex`](https://github.com/dataforxyz/agent-intercom-codex) | Wakeable builder through `coi` |
 | Claude Code | [`agent-intercom-claude`](https://github.com/dataforxyz/agent-intercom-claude) | Wakeable challenger or worker through `cci` |
 
