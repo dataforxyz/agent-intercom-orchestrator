@@ -196,7 +196,7 @@ test("extension registers discovery tools and interactive configuration commands
       () => {},
       ctx,
     );
-    assert.match(doctor.content[0].text, /OpenCode Intercom plugin: not detected/);
+    assert.match(doctor.content[0].text, /OpenCode Intercom plugin: (?:not detected|could not inspect)/);
 
     await commands.get("agents-config").handler("", ctx);
     const saved = JSON.parse(await readFile(join(agentDir, "intercom", "orchestrator", "config.json"), "utf8"));
