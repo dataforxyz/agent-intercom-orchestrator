@@ -115,7 +115,7 @@ Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unles
 ## Current limitations
 
 - Pi, Codex, and Claude registration is not automatically awaited; send the assignment after the target appears in Intercom.
-- A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or forget them.
+- A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or renew them. Expired leases remain eligible for orchestrator-wide garbage collection.
 - `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns. `opencode-run` remains available for cheaper one-shot assignments.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.
 - Linux systemd user services are the only process backend in this draft.

@@ -190,20 +190,31 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   };
 
   const reconcile = async (): Promise<WorkerRecord[]> => {
-    const workers = await store.mutate(async (state) => {
-      for (const worker of state.workers) {
-        if (!worker.unit) continue;
-        const status = await getUnitStatus(runner, worker.unit);
-        const nextState = stateFromUnit(status, worker.state);
-        if (nextState !== worker.state || status.mainPid !== worker.mainPid) {
+    const snapshot = await store.read();
+    const observations = await Promise.all(
+      snapshot.workers
+        .filter((worker): worker is WorkerRecord & { unit: string } => Boolean(worker.unit))
+        .map(async (worker) => ({ id: worker.id, runId: worker.runId, unit: worker.unit, status: await getUnitStatus(runner, worker.unit) })),
+    );
+    const { workers, retireUnits } = await store.mutate((state) => {
+      const retireUnits: string[] = [];
+      for (const observation of observations) {
+        const worker = state.workers.find((candidate) => candidate.id === observation.id && candidate.runId === observation.runId && candidate.unit === observation.unit);
+        if (!worker) continue;
+        const nextState = stateFromUnit(observation.status, worker.state);
+        if (nextState !== worker.state || observation.status.mainPid !== worker.mainPid) {
           worker.state = nextState;
-          worker.mainPid = status.mainPid;
+          worker.mainPid = observation.status.mainPid;
           worker.updatedAt = Date.now();
-          if (nextState === "failed") worker.lastError = status.result || `service exited with ${status.execMainStatus ?? "unknown status"}`;
+          if (nextState === "failed") worker.lastError = observation.status.result || `service exited with ${observation.status.execMainStatus ?? "unknown status"}`;
+        }
+        if (nextState === "completed" && observation.status.activeState === "active" && observation.status.subState === "exited") {
+          retireUnits.push(observation.unit);
         }
       }
-      return structuredClone(state.workers);
+      return { workers: structuredClone(state.workers), retireUnits };
     });
+    await Promise.allSettled(retireUnits.map((unit) => stopUnit(runner, unit)));
     await updateStatus();
     return workers;
   };
@@ -429,13 +440,24 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const resolved = resolveProfileCommand(profile.command);
           return `${name} [${profile.harness}/${profile.mode ?? "persistent"}] ${profile.spawnable === false ? "attach-only" : resolved ? `ok: ${resolved}` : `missing: ${profile.command}`}`;
         });
+        const opencodeProfileName = config.defaultProfiles.opencode;
+        const opencodeCommand = opencodeProfileName ? resolveProfileCommand(config.profiles[opencodeProfileName]?.command || "") : undefined;
+        let opencodeIntercomPlugin = "could not inspect";
+        if (opencodeCommand) {
+          const debugConfig = await runner.exec(opencodeCommand, ["debug", "config"], { timeout: 15000 });
+          if (debugConfig.code === 0) {
+            opencodeIntercomPlugin = /agent[-_]intercom[-_]opencode|opencode[-_]intercom/i.test(debugConfig.stdout)
+              ? "configured"
+              : "not detected — persistent OpenCode peers will not receive Intercom messages";
+          }
+        }
         const state = await store.read();
         const recordedUnits = new Set(state.workers.map((worker) => worker.unit).filter(Boolean));
         const units = available ? await listWorkerUnits(runner) : [];
         const untrackedUnits = units.filter((unit) => !recordedUnits.has(unit));
         return textResult(
-          [`systemd user manager: ${available ? "available" : "unavailable"}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
-          { systemd: available, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, configPath, statePath, untrackedUnits },
+          [`systemd user manager: ${available ? "available" : "unavailable"}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
+          { systemd: available, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, configPath, statePath, untrackedUnits },
         );
       }
 

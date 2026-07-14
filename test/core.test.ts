@@ -96,8 +96,7 @@ test("unit status maps to normalized worker states", () => {
   assert.equal(stateFromUnit({ exists: true, activeState: "failed", result: "exit-code" }, "running"), "failed");
   assert.equal(stateFromUnit({ exists: true, activeState: "inactive", execMainStatus: 0 }, "running"), "completed");
   assert.equal(stateFromUnit({ exists: false }, "running"), "lost");
-  assert.equal(stateFromUnit({ exists: false, result: "success", execMainStatus: 0 }, "running"), "completed");
-  assert.equal(stateFromUnit({ exists: false, result: "exit-code", execMainStatus: 1 }, "running"), "failed");
+  assert.equal(stateFromUnit({ exists: false }, "completed"), "completed");
   assert.equal(stateFromUnit({ exists: false }, "stopped"), "stopped");
 });
 
@@ -127,7 +126,10 @@ test("configuration merges profiles, defaults, and role presets without dropping
     leaseMinutes: 5,
     defaultModels: { pi: "claude/claude-sonnet-5" },
     defaultEfforts: { pi: "max" },
-    roles: { auditor: { harness: "pi", profile: "pi-peer", effort: "high", instructions: "Audit evidence." } },
+    roles: {
+      advisor: { instructions: "Override only the instructions." },
+      auditor: { harness: "pi", profile: "pi-peer", effort: "high", instructions: "Audit evidence." },
+    },
     profiles: {
       "codex-yolo": {
         harness: "codex",
@@ -140,7 +142,9 @@ test("configuration merges profiles, defaults, and role presets without dropping
   assert.equal(config.defaultModels.pi, "claude/claude-sonnet-5");
   assert.equal(config.defaultEfforts.pi, "max");
   assert.equal(config.roles.auditor.harness, "pi");
-  assert.ok(config.roles.advisor);
+  assert.equal(config.roles.advisor.harness, "pi");
+  assert.equal(config.roles.advisor.profile, "pi-peer");
+  assert.equal(config.roles.advisor.instructions, "Override only the instructions.");
   assert.ok(config.profiles["pi-peer"]);
   assert.ok(config.profiles["codex-safe"]);
   assert.equal(config.profiles["codex-yolo"].command, "/usr/local/bin/coi-yolo");
@@ -190,13 +194,18 @@ test("default configuration writes preserve custom profiles without serializing 
     const path = join(dir, "config.json");
     await writeFile(path, JSON.stringify({
       profiles: { custom: { harness: "pi", command: "/custom/pi", args: ["--mode", "rpc"] } },
+      roles: { custom: { harness: "pi", profile: "custom", instructions: "Stay custom." } },
     }));
-    const draft = mergeConfig({ defaultModels: { pi: "codex/gpt-5.6-sol" } });
+    const draft = await readConfig(path);
+    draft.defaultModels.pi = "codex/gpt-5.6-sol";
     await writeConfigDefaults(path, draft);
     const raw = JSON.parse(await readFile(path, "utf8"));
     assert.equal(raw.defaultModels.pi, "codex/gpt-5.6-sol");
     assert.equal(raw.profiles.custom.command, "/custom/pi");
     assert.equal(raw.profiles["pi-peer"], undefined);
+    assert.equal(raw.defaultProfiles.pi, undefined);
+    assert.equal(raw.roles.advisor, undefined);
+    assert.equal(raw.roles.custom.instructions, "Stay custom.");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

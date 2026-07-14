@@ -119,8 +119,6 @@ export function buildWorkerEnvironment(
 export function stateFromUnit(status: UnitStatus, previous: WorkerState): WorkerState {
   if (!status.exists) {
     if (previous === "stopped" || previous === "completed") return previous;
-    if (status.result && status.result !== "success") return "failed";
-    if (status.execMainStatus === 0 && status.result === "success") return "completed";
     return "lost";
   }
   if (status.activeState === "active" && status.subState === "exited") return "completed";

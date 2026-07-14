@@ -204,7 +204,7 @@ export function mergeConfig(value: unknown): OrchestratorConfig {
   if (isRecord(value.roles)) {
     for (const [name, roleValue] of Object.entries(value.roles)) {
       const role = mergeRole(roleValue);
-      if (role) roles[name] = role;
+      if (role) roles[name] = { ...(roles[name] ?? {}), ...role };
     }
   }
   return {
@@ -253,13 +253,28 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  const defaultProfiles = Object.fromEntries(
+    HARNESSES
+      .filter((harness) => config.defaultProfiles[harness] !== DEFAULT_CONFIG.defaultProfiles[harness])
+      .map((harness) => [harness, config.defaultProfiles[harness]]),
+  );
+  const roles = Object.fromEntries(
+    Object.entries(config.roles).flatMap(([name, role]) => {
+      const builtIn = DEFAULT_CONFIG.roles[name];
+      if (!builtIn) return [[name, role]];
+      const delta = Object.fromEntries(
+        Object.entries(role).filter(([key, value]) => value !== builtIn[key as keyof RolePreset]),
+      );
+      return Object.keys(delta).length ? [[name, delta]] : [];
+    }),
+  );
   await writeConfigValue(path, {
     ...existing,
     defaultHarness: config.defaultHarness,
-    defaultProfiles: config.defaultProfiles,
+    defaultProfiles,
     defaultModels: config.defaultModels,
     defaultEfforts: config.defaultEfforts,
-    roles: config.roles,
+    roles,
     leaseMinutes: config.leaseMinutes,
     heartbeatSeconds: config.heartbeatSeconds,
     maxRuntime: config.maxRuntime,

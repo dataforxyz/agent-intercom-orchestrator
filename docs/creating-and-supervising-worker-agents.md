@@ -383,7 +383,9 @@ After an intentional manager restart, the new Pi session can take responsibility
 agent_fleet({ action: "adopt", id: "architecture-advisor" })
 ```
 
-Stop and forget refuse workers owned by another manager session until this handoff occurs.
+Stop and renew refuse live workers owned by another manager session until this handoff occurs. `adopt` is an explicit transfer and does not try to prove that the previous manager is offline, so coordinate it rather than using it to steal a coworker from another live manager.
+
+Leases are the final garbage-collection boundary: startup cleanup and `/agents-cleanup` may stop any orchestrator-owned worker after its lease expires, even when its original manager session is gone. Completed one-shot units are retired automatically after reconciliation so their retained exit status does not accumulate in systemd.
 
 This prevents:
 
@@ -415,6 +417,8 @@ agent_fleet({
 ```
 
 This is a separate named Pi session running in RPC mode with stdin held open by the owned launcher. It has its own transcript, model, thinking effort, Intercom identity, lease, and systemd cgroup. It is a coworker, not a child subagent.
+
+The worker ID is also its stable Pi session ID. Reusing an ID intentionally resumes that coworker's transcript and prior mandate; choose a new worker ID when the new assignment should start with clean context.
 
 ### Wakeable Codex builder
 
