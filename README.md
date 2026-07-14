@@ -109,6 +109,22 @@ The builder saying `done` starts the review. It does not end the run.
 
 The Agent Intercom family grew from [Nico Bailon's original `pi-intercom`](https://github.com/nicobailon/pi-intercom). Thank you to Nico and the original contributors for creating the foundation this work builds on.
 
+## Releasing
+
+Releases are automated from version tags. Update `package.json`, the lockfile when
+present, and `CHANGELOG.md` on `main`, then push an annotated tag that exactly
+matches the package version:
+
+```bash
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The release workflow verifies that the tag points into `main`, runs typecheck and
+tests, publishes the public npm package with trusted OIDC provenance, and creates
+the GitHub Release. Existing npm versions and GitHub Releases are skipped safely
+when a workflow is rerun.
+
 ## License
 
 Agent Intercom Orchestrator is licensed under the [GNU Affero General Public

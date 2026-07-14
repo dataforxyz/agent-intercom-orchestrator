@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add CI for branches and pull requests.
+- Add tag-driven npm trusted publishing with provenance and automatic GitHub Releases.
+
 ## 0.9.1 - 2026-07-14
 
 - Publish the package under the public npm scope `@dataforxyz/agent-intercom-orchestrator`.
