@@ -49,6 +49,7 @@ export function standingInstructions(role: string, task: string, instructions?: 
     instructions,
     `Standing assignment: ${task}`,
     "Wait for work through Agent Intercom, report blockers early, and include evidence with completion claims.",
+    "Keep downstream tools inside this worker process tree. Do not create detached systemd services, background containers, or remote jobs unless the manager explicitly asks; report every external resource ID so the manager can own its cleanup.",
   ].filter(Boolean).join("\n\n");
 }
 
@@ -93,27 +94,38 @@ export function buildWorkerEnvironment(
   workerId: string,
   role: string,
   model?: string,
+  ownership?: { runId: string; unit: string; managerSessionId: string },
 ): Record<string, string> {
+  const ownedEnvironment = {
+    AGENT_INTERCOM_ROLE: role,
+    AGENT_INTERCOM_WORKER_ID: workerId,
+    AGENT_INTERCOM_OWNED: "1",
+    ...(ownership ? {
+      AGENT_INTERCOM_RUN_ID: ownership.runId,
+      AGENT_INTERCOM_SYSTEMD_UNIT: ownership.unit,
+      AGENT_INTERCOM_MANAGER_SESSION_ID: ownership.managerSessionId,
+    } : {}),
+  };
   if (harness === "opencode") {
     return {
+      ...ownedEnvironment,
       OPENCODE_INTERCOM_NAME: workerId,
       OPENCODE_INTERCOM_SESSION_ID: workerId,
-      AGENT_INTERCOM_ROLE: role,
     };
   }
   if (harness === "pi") {
     return {
-      AGENT_INTERCOM_ROLE: role,
+      ...ownedEnvironment,
       AGENT_INTERCOM_ORCHESTRATOR_DISABLED: "1",
     };
   }
   if (harness === "codex") {
     return {
-      AGENT_INTERCOM_ROLE: role,
+      ...ownedEnvironment,
       ...(model ? { CODEX_INTERCOM_MODEL: model } : {}),
     };
   }
-  return { AGENT_INTERCOM_ROLE: role };
+  return ownedEnvironment;
 }
 
 export function stateFromUnit(status: UnitStatus, previous: WorkerState): WorkerState {

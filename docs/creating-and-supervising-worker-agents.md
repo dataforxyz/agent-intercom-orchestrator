@@ -695,6 +695,18 @@ A fixable code, content, test, route, asset, or visual defect should not be waiv
 
 ## Stop and clean up
 
+For an orchestrator-owned worker, inspect and stop the exact cgroup:
+
+```typescript
+agent_fleet({ action: "status", id: "opencode-visual-review" }) // includes the live cgroup process tree
+agent_fleet({ action: "stop", id: "opencode-visual-review" })
+agent_fleet({ action: "forget", id: "opencode-visual-review" })
+```
+
+Normal descendants—including Playwright browsers, Chromium renderers, MCP servers, language servers, build watchers, and shell grandchildren—inherit the worker's systemd cgroup. Stop uses `KillMode=control-group`, escalates remaining members with `SIGKILL`, and verifies that the cgroup is empty before declaring success.
+
+Detached resources can escape process-tree ownership: a worker-created systemd service, `docker run -d` container, Kubernetes job, remote browser, cloud task, or process handed to a shared daemon. Workers receive ownership environment variables (`AGENT_INTERCOM_WORKER_ID`, `AGENT_INTERCOM_RUN_ID`, `AGENT_INTERCOM_SYSTEMD_UNIT`, and `AGENT_INTERCOM_MANAGER_SESSION_ID`) and are instructed to report external resource IDs. Do not permit detached resources unless the manager explicitly records and owns their cleanup.
+
 Stop an ordinary tmux worker:
 
 ```bash

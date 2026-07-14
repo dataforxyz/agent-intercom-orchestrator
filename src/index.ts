@@ -6,7 +6,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
 import { WorkerStore } from "./store.ts";
-import { getUnitStatus, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, stopUnit, systemdAvailable } from "./systemd.ts";
+import { getUnitStatus, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, stopUnit, systemdAvailable } from "./systemd.ts";
 import type { CommandRunner, Effort, Harness, OrchestratorConfig, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
 import {
   buildWorkerArgs,
@@ -354,7 +354,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         cwd,
         maxRuntime: profile.maxRuntime || config.maxRuntime,
         stopTimeoutSeconds: config.stopTimeoutSeconds,
-        environment: buildWorkerEnvironment(harness, id, role, model),
+        environment: buildWorkerEnvironment(harness, id, role, model, {
+          runId,
+          unit,
+          managerSessionId: worker.managerSessionId,
+        }),
       });
       const status = await getUnitStatus(runner, unit);
       worker.state = stateFromUnit(status, "provisioning");
@@ -417,6 +421,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "status") {
         const workers = extractWorkers({ version: 1, workers: await reconcile() }, params.id);
+        if (params.id && workers[0]?.unit) {
+          const processes = await readUnitProcessTree(runner, workers[0].unit);
+          const processText = processes.tree || "(unit cgroup is empty or unloaded)";
+          return textResult(`${formatWorkers(workers)}\n\nCgroup process tree:\n${processText}`, { workers, processes });
+        }
         return textResult(formatWorkers(workers), { workers });
       }
 

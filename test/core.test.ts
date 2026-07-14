@@ -6,7 +6,7 @@ import test from "node:test";
 import { DEFAULT_CONFIG, mergeConfig, readConfig, writeConfig, writeConfigDefaults } from "../src/config.ts";
 import { parsePiModels, workersAttachedToManager } from "../src/index.ts";
 import { WorkerStore } from "../src/store.ts";
-import { launchUnit, makeUnitName, parseDurationToSeconds, sanitizeUnitPart } from "../src/systemd.ts";
+import { launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit } from "../src/systemd.ts";
 import type { WorkerRecord } from "../src/types.ts";
 import {
   buildWorkerArgs,
@@ -62,6 +62,12 @@ test("harness launch args include identity or the initial task", () => {
   assert.match(opencodeArgs.at(-1) ?? "", /Return OPEN_OK/);
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
+  const ownedEnv = buildWorkerEnvironment("pi", "advisor-a", "advisor", undefined, {
+    runId: "run-a", unit: "worker-a.service", managerSessionId: "manager-a",
+  });
+  assert.equal(ownedEnv.AGENT_INTERCOM_WORKER_ID, "advisor-a");
+  assert.equal(ownedEnv.AGENT_INTERCOM_SYSTEMD_UNIT, "worker-a.service");
+  assert.equal(ownedEnv.AGENT_INTERCOM_MANAGER_SESSION_ID, "manager-a");
 });
 
 test("systemd durations are validated before configuration is saved", () => {
@@ -88,6 +94,27 @@ test("systemd launch retains one-shot exit status without --collect", async () =
   const args = calls[0].args;
   assert.equal(args.includes("--collect"), false);
   assert.ok(args.includes("--property=RemainAfterExit=yes"));
+});
+
+test("stop verifies the worker cgroup and escalates remaining descendants", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  let cgroupReads = 0;
+  const runner = {
+    async exec(command: string, args: string[]) {
+      calls.push({ command, args });
+      if (command === "systemd-cgls") {
+        cgroupReads += 1;
+        return cgroupReads === 1
+          ? { stdout: "Control group /user.slice/worker.service:\n└─4242 chromium\n", stderr: "", code: 0 }
+          : { stdout: "", stderr: "", code: 1 };
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    },
+  };
+  assert.deepEqual((await readUnitProcessTree(runner, "worker.service")).pids, [4242]);
+  cgroupReads = 0;
+  await stopUnit(runner, "worker.service");
+  assert.ok(calls.some((call) => call.command === "systemctl" && call.args.includes("kill") && call.args.includes("--signal=SIGKILL")));
 });
 
 test("unit status maps to normalized worker states", () => {

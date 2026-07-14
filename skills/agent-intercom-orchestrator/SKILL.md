@@ -92,7 +92,7 @@ agent_fleet({
 ## Lifecycle
 
 ```typescript
-agent_fleet({ action: "status", id: "codex-build-api" })
+agent_fleet({ action: "status", id: "codex-build-api" }) // includes its systemd cgroup process tree
 agent_fleet({ action: "logs", id: "codex-build-api", lines: 100 })
 agent_fleet({ action: "renew", id: "codex-build-api" })
 agent_fleet({ action: "adopt", id: "codex-build-api" }) // after an intentional manager restart
@@ -118,4 +118,5 @@ Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unles
 - A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or renew them. Expired leases remain eligible for orchestrator-wide garbage collection.
 - `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns. `opencode-run` remains available for cheaper one-shot assignments.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.
+- Playwright, browsers, MCP servers, and ordinary descendants are contained and verified through the worker cgroup. Detached systemd services, containers, remote browsers, and cloud jobs require explicit manager ownership and recorded resource IDs.
 - Linux systemd user services are the only process backend in this draft.
