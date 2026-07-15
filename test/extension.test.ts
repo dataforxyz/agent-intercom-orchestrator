@@ -139,6 +139,85 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
   }
 });
 
+test("agent_fleet list and unqualified status default to the current manager's workers", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-manager-list-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    const worker = (id: string, owner: string) => ({
+      id,
+      runId: `run-${id}`,
+      harness: "pi",
+      role: "advisor",
+      task: `Task for ${id}`,
+      cwd: "/tmp",
+      state: "stopped",
+      owned: true,
+      managerSessionId: owner,
+      intercomTarget: `${id}-target`,
+      createdAt: 1,
+      updatedAt: 1,
+      leaseExpiresAt: Date.now() + 60_000,
+    });
+    await writeFile(join(orchestratorDir, "workers.json"), JSON.stringify({
+      version: 1,
+      workers: [worker("mine", "manager-a"), worker("theirs", "manager-b")],
+    }));
+
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      async exec() { return commandResult(); },
+    };
+    const ctx: any = {
+      cwd: "/tmp",
+      mode: "rpc",
+      hasUI: false,
+      sessionManager: { getSessionId: () => "manager-a", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?manager-list=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+
+    const fleet = tools.get("agent_fleet");
+    assert.ok(fleet.parameters.properties.all, "agent_fleet should expose explicit cross-manager listing");
+
+    const ownList = await fleet.execute("list-own", { action: "list" }, new AbortController().signal, () => {}, ctx);
+    assert.deepEqual(ownList.details.workers.map((record: any) => record.id), ["mine"]);
+    assert.match(ownList.content[0].text, /target=mine-target/);
+    assert.doesNotMatch(ownList.content[0].text, /theirs/);
+
+    const allList = await fleet.execute("list-all", { action: "list", all: true }, new AbortController().signal, () => {}, ctx);
+    assert.deepEqual(allList.details.workers.map((record: any) => record.id), ["mine", "theirs"]);
+
+    const ownStatus = await fleet.execute("status-own", { action: "status" }, new AbortController().signal, () => {}, ctx);
+    assert.deepEqual(ownStatus.details.workers.map((record: any) => record.id), ["mine"]);
+    await assert.rejects(
+      fleet.execute("status-hidden", { action: "status", id: "theirs" }, new AbortController().signal, () => {}, ctx),
+      /Unknown managed worker: theirs/,
+    );
+
+    const allStatus = await fleet.execute("status-all", { action: "status", all: true }, new AbortController().signal, () => {}, ctx);
+    assert.deepEqual(allStatus.details.workers.map((record: any) => record.id), ["mine", "theirs"]);
+    const otherStatus = await fleet.execute("status-other", { action: "status", id: "theirs", all: true }, new AbortController().signal, () => {}, ctx);
+    assert.deepEqual(otherStatus.details.workers.map((record: any) => record.id), ["theirs"]);
+
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("extension registers discovery tools and interactive configuration commands", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-extension-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -175,6 +254,7 @@ test("extension registers discovery tools and interactive configuration commands
     await lifecycle.get("session_start")?.({}, ctx);
 
     assert.ok(tools.has("agent_fleet"));
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /returned intercomTarget directly/);
     for (const command of ["agents", "agents-new", "agents-config", "agents-models", "agents-cleanup"]) {
       assert.ok(commands.has(command), `missing /${command}`);
     }

@@ -61,6 +61,7 @@ const AgentFleetParams = Type.Object({
   effort: Type.Optional(StringEnum(EFFORTS)),
   instructions: Type.Optional(Type.String({ description: "Additional standing instructions for the coworker" })),
   fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
+  all: Type.Optional(Type.Boolean({ description: "Include workers owned by other manager sessions for list/status diagnostics" })),
   execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup; false previews it" })),
   lines: Type.Optional(Type.Number({ description: "Journal lines for logs (1-500)" })),
 });
@@ -77,6 +78,7 @@ type FleetParams = {
   effort?: Effort;
   instructions?: string;
   fresh?: boolean;
+  all?: boolean;
   execute?: boolean;
   lines?: number;
 };
@@ -508,11 +510,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     name: "agent_fleet",
     label: "Agent Fleet",
     description:
-      "Create and manage owned independent Pi, Codex, Claude Code, and OpenCode coworkers. Workers run in systemd user services so their process trees are owned and cleanable. Supports normalized model/effort selection plus capabilities, profiles, models, and config enumeration.",
+      "Create and manage owned independent Pi, Codex, Claude Code, and OpenCode coworkers. Spawn/list results include direct Intercom targets; list/status default to workers owned by the current manager session. Workers run in systemd user services so their process trees are owned and cleanable.",
     promptSnippet: "Create, inspect, configure, stop, and clean up owned cross-harness coworkers",
     promptGuidelines: [
       "Pi workers are independent Intercom peers, not pi-subagents. Use role=advisor for a persistent Pi advisor coworker.",
-      "After spawning Pi, Codex, or Claude workers, wait for them in intercom list and send the task. OpenCode workers receive the initial task at launch; persistent OpenCode peers remain wakeable afterward.",
+      "After agent_fleet spawns a worker, use the returned intercomTarget directly with intercom_send or intercom_ask; do not call intercom_list merely to rediscover an owned worker. Pi, Codex, and Claude may need a brief registration delay before first delivery. OpenCode receives its initial task at launch.",
       "Use capabilities, profiles, models, or config before guessing model names, effort levels, or defaults.",
       "Preview cleanup before execute=true, and never kill sessions the fleet does not own.",
     ],
@@ -532,17 +534,24 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           ? mode === "persistent"
             ? "\nThe task initialized this persistent OpenCode session. It remains wakeable through Intercom until stopped."
             : "\nThe task was passed to this one-shot OpenCode run as its initial prompt."
-          : `\nNext: wait for '${worker.intercomTarget}' in intercom list, then send this task with intercom send or ask:\n${worker.task}`;
+          : `\nNext: send this task directly to '${worker.intercomTarget}' with intercom_send or intercom_ask. Do not call intercom_list just to rediscover this owned target. If first delivery reports that it is not connected yet, wait briefly and retry:\n${worker.task}`;
         return textResult(`Started ${formatWorker(worker)}${next}`, { worker });
       }
 
       if (params.action === "list") {
-        const workers = await reconcile();
-        return textResult(formatWorkers(workers), { workers });
+        const reconciled = await reconcile();
+        const workers = params.all
+          ? reconciled
+          : workersAttachedToManager(reconciled, managerSessionId(ctx));
+        return textResult(formatWorkers(workers), { workers, scope: params.all ? "all" : "manager" });
       }
 
       if (params.action === "status") {
-        const workers = extractWorkers({ version: 1, workers: await reconcile() }, params.id);
+        const reconciled = await reconcile();
+        const visible = params.all
+          ? reconciled
+          : workersAttachedToManager(reconciled, managerSessionId(ctx));
+        const workers = extractWorkers({ version: 1, workers: visible }, params.id);
         if (params.id && workers[0]?.unit) {
           const processes = await readUnitProcessTree(runner, workers[0].unit);
           const processText = processes.tree || "(unit cgroup is empty or unloaded)";
@@ -766,7 +775,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const mode = worker.profile ? config.profiles[worker.profile]?.mode : undefined;
       const next = worker.harness === "opencode"
         ? mode === "persistent" ? "The OpenCode session is initialized and remains wakeable through Intercom." : "Task started as the initial OpenCode prompt."
-        : `Wait for ${worker.intercomTarget} in Intercom, then send or ask the assignment.`;
+        : `Send the assignment directly to ${worker.intercomTarget} with intercom_send or intercom_ask; retry briefly if it is still registering.`;
       ctx.ui.notify(`Started ${worker.id}. ${next}`, "info");
       await updateStatus(ctx);
     },

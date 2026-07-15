@@ -24,7 +24,7 @@ Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The packag
 - The manager owns creation, leases, stopping, and cleanup.
 - Use unique worker ids and give each coworker an exclusive scope and explicit role.
 - All harnesses start inside systemd user services so MCP servers, sidecars, browsers, and other descendants stop with the owned cgroup.
-- After Pi, Codex, or Claude is spawned, wait for its id in `intercom({ action: "list" })`, then send the task with `intercom({ action: "send", ... })` or `ask`. OpenCode receives its initial task at launch; persistent OpenCode peers remain wakeable afterward.
+- `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. Send directly to that target with `intercom_send` or `intercom_ask`; do not call `intercom_list` merely to rediscover a managed worker. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
 - Use `capabilities`, `profiles`, `models`, `variants`, or `config` instead of guessing options. OpenCode variants are model-specific.
 - Preview cleanup before executing it. Never kill or forget sessions the orchestrator does not own.
 
@@ -39,7 +39,8 @@ agent_fleet({ action: "models", harness: "pi" })
 agent_fleet({ action: "models", harness: "opencode" })
 agent_fleet({ action: "variants", model: "anthropic/claude-fable-5" })
 agent_fleet({ action: "config" })
-agent_fleet({ action: "list" })
+agent_fleet({ action: "list" }) // current manager's workers and Intercom targets
+agent_fleet({ action: "list", all: true }) // explicit cross-manager diagnostics
 ```
 
 Normalized effort values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `capabilities` reports the subset supported by each harness.
@@ -142,7 +143,7 @@ Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unles
 
 ## Current limitations
 
-- Pi, Codex, and Claude registration is not automatically awaited; send the assignment after the target appears in Intercom.
+- Pi, Codex, and Claude registration is not automatically awaited. Use the `intercomTarget` returned by spawn directly; if the first send reports that it is not connected yet, wait briefly and retry. Use `intercom_list` only as a readiness diagnostic or to discover peers not managed by this fleet session.
 - A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or renew them. Expired leases remain eligible for orchestrator-wide garbage collection.
 - `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns. `opencode-run` remains available for cheaper one-shot assignments.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Scope `agent_fleet` list and unqualified status results to the current manager session by default, with `all: true` for explicit cross-manager diagnostics.
+- Return and document direct `intercomTarget` routing so managers can message owned workers without rediscovering them through the global Intercom list.
+- Update manager guidance to the split `intercom_send`, `intercom_ask`, `intercom_list`, and `intercom_status` tools.
+
 ## 0.9.2 - 2026-07-14
 
 - Coordinate the Agent Intercom family on the `0.9.2` release line.

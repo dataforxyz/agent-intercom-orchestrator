@@ -99,8 +99,8 @@ pi
 Verify:
 
 ```typescript
-intercom({ action: "status" })
-intercom({ action: "list" })
+intercom_status({})
+intercom_list({})
 ```
 
 ### Orchestrator Pi plugin
@@ -444,7 +444,7 @@ agent_fleet({ action: "adopt", id: "architecture-advisor" })
 
 Stop and renew refuse live workers owned by another manager session until this handoff occurs. `adopt` is an explicit transfer and does not try to prove that the previous manager is offline, so coordinate it rather than using it to steal a coworker from another live manager.
 
-The Pi footer and `/agents` are scoped by `managerSessionId`, following the same parent-session idea used by `pi-subagents`: each Pi TUI sees only coworkers it spawned or adopted. Use `/agents all` or the `agent_fleet` `list` action when you intentionally need the global owned-worker inventory.
+The Pi footer, `/agents`, and `agent_fleet({ action: "list" })` are scoped by `managerSessionId`, following the same parent-session idea used by `pi-subagents`: each manager sees only coworkers it spawned or adopted. Use `/agents all` or `agent_fleet({ action: "list", all: true })` when you intentionally need the global owned-worker inventory.
 
 Leases are the final garbage-collection boundary: startup cleanup and `/agents-cleanup` may stop any orchestrator-owned worker after its lease expires, even when its original manager session is gone. Completed one-shot units are retired automatically after reconciliation so their retained exit status does not accumulate in systemd.
 
@@ -545,33 +545,25 @@ Then have the manager read and send it, or load it into the worker instructions 
 
 ## Verify registration before assigning work
 
-Launching a process does not prove that it registered correctly, and a `--no-tui` worker may wait silently until it receives a message. Orchestrator-owned persistent OpenCode peers are the exception: spawn waits for run-specific plugin, Intercom, and session readiness before returning. Independent/manual sessions still require the checks below.
+`agent_fleet` spawn and list results include the owned worker's `intercomTarget`. Use that target directly instead of calling the global Intercom list to rediscover it:
 
-Check:
+```typescript
+intercom_send({
+  to: "worker-id",
+  message: "Start now. First report your plan, ownership boundary, and current worktree status."
+})
+```
 
-1. the tmux session exists
-2. the worker process is alive
-3. intercom lists the expected name and ID
-4. the reported cwd is correct
-5. there is only one session with that identity
-6. the worktree is the intended one
+Pi, Codex, and Claude registration is not automatically awaited. If the first delivery reports that the target is not connected yet, wait briefly and retry. Use `intercom_list({})` only as a readiness diagnostic or to discover independently launched peers. Orchestrator-owned persistent OpenCode peers are the exception: spawn waits for run-specific plugin, Intercom, and session readiness before returning.
+
+For independent/manual sessions, still check that the process is alive, the reported cwd is correct, the identity is unique, and the worktree is intended:
 
 ```bash
 tmux has-session -t <worker-id>
 ```
 
 ```typescript
-intercom({ action: "list" })
-```
-
-Then send an explicit start message:
-
-```typescript
-intercom({
-  action: "send",
-  to: "worker-id",
-  message: "Start now. First report your plan, ownership boundary, and current worktree status."
-})
+intercom_list({})
 ```
 
 Do not confuse worker registration with task execution.
@@ -664,14 +656,13 @@ required.
 Use `send` for delegation and progress that does not require an immediate answer:
 
 ```typescript
-intercom({ action: "send", to: "worker", message: "Begin task 2." })
+intercom_send({ to: "worker", message: "Begin task 2." })
 ```
 
 Use `ask` only for a decision that blocks the sender:
 
 ```typescript
-intercom({
-  action: "ask",
+intercom_ask({
   to: "manager",
   message: "The migration changes the public error shape. Approve that change?"
 })

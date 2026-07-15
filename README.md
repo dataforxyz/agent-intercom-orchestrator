@@ -17,7 +17,7 @@ pi install npm:@dataforxyz/agent-intercom-pi
 pi install npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
-For Git-pinned installs, use `git:github.com/dataforxyz/agent-intercom-pi@v0.9.1` and `git:github.com/dataforxyz/agent-intercom-orchestrator@v0.9.1` instead.
+For Git-pinned installs, use `git:github.com/dataforxyz/agent-intercom-pi@v0.9.2` and `git:github.com/dataforxyz/agent-intercom-orchestrator@v0.9.2` instead.
 
 Restart Pi, or run `/reload` in every already-open Pi session. Confirm both packages are installed:
 
@@ -53,12 +53,12 @@ Start with:
 agent_fleet({ action: "doctor" })
 agent_fleet({ action: "capabilities" })
 agent_fleet({ action: "models", harness: "pi" })
-agent_fleet({ action: "list" })
+agent_fleet({ action: "list" }) // workers owned by this manager, including Intercom targets
 ```
 
 Pi, Codex, Claude, and OpenCode coworkers launch in transient systemd user services with `KillMode=control-group`, a maximum runtime, a renewable lease, and an owned worker record. Stopping the unit stops the harness, MCP servers, Playwright browsers, sidecars, and every descendant that remains in its cgroup; stop escalates and verifies that the cgroup is empty. `agent_fleet({ action: "status", id: "..." })` includes the current cgroup process tree. Pi coworkers are independent RPC-mode Pi sessions with their own transcript, model, thinking effort, session name, and Intercom identity—not child subagents. The persistent OpenCode profile owns a headless server plus an initialized session; `opencode-run` remains available for one-shot work.
 
-Use `/agents-new` for an interactive spawn wizard, `/agents-config` to set per-harness defaults and role presets, and `/agents-models [harness]` to browse models. The Pi footer and `/agents` show only coworkers attached to the current Pi session; `/agents all` and `agent_fleet({ action: "list" })` provide the global owned-worker view. After an intentional manager restart, `agent_fleet({ action: "adopt", id: "..." })` transfers a live owned coworker to the new manager session before stop or renew operations. `doctor` also checks whether the OpenCode Intercom server plugin is visible in OpenCode's resolved configuration; a persistent OpenCode unit without that plugin cannot receive follow-up messages.
+Use `/agents-new` for an interactive spawn wizard, `/agents-config` to set per-harness defaults and role presets, and `/agents-models [harness]` to browse models. The Pi footer, `/agents`, and `agent_fleet({ action: "list" })` show only coworkers attached to the current manager session. Use `/agents all` or `agent_fleet({ action: "list", all: true })` only for explicit cross-manager diagnostics. Spawn and list results include each worker's `intercomTarget`, so the manager can call `intercom_send` or `intercom_ask` directly without rediscovering owned workers through the global Intercom list. After an intentional manager restart, `agent_fleet({ action: "adopt", id: "..." })` transfers a live owned coworker to the new manager session before stop or renew operations. `doctor` also checks whether the OpenCode Intercom server plugin is visible in OpenCode's resolved configuration; a persistent OpenCode unit without that plugin cannot receive follow-up messages.
 
 See [`examples/orchestrator-config.json`](examples/orchestrator-config.json) and the bundled Agent Skill for the current API and limitations.
 
