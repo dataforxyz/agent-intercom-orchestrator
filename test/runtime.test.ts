@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { prepareWorkerRuntime } from "../src/runtime.ts";
+import { supportsUserMountNamespaces } from "./systemd-support.ts";
 
 test("clean environment launcher drops unrelated manager secrets", () => {
   const launcher = fileURLToPath(new URL("../src/clean-env-launcher.mjs", import.meta.url));
@@ -115,8 +116,8 @@ test("worker runtimes isolate writable harness state by worker id", async () => 
 });
 
 test("systemd exposes only the assigned worker state through the fixed private mountpoint", async (t) => {
-  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
-    t.skip("systemd user manager is unavailable");
+  if (!supportsUserMountNamespaces()) {
+    t.skip("systemd user mount namespaces are unavailable");
     return;
   }
   const home = await mkdtemp(join(tmpdir(), "aio-runtime-mount-"));
