@@ -4,6 +4,7 @@
 
 - Put the manager Intercom target in every worker environment and standing prompt, and direct coworkers to the read-only `intercom_team` tool.
 - Add `versions` and source-aware `update` actions for the coordinated adapter family, including preview-by-default execution, dirty/pinned Git safeguards, harness CLI reporting, and doctor drift warnings.
+- Stop advertising `minimal` reasoning for persistent Codex coworkers because the current app-server tool set rejects that effort before a turn can run; `low` is the lowest supported level.
 
 ## 0.9.3 - 2026-07-15
 

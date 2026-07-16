@@ -227,6 +227,7 @@ test("model identifiers are normalized for external harness CLIs", () => {
 test("effort validation is harness-aware", () => {
   assert.equal(validateEffort("pi", "max"), "max");
   assert.equal(validateEffort("claude", "max"), "max");
+  assert.throws(() => validateEffort("codex", "minimal"), /does not support/);
   assert.throws(() => validateEffort("codex", "max"), /does not support/);
   assert.throws(() => validateEffort("claude", "minimal"), /does not support/);
 });

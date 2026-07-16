@@ -6,7 +6,7 @@ export const EFFORT_LEVELS: Effort[] = ["off", "minimal", "low", "medium", "high
 
 export const HARNESS_EFFORTS: Record<Harness, Effort[]> = {
   pi: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-  codex: ["minimal", "low", "medium", "high", "xhigh"],
+  codex: ["low", "medium", "high", "xhigh"],
   claude: ["low", "medium", "high", "xhigh", "max"],
   opencode: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
