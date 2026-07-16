@@ -2,7 +2,8 @@ import { statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import type { Effort, Harness, LaunchProfile, OrchestratorConfig, RolePreset } from "./types.ts";
+import { DEFAULT_PERMISSION_PROFILES } from "./permissions.ts";
+import type { Effort, GitPolicy, Harness, LaunchProfile, OrchestratorConfig, PermissionProfile, RolePreset, WorkspacePolicy } from "./types.ts";
 
 const HARNESSES: Harness[] = ["pi", "codex", "claude", "opencode"];
 const EFFORTS: Effort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -85,28 +86,33 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
       description: "One-shot OpenCode worker; the assignment is passed as its initial headless run prompt",
     },
   },
+  permissionProfiles: structuredClone(DEFAULT_PERMISSION_PROFILES),
   roles: {
     advisor: {
       harness: "pi",
       profile: "pi-peer",
+      permissionProfile: "review-readonly",
       effort: "high",
       instructions: "Act as an independent advisor coworker. Challenge plans, inspect evidence, surface tradeoffs, and do not edit files unless explicitly asked.",
     },
     builder: {
       harness: "codex",
       profile: "codex-safe",
+      permissionProfile: "builder-restricted",
       effort: "high",
       instructions: "Implement the assigned scope and report verifiable evidence with completion claims.",
     },
     challenger: {
       harness: "claude",
       profile: "claude-safe",
+      permissionProfile: "review-readonly",
       effort: "high",
       instructions: "Challenge completion claims, inspect the actual evidence, and identify missing proof or defects.",
     },
     researcher: {
       harness: "pi",
       profile: "pi-peer",
+      permissionProfile: "review-readonly",
       effort: "medium",
       instructions: "Research the assigned question independently, cite concrete evidence, and report uncertainty clearly.",
     },
@@ -129,6 +135,14 @@ function isHarness(value: unknown): value is Harness {
 
 function isEffort(value: unknown): value is Effort {
   return typeof value === "string" && EFFORTS.includes(value as Effort);
+}
+
+function isWorkspacePolicy(value: unknown): value is WorkspacePolicy {
+  return value === "host" || value === "read-only" || value === "read-write";
+}
+
+function isGitPolicy(value: unknown): value is GitPolicy {
+  return value === "full" || value === "read-only";
 }
 
 function positiveNumber(value: unknown, fallback: number): number {
@@ -156,11 +170,37 @@ function mergeProfile(value: unknown): LaunchProfile | undefined {
   };
 }
 
+function mergePermissionProfile(value: unknown, fallback?: PermissionProfile): PermissionProfile | undefined {
+  if (!isRecord(value)) return undefined;
+  const workspace = isWorkspacePolicy(value.workspace) ? value.workspace : fallback?.workspace;
+  const git = isGitPolicy(value.git) ? value.git : fallback?.git;
+  if (!workspace || !git) return undefined;
+  const strings = (input: unknown): string[] | undefined => Array.isArray(input) && input.every((item) => typeof item === "string")
+    ? input as string[]
+    : undefined;
+  const record = (input: unknown): Record<string, string> | undefined => isRecord(input)
+    ? Object.fromEntries(Object.entries(input).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+    : undefined;
+  return {
+    ...(fallback ?? {}),
+    workspace,
+    git,
+    ...(typeof value.description === "string" ? { description: value.description } : {}),
+    ...(typeof value.hardened === "boolean" ? { hardened: value.hardened } : {}),
+    ...(strings(value.piTools) ? { piTools: strings(value.piTools) } : {}),
+    ...(strings(value.inaccessiblePaths) ? { inaccessiblePaths: strings(value.inaccessiblePaths) } : {}),
+    ...(strings(value.writablePaths) ? { writablePaths: strings(value.writablePaths) } : {}),
+    ...(record(value.environment) ? { environment: record(value.environment) } : {}),
+    ...(record(value.systemdProperties) ? { systemdProperties: record(value.systemdProperties) } : {}),
+  };
+}
+
 function mergeRole(value: unknown): RolePreset | undefined {
   if (!isRecord(value)) return undefined;
   return {
     ...(isHarness(value.harness) ? { harness: value.harness } : {}),
     ...(typeof value.profile === "string" ? { profile: value.profile } : {}),
+    ...(typeof value.permissionProfile === "string" ? { permissionProfile: value.permissionProfile } : {}),
     ...(typeof value.model === "string" ? { model: value.model } : {}),
     ...(isEffort(value.effort) ? { effort: value.effort } : {}),
     ...(typeof value.instructions === "string" ? { instructions: value.instructions } : {}),
@@ -200,6 +240,13 @@ export function mergeConfig(value: unknown): OrchestratorConfig {
       if (profile) profiles[name] = profile;
     }
   }
+  const permissionProfiles = structuredClone(DEFAULT_CONFIG.permissionProfiles);
+  if (isRecord(value.permissionProfiles)) {
+    for (const [name, permissionValue] of Object.entries(value.permissionProfiles)) {
+      const permission = mergePermissionProfile(permissionValue, permissionProfiles[name]);
+      if (permission) permissionProfiles[name] = permission;
+    }
+  }
   const roles = structuredClone(DEFAULT_CONFIG.roles);
   if (isRecord(value.roles)) {
     for (const [name, roleValue] of Object.entries(value.roles)) {
@@ -213,6 +260,7 @@ export function mergeConfig(value: unknown): OrchestratorConfig {
     defaultModels: mergeHarnessStrings(value.defaultModels, DEFAULT_CONFIG.defaultModels),
     defaultEfforts: mergeHarnessEfforts(value.defaultEfforts, DEFAULT_CONFIG.defaultEfforts),
     profiles,
+    permissionProfiles,
     roles,
     leaseMinutes: positiveNumber(value.leaseMinutes, DEFAULT_CONFIG.leaseMinutes),
     heartbeatSeconds: positiveNumber(value.heartbeatSeconds, DEFAULT_CONFIG.heartbeatSeconds),
@@ -258,6 +306,16 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
       .filter((harness) => config.defaultProfiles[harness] !== DEFAULT_CONFIG.defaultProfiles[harness])
       .map((harness) => [harness, config.defaultProfiles[harness]]),
   );
+  const permissionProfiles = Object.fromEntries(
+    Object.entries(config.permissionProfiles).flatMap(([name, profile]) => {
+      const builtIn = DEFAULT_CONFIG.permissionProfiles[name];
+      if (!builtIn) return [[name, profile]];
+      const delta = Object.fromEntries(
+        Object.entries(profile).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(builtIn[key as keyof PermissionProfile])),
+      );
+      return Object.keys(delta).length ? [[name, delta]] : [];
+    }),
+  );
   const roles = Object.fromEntries(
     Object.entries(config.roles).flatMap(([name, role]) => {
       const builtIn = DEFAULT_CONFIG.roles[name];
@@ -274,6 +332,7 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
     defaultProfiles,
     defaultModels: config.defaultModels,
     defaultEfforts: config.defaultEfforts,
+    permissionProfiles,
     roles,
     leaseMinutes: config.leaseMinutes,
     heartbeatSeconds: config.heartbeatSeconds,

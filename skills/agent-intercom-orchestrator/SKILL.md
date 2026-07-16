@@ -27,7 +27,8 @@ Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The packag
 - `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. For Pi, Codex, and Claude, deliver the assignment with `intercom_send`; reserve `intercom_ask` for a later question that blocks the manager's next step. Progress/status checkpoints also use `intercom_send`. Do not call `intercom_list` merely to rediscover a managed worker. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
 - Create feature worktrees before spawning sandboxed builders such as `codex-safe`, and pass the worktree as `cwd`. A workspace-write worker generally cannot create a sibling under `~/worktrees` when its writable root is the shared checkout.
 - Every owned worker is told its manager target. Coworkers use `intercom_team({})` to get the current manager and live same-manager coworkers; this follows adoption dynamically and does not grant fleet mutation authority.
-- Use `capabilities`, `profiles`, `models`, `variants`, `versions`, or `config` instead of guessing options or installed package state. OpenCode variants are model-specific.
+- Use `capabilities`, `profiles`, `permissions`, `models`, `variants`, `versions`, or `config` instead of guessing options, permission policy, or installed package state. OpenCode variants are model-specific.
+- Built-in advisor, researcher, and challenger roles use `review-readonly`; builders and custom roles use `builder-restricted`. Select `trusted` only when broad host and Git authority is intentional.
 - Preview update and cleanup before executing them. Never replace a detected Git install with npm, and never kill or forget sessions the orchestrator does not own.
 
 ## Discover options
@@ -39,6 +40,7 @@ agent_fleet({ action: "update" }) // source-aware preview
 agent_fleet({ action: "capabilities" })
 agent_fleet({ action: "profiles" })
 agent_fleet({ action: "profiles", harness: "pi" })
+agent_fleet({ action: "permissions" })
 agent_fleet({ action: "models", harness: "pi" })
 agent_fleet({ action: "models", harness: "opencode" })
 agent_fleet({ action: "variants", model: "anthropic/claude-fable-5" })
@@ -56,6 +58,7 @@ agent_fleet({
   action: "spawn",
   harness: "pi",
   profile: "pi-peer",
+  permissionProfile: "review-readonly",
   id: "architecture-advisor",
   role: "advisor",
   model: "claude/claude-opus-4-8",
@@ -74,6 +77,7 @@ agent_fleet({
   action: "spawn",
   harness: "codex",
   profile: "codex-safe",
+  permissionProfile: "builder-restricted",
   id: "codex-build-api",
   role: "builder",
   model: "gpt-5.6-sol",
@@ -86,6 +90,7 @@ agent_fleet({
   action: "spawn",
   harness: "claude",
   profile: "claude-safe",
+  permissionProfile: "review-readonly",
   id: "claude-challenge-api",
   role: "challenger",
   model: "opus",
@@ -98,6 +103,7 @@ agent_fleet({
   action: "spawn",
   harness: "opencode",
   profile: "opencode-peer",
+  permissionProfile: "review-readonly",
   id: "opencode-check-api",
   role: "tester",
   model: "anthropic/claude-fable-5",
@@ -141,7 +147,7 @@ agent_fleet({ action: "forget", id: "codex-build-api" })
 ## Pi commands
 
 - `/agents` — inspect managed coworkers
-- `/agents-new` — interactive role, harness, profile, model, effort, cwd, id, and task wizard
+- `/agents-new` — interactive role, harness, launch profile, permission profile, model, effort, cwd, id, and task wizard
 - `/agents-config` — edit per-harness defaults, lifecycle settings, and role presets
 - `/agents-models [pi|codex|claude|opencode]` — browse available models
 - `/agents-cleanup [execute]` — preview or execute expired-lease cleanup
@@ -155,5 +161,6 @@ Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unles
 - `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns, and retries early server bind/startup exits on a fresh port. `opencode-run` remains available for cheaper one-shot assignments.
 - Automatic lease renewal reconciles the systemd unit first, so missing, exited, and failed services are not kept alive by manager activity. A process that remains active but is application-level hung still requires status/log inspection and an explicit stop.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.
+- Permission profiles are guardrails for ordinary coding-agent mistakes, not a hostile-code container. Restricted workers retain writable private temp and harness runtime-state directories, a restricted builder can still damage files inside its assigned workspace, and direct absolute invocation of host binaries can bypass the PATH-level `git`/`gh` guards; systemd's read-only host/Git mounts and hidden credentials remain the backstop.
 - Playwright, browsers, MCP servers, and ordinary descendants are contained and verified through the worker cgroup. Detached systemd services, containers, remote browsers, and cloud jobs require explicit manager ownership and recorded resource IDs.
 - Linux systemd user services are the only process backend in this draft.

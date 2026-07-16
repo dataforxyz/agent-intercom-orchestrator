@@ -40,7 +40,7 @@ test("harness launch args include identity or the initial task", () => {
   const opencode = DEFAULT_CONFIG.profiles["opencode-run"];
   assert.ok(pi && codex && claude && opencode);
   const managerTarget = "manager-a";
-  const piArgs = buildWorkerArgs({ harness: "pi", profile: pi, workerId: "advisor-a", cwd: "/repo", role: "advisor", task: "Review", model: "codex/gpt-5.6-sol", effort: "high", managerTarget });
+  const piArgs = buildWorkerArgs({ harness: "pi", profile: pi, workerId: "advisor-a", cwd: "/repo", role: "advisor", task: "Review", model: "codex/gpt-5.6-sol", effort: "high", managerTarget, permissionProfile: DEFAULT_CONFIG.permissionProfiles["review-readonly"] });
   const codexArgs = buildWorkerArgs({ harness: "codex", profile: codex, workerId: "worker-a", cwd: "/repo", role: "builder", task: "Build", model: "gpt-5.6-sol", effort: "high", managerTarget });
   const claudeArgs = buildWorkerArgs({ harness: "claude", profile: claude, workerId: "worker-b", cwd: "/repo", role: "challenger", task: "Challenge", model: "opus", effort: "max", managerTarget });
   const opencodeArgs = buildWorkerArgs({ harness: "opencode", profile: opencode, workerId: "worker-c", cwd: "/repo", role: "tester", task: "Return OPEN_OK", model: "opencode/claude-sonnet-5", effort: "high", managerTarget });
@@ -53,6 +53,8 @@ test("harness launch args include identity or the initial task", () => {
   assert.ok(piArgs.includes("--name"));
   assert.ok(piArgs.includes("--thinking"));
   assert.ok(piArgs.includes("codex/gpt-5.6-sol"));
+  assert.ok(piArgs.includes("--tools"));
+  assert.equal(piArgs[piArgs.indexOf("--tools") + 1].includes("bash"), false);
   assert.ok(codexArgs.includes("--instructions"));
   assert.ok(codexArgs.includes("model=\"gpt-5.6-sol\""));
   assert.ok(codexArgs.includes("model_reasoning_effort=\"high\""));
@@ -210,9 +212,12 @@ test("configuration merges profiles, defaults, and role presets without dropping
     leaseMinutes: 5,
     defaultModels: { pi: "claude/claude-sonnet-5" },
     defaultEfforts: { pi: "max" },
+    permissionProfiles: {
+      audit: { workspace: "read-only", git: "read-only", hardened: true, piTools: ["read", "grep"] },
+    },
     roles: {
       advisor: { instructions: "Override only the instructions." },
-      auditor: { harness: "pi", profile: "pi-peer", effort: "high", instructions: "Audit evidence." },
+      auditor: { harness: "pi", profile: "pi-peer", permissionProfile: "audit", effort: "high", instructions: "Audit evidence." },
     },
     profiles: {
       "codex-yolo": {
@@ -226,6 +231,8 @@ test("configuration merges profiles, defaults, and role presets without dropping
   assert.equal(config.defaultModels.pi, "claude/claude-sonnet-5");
   assert.equal(config.defaultEfforts.pi, "max");
   assert.equal(config.roles.auditor.harness, "pi");
+  assert.equal(config.roles.auditor.permissionProfile, "audit");
+  assert.equal(config.permissionProfiles.audit.workspace, "read-only");
   assert.equal(config.roles.advisor.harness, "pi");
   assert.equal(config.roles.advisor.profile, "pi-peer");
   assert.equal(config.roles.advisor.instructions, "Override only the instructions.");
@@ -292,7 +299,8 @@ test("default configuration writes preserve custom profiles without serializing 
     const path = join(dir, "config.json");
     await writeFile(path, JSON.stringify({
       profiles: { custom: { harness: "pi", command: "/custom/pi", args: ["--mode", "rpc"] } },
-      roles: { custom: { harness: "pi", profile: "custom", instructions: "Stay custom." } },
+      permissionProfiles: { custom: { workspace: "read-only", git: "read-only", piTools: ["read"] } },
+      roles: { custom: { harness: "pi", profile: "custom", permissionProfile: "custom", instructions: "Stay custom." } },
     }));
     const draft = await readConfig(path);
     draft.defaultModels.pi = "codex/gpt-5.6-sol";
@@ -301,6 +309,8 @@ test("default configuration writes preserve custom profiles without serializing 
     assert.equal(raw.defaultModels.pi, "codex/gpt-5.6-sol");
     assert.equal(raw.profiles.custom.command, "/custom/pi");
     assert.equal(raw.profiles["pi-peer"], undefined);
+    assert.equal(raw.permissionProfiles.custom.workspace, "read-only");
+    assert.equal(raw.permissionProfiles.trusted, undefined);
     assert.equal(raw.defaultProfiles.pi, undefined);
     assert.equal(raw.roles.advisor, undefined);
     assert.equal(raw.roles.custom.instructions, "Stay custom.");

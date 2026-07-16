@@ -75,10 +75,27 @@
       "maxRuntime": "2h"
     }
   },
+  "permissionProfiles": {
+    "review-readonly": {
+      "workspace": "read-only",
+      "git": "read-only",
+      "hardened": true
+    },
+    "builder-restricted": {
+      "workspace": "read-write",
+      "git": "read-only",
+      "hardened": true
+    },
+    "trusted": {
+      "workspace": "host",
+      "git": "full"
+    }
+  },
   "roles": {
     "advisor": {
       "harness": "pi",
       "profile": "pi-peer",
+      "permissionProfile": "review-readonly",
       "model": "claude/claude-opus-4-8",
       "effort": "high",
       "instructions": "Act as an independent advisor coworker. Challenge plans, inspect evidence, and do not edit unless explicitly asked."
@@ -86,12 +103,14 @@
     "builder": {
       "harness": "codex",
       "profile": "codex-safe",
+      "permissionProfile": "builder-restricted",
       "effort": "high",
       "instructions": "Implement the assigned scope and report verifiable evidence."
     },
     "challenger": {
       "harness": "claude",
       "profile": "claude-safe",
+      "permissionProfile": "review-readonly",
       "effort": "high",
       "instructions": "Challenge completion claims and identify missing evidence or defects."
     }

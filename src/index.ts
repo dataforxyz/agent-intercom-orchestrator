@@ -8,9 +8,10 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
+import { buildPermissionEnvironment, buildPermissionUnitProperties, harnessWritableStatePaths, registerWorkerPermissionPolicy } from "./permissions.ts";
 import { WorkerStore } from "./store.ts";
 import { getUnitStatus, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, stopUnit, systemdAvailable } from "./systemd.ts";
-import type { CommandRunner, Effort, Harness, OrchestratorConfig, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
+import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
 import {
   buildWorkerArgs,
   buildWorkerEnvironment,
@@ -42,6 +43,7 @@ const ACTIONS = [
   "adopt",
   "capabilities",
   "profiles",
+  "permissions",
   "models",
   "variants",
   "config",
@@ -51,6 +53,7 @@ const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as c
 const STATUS_KEY = "agent-intercom-orchestrator";
 const PI_PEER_LAUNCHER = fileURLToPath(new URL("./pi-peer-launcher.mjs", import.meta.url));
 const OPENCODE_PEER_LAUNCHER = fileURLToPath(new URL("./opencode-peer-launcher.mjs", import.meta.url));
+const GIT_GUARD_BIN = fileURLToPath(new URL("./guard-bin", import.meta.url));
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const AgentFleetParams = Type.Object({
@@ -61,6 +64,7 @@ const AgentFleetParams = Type.Object({
   task: Type.Optional(Type.String({ description: "Assignment or standing mandate for the worker" })),
   cwd: Type.Optional(Type.String({ description: "Worker working directory" })),
   profile: Type.Optional(Type.String({ description: "Configured launch profile" })),
+  permissionProfile: Type.Optional(Type.String({ description: "Configured permission profile, for example review-readonly or builder-restricted" })),
   model: Type.Optional(Type.String({ description: "Harness model name or provider/model identifier" })),
   effort: Type.Optional(StringEnum(EFFORTS)),
   instructions: Type.Optional(Type.String({ description: "Additional standing instructions for the coworker" })),
@@ -78,6 +82,7 @@ type FleetParams = {
   task?: string;
   cwd?: string;
   profile?: string;
+  permissionProfile?: string;
   model?: string;
   effort?: Effort;
   instructions?: string;
@@ -93,6 +98,8 @@ type ResolvedSpawn = {
   task: string;
   cwd: string;
   profileName: string;
+  permissionProfileName: string;
+  permissionProfile: PermissionProfile;
   model?: string;
   effort?: Effort;
   instructions?: string;
@@ -158,6 +165,14 @@ function runnerFor(pi: ExtensionAPI): CommandRunner {
   };
 }
 
+async function discoverGitMetadataPaths(runner: CommandRunner, cwd: string): Promise<string[]> {
+  const git = resolveProfileCommand("git");
+  if (!git) return [];
+  const result = await runner.exec(git, ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { timeout: 5000 });
+  if (result.code !== 0) return [];
+  return [...new Set(result.stdout.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("/")))];
+}
+
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toISOString();
 }
@@ -167,9 +182,10 @@ function formatWorker(worker: WorkerRecord): string {
   const unit = worker.unit ? ` unit=${worker.unit}` : "";
   const model = worker.model ? ` model=${worker.model}` : "";
   const effort = worker.effort ? ` effort=${worker.effort}` : "";
+  const permission = worker.permissionProfile ? ` permission=${worker.permissionProfile}` : "";
   const externalSession = worker.externalSessionId ? ` session=${worker.externalSessionId}` : "";
   const error = worker.lastError ? ` error=${worker.lastError}` : "";
-  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${error}`;
+  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${permission}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${error}`;
 }
 
 function formatWorkers(workers: WorkerRecord[]): string {
@@ -262,6 +278,7 @@ function formatConfig(config: OrchestratorConfig, configPath: string): string {
       `${harness}: profile=${config.defaultProfiles[harness] ?? "(none)"} model=${config.defaultModels[harness] ?? "(harness default)"} effort=${config.defaultEfforts[harness] ?? "(harness default)"}`,
     );
   }
+  lines.push(`permissions: ${Object.keys(config.permissionProfiles).sort().join(", ") || "(none)"}`);
   lines.push(`roles: ${Object.keys(config.roles).sort().join(", ") || "(none)"}`);
   lines.push(`lease=${config.leaseMinutes}m heartbeat=${config.heartbeatSeconds}s max-runtime=${config.maxRuntime}`);
   lines.push(`cleanup: startup=${config.cleanupExpiredOnStart} shutdown=${config.cleanupOnShutdown}`);
@@ -269,6 +286,7 @@ function formatConfig(config: OrchestratorConfig, configPath: string): string {
 }
 
 export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
+  registerWorkerPermissionPolicy(pi);
   if (process.env.AGENT_INTERCOM_ORCHESTRATOR_DISABLED === "1") return;
   const agentDir = getAgentDir();
   const configPath = join(agentDir, "intercom", "orchestrator", "config.json");
@@ -446,6 +464,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (!task) throw new Error("spawn requires task");
     const profileName = params.profile || preset?.profile || config.defaultProfiles[harness];
     if (!profileName) throw new Error(`No default profile configured for ${harness}`);
+    const permissionProfileName = params.permissionProfile?.trim() || preset?.permissionProfile || "builder-restricted";
+    const permissionProfile = config.permissionProfiles[permissionProfileName];
+    if (!permissionProfile) throw new Error(`Unknown permission profile: ${permissionProfileName}`);
     const model = normalizeModelForHarness(harness, params.model?.trim() || preset?.model || config.defaultModels[harness]);
     const effort = validateEffort(harness, params.effort || preset?.effort || config.defaultEfforts[harness]);
     const instructions = params.instructions?.trim() || preset?.instructions;
@@ -455,6 +476,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       task,
       cwd: resolve(ctx.cwd, params.cwd || "."),
       profileName,
+      permissionProfileName,
+      permissionProfile,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
       ...(instructions ? { instructions } : {}),
@@ -463,7 +486,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
   const spawnWorker = async (params: FleetParams, ctx: ExtensionContext): Promise<WorkerRecord> => {
     const resolved = resolveSpawn(params, ctx);
-    const { harness, role, task, cwd, profileName, model, effort, instructions } = resolved;
+    const { harness, role, task, cwd, profileName, permissionProfileName, permissionProfile, model, effort, instructions } = resolved;
     if (harness === "opencode" && model && effort && effort !== "off") {
       const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === model);
       if (info && !info.variants.includes(effort)) {
@@ -485,6 +508,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       task,
       cwd,
       profile: profileName,
+      permissionProfile: permissionProfileName,
       model,
       effort,
       instructions,
@@ -509,7 +533,15 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         await rm(worker.healthPath!, { force: true });
         if (params.fresh) await rm(worker.runtimeStatePath!, { force: true });
       }
-      const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions, managerTarget: worker.managerSessionId });
+      const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions, managerTarget: worker.managerSessionId, permissionProfile });
+      const gitMetadataPaths = permissionProfile.git === "read-only" ? await discoverGitMetadataPaths(runner, cwd) : [];
+      const permissionEnvironment = buildPermissionEnvironment(permissionProfileName, permissionProfile);
+      if (permissionProfile.git === "read-only") {
+        permissionEnvironment.AGENT_INTERCOM_REAL_GIT = resolveProfileCommand("git") || "/usr/bin/git";
+        const realGh = resolveProfileCommand("gh");
+        if (realGh) permissionEnvironment.AGENT_INTERCOM_REAL_GH = realGh;
+        permissionEnvironment.PATH = `${GIT_GUARD_BIN}:${profile.env?.PATH || process.env.PATH || ""}`;
+      }
       const executable = resolveProfileCommand(profile.command);
       if (!executable) throw new Error(`Launch command not found or not executable: ${profile.command}`);
       const wrappedLauncher = harness === "pi"
@@ -526,7 +558,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         cwd,
         maxRuntime: profile.maxRuntime || config.maxRuntime,
         stopTimeoutSeconds: config.stopTimeoutSeconds,
+        properties: buildPermissionUnitProperties(permissionProfile, cwd, gitMetadataPaths, harnessWritableStatePaths(harness)),
         environment: {
+          ...permissionEnvironment,
           ...buildWorkerEnvironment(harness, id, role, model, {
             runId,
             unit,
@@ -568,12 +602,15 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
   };
 
-  const formatCapabilities = (): string => HARNESSES.map((harness) => {
-    const matching = Object.entries(config.profiles).filter(([, profile]) => profile.harness === harness);
-    const profiles = matching.map(([name]) => name);
-    const modes = [...new Set(matching.map(([, profile]) => profile.mode ?? "persistent"))];
-    return `${harness}: modes=${modes.join(",") || "(none)"} efforts=${HARNESS_EFFORTS[harness].join(",")} profiles=${profiles.join(",") || "(none)"}`;
-  }).join("\n");
+  const formatCapabilities = (): string => [
+    ...HARNESSES.map((harness) => {
+      const matching = Object.entries(config.profiles).filter(([, profile]) => profile.harness === harness);
+      const profiles = matching.map(([name]) => name);
+      const modes = [...new Set(matching.map(([, profile]) => profile.mode ?? "persistent"))];
+      return `${harness}: modes=${modes.join(",") || "(none)"} efforts=${HARNESS_EFFORTS[harness].join(",")} profiles=${profiles.join(",") || "(none)"}`;
+    }),
+    `permissions: ${Object.keys(config.permissionProfiles).sort().join(",") || "(none)"}`,
+  ].join("\n");
 
   pi.registerTool({
     name: "agent_fleet",
@@ -585,7 +622,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       "Pi workers are independent Intercom peers, not pi-subagents. Use role=advisor for a persistent Pi advisor coworker.",
       "After agent_fleet spawns Pi, Codex, or Claude, send its assignment to the returned intercomTarget with intercom_send; reserve intercom_ask for a question that blocks the manager's next step. Use intercom_send for progress/status checkpoints. Do not call intercom_list merely to rediscover an owned worker. Pi, Codex, and Claude may need a brief registration delay before first delivery; OpenCode receives its initial task at launch.",
       "For sandboxed builder profiles such as codex-safe, create the feature worktree before spawning and pass that worktree as cwd. Do not ask the worker to create a sibling worktree outside its writable cwd.",
-      "Use capabilities, profiles, models, variants, versions, or config before guessing models, effort levels, package state, or defaults.",
+      "Use capabilities, profiles, permissions, models, variants, versions, or config before guessing models, permission policy, effort levels, package state, or defaults.",
       "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
     ],
     parameters: AgentFleetParams,
@@ -696,13 +733,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
               : "not detected — persistent OpenCode peers will not receive Intercom messages";
           }
         }
+        const managedHelpers = await Promise.all([
+          runner.exec("systemctl", ["is-active", "systemd-nsresourced.socket"], { timeout: 5000 }),
+          runner.exec("systemctl", ["is-active", "systemd-mountfsd.socket"], { timeout: 5000 }),
+        ]);
+        const managedUserNamespaces = {
+          nsresourced: managedHelpers[0].code === 0 ? managedHelpers[0].stdout.trim() || "active" : managedHelpers[0].stdout.trim() || "inactive",
+          mountfsd: managedHelpers[1].code === 0 ? managedHelpers[1].stdout.trim() || "active" : managedHelpers[1].stdout.trim() || "inactive",
+        };
         const state = await store.read();
         const recordedUnits = new Set(state.workers.map((worker) => worker.unit).filter(Boolean));
         const units = available ? await listWorkerUnits(runner) : [];
         const untrackedUnits = units.filter((unit) => !recordedUnits.has(unit));
         return textResult(
-          [`systemd user manager: ${available ? "available" : "unavailable"}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
-          { systemd: available, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
+          [`systemd user manager: ${available ? "available" : "unavailable"}`, `managed user namespaces: nsresourced=${managedUserNamespaces.nsresourced} mountfsd=${managedUserNamespaces.mountfsd}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `permission profiles: ${Object.keys(config.permissionProfiles).sort().join(", ")}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
+          { systemd: available, managedUserNamespaces, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
         );
       }
 
@@ -783,13 +828,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
 
       if (params.action === "capabilities") {
-        return textResult(formatCapabilities(), { efforts: HARNESS_EFFORTS, roles: config.roles });
+        return textResult(formatCapabilities(), { efforts: HARNESS_EFFORTS, roles: config.roles, permissionProfiles: config.permissionProfiles });
       }
 
       if (params.action === "profiles") {
         const profiles = Object.entries(config.profiles).filter(([, profile]) => !params.harness || profile.harness === params.harness);
         const text = profiles.length === 0 ? "No matching profiles." : profiles.map(([name, profile]) => `${name} [${profile.harness}/${profile.mode ?? "persistent"}] ${profile.description ?? profile.command}`).join("\n");
         return textResult(text, { profiles: Object.fromEntries(profiles) });
+      }
+
+      if (params.action === "permissions") {
+        const profiles = Object.entries(config.permissionProfiles);
+        const text = profiles.length === 0
+          ? "No permission profiles."
+          : profiles.map(([name, profile]) => `${name} [workspace=${profile.workspace} git=${profile.git}${profile.hardened ? " hardened" : ""}] ${profile.description ?? ""}`.trim()).join("\n");
+        return textResult(text, { permissionProfiles: config.permissionProfiles });
       }
 
       if (params.action === "models") {
@@ -819,7 +872,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     renderCall(args, theme) {
       const id = args.id ? ` ${args.id}` : "";
       const harness = args.harness ? ` [${args.harness}]` : "";
-      return new Text(`${theme.fg("toolTitle", theme.bold("agent_fleet "))}${theme.fg("accent", args.action)}${theme.fg("muted", `${id}${harness}`)}`, 0, 0);
+      const permission = args.permissionProfile ? ` permission=${args.permissionProfile}` : "";
+      return new Text(`${theme.fg("toolTitle", theme.bold("agent_fleet "))}${theme.fg("accent", args.action)}${theme.fg("muted", `${id}${harness}${permission}`)}`, 0, 0);
     },
 
     renderResult(result, { isPartial }, theme) {
@@ -877,6 +931,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const profiles = Object.entries(config.profiles).filter(([, profile]) => profile.harness === harness).map(([name]) => name);
       const profile = await ctx.ui.select("Launch profile", preferredFirst(profiles, preset?.profile || config.defaultProfiles[harness]));
       if (!profile) return;
+      const permissionProfile = await ctx.ui.select(
+        "Permission profile",
+        preferredFirst(Object.keys(config.permissionProfiles).sort(), preset?.permissionProfile || "builder-restricted"),
+      );
+      if (!permissionProfile) return;
       const models = await enumerateModels(harness);
       const defaultModel = preset?.model || config.defaultModels[harness];
       const modelOptions = ["(harness default)", ...models];
@@ -898,9 +957,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const cwd = (await ctx.ui.input("Working directory", ctx.cwd))?.trim() || ctx.cwd;
       const task = await ctx.ui.editor("Assignment or standing mandate", preset?.instructions || "");
       if (!task?.trim()) return;
-      const summary = [`id: ${id}`, `role: ${role}`, `harness: ${harness}`, `profile: ${profile}`, `model: ${modelChoice}`, `effort: ${effort ?? "(harness default)"}`, `cwd: ${cwd}`, "", task.trim()].join("\n");
+      const summary = [`id: ${id}`, `role: ${role}`, `harness: ${harness}`, `profile: ${profile}`, `permission: ${permissionProfile}`, `model: ${modelChoice}`, `effort: ${effort ?? "(harness default)"}`, `cwd: ${cwd}`, "", task.trim()].join("\n");
       if (!(await ctx.ui.confirm("Spawn coworker?", summary))) return;
-      const worker = await spawnWorker({ action: "spawn", id, role, harness, profile, model: modelChoice === "(harness default)" ? undefined : modelChoice, effort, cwd, task: task.trim() }, ctx);
+      const worker = await spawnWorker({ action: "spawn", id, role, harness, profile, permissionProfile, model: modelChoice === "(harness default)" ? undefined : modelChoice, effort, cwd, task: task.trim() }, ctx);
       const mode = worker.profile ? config.profiles[worker.profile]?.mode : undefined;
       const next = worker.harness === "opencode"
         ? mode === "persistent" ? "The OpenCode session is initialized and remains wakeable through Intercom." : "Task started as the initial OpenCode prompt."
@@ -973,11 +1032,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           if (!harness) continue;
           const profiles = Object.entries(draft.profiles).filter(([, profile]) => profile.harness === harness).map(([name]) => name);
           const profile = await ctx.ui.select("Role profile", preferredFirst(profiles, role.profile || draft.defaultProfiles[harness]));
+          const permissionProfile = await ctx.ui.select("Role permission profile", preferredFirst(Object.keys(draft.permissionProfiles).sort(), role.permissionProfile || "builder-restricted"));
           const model = await ctx.ui.input("Role model (blank = harness default)", role.model || "");
           const effortChoice = await ctx.ui.select("Role effort", preferredFirst(["(harness default)", ...HARNESS_EFFORTS[harness]], role.effort || draft.defaultEfforts[harness] || "(harness default)"));
           const effort = effortChoice && effortChoice !== "(harness default)" ? effortChoice as Effort : undefined;
           const instructions = await ctx.ui.editor("Role instructions", role.instructions || "");
-          draft.roles[roleName] = { harness, ...(profile ? { profile } : {}), ...(model?.trim() ? { model: model.trim() } : {}), ...(effort ? { effort } : {}), ...(instructions?.trim() ? { instructions: instructions.trim() } : {}) };
+          draft.roles[roleName] = { harness, ...(profile ? { profile } : {}), ...(permissionProfile ? { permissionProfile } : {}), ...(model?.trim() ? { model: model.trim() } : {}), ...(effort ? { effort } : {}), ...(instructions?.trim() ? { instructions: instructions.trim() } : {}) };
           continue;
         }
         const harness = choice.toLowerCase().replace(" defaults", "") as Harness;

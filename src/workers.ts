@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { Effort, Harness, LaunchProfile, OrchestratorConfig, UnitStatus, WorkerRecord, WorkerState } from "./types.ts";
+import { applyPiPermissionArgs } from "./permissions.ts";
+import type { Effort, Harness, LaunchProfile, OrchestratorConfig, PermissionProfile, UnitStatus, WorkerRecord, WorkerState } from "./types.ts";
 
 export const EFFORT_LEVELS: Effort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -65,12 +66,14 @@ export function buildWorkerArgs(input: {
   effort?: Effort;
   instructions?: string;
   managerTarget: string;
+  permissionProfile?: PermissionProfile;
 }): string[] {
-  const { harness, profile, workerId, cwd, role, task, model, effort, instructions, managerTarget } = input;
-  const args = [...(profile.args ?? [])];
+  const { harness, profile, workerId, cwd, role, task, model, effort, instructions, managerTarget, permissionProfile } = input;
+  let args = [...(profile.args ?? [])];
   const mandate = standingInstructions(role, task, managerTarget, instructions);
 
   if (harness === "pi") {
+    if (permissionProfile) args = applyPiPermissionArgs(args, permissionProfile);
     args.push("--name", workerId, "--session-id", workerId);
     if (model) args.push("--model", model);
     if (effort) args.push("--thinking", effort);
@@ -155,6 +158,7 @@ export function createSystemdRecord(input: {
   task: string;
   cwd: string;
   profile: string;
+  permissionProfile?: string;
   model?: string;
   effort?: Effort;
   instructions?: string;
@@ -173,6 +177,7 @@ export function createSystemdRecord(input: {
     task: input.task,
     cwd: resolve(input.cwd),
     profile: input.profile,
+    ...(input.permissionProfile ? { permissionProfile: input.permissionProfile } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     ...(input.instructions ? { instructions: input.instructions } : {}),

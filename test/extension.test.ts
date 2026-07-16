@@ -204,6 +204,7 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
 
     const lifecycle = new Map<string, (...args: any[]) => any>();
     const tools = new Map<string, any>();
+    let systemdArgs: string[] = [];
     const pi: any = {
       on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
       events: { on() { return () => {}; }, emit() {} },
@@ -211,6 +212,7 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
       registerCommand() {},
       async exec(command: string, args: string[]) {
         if (command === "systemd-run") {
+          systemdArgs = [...args];
           const environment = Object.fromEntries(args
             .filter((arg) => arg.startsWith("--setenv="))
             .map((arg) => {
@@ -253,6 +255,12 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
       ctx,
     );
     assert.match(result.content[0].text, /session=ses_immediate_state/);
+    assert.match(result.content[0].text, /permission=builder-restricted/);
+    assert.ok(systemdArgs.includes("--property=PrivateUsers=self"));
+    assert.ok(systemdArgs.includes('--property=ReadOnlyPaths="-/tmp/.git"'));
+    assert.ok(systemdArgs.includes("--setenv=GIT_TERMINAL_PROMPT=0"));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=PATH=") && arg.includes("guard-bin")));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GIT=")));
     const state = JSON.parse(await readFile(join(orchestratorDir, "opencode-peers", "state-race.state.json"), "utf8"));
     assert.equal(state.workerId, "state-race");
     assert.equal(state.sessionId, "ses_immediate_state");
@@ -388,6 +396,7 @@ test("extension registers discovery tools and interactive configuration commands
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /create the feature worktree before spawning/i);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /versions/);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /update/);
+    assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /permissionProfile/);
     for (const command of ["agents", "agents-new", "agents-config", "agents-models", "agents-cleanup"]) {
       assert.ok(commands.has(command), `missing /${command}`);
     }
@@ -401,6 +410,9 @@ test("extension registers discovery tools and interactive configuration commands
     );
     assert.match(capabilities.content[0].text, /pi: modes=persistent/);
     assert.match(capabilities.content[0].text, /opencode: modes=persistent,one-shot/);
+    assert.match(capabilities.content[0].text, /permissions: builder-restricted,review-readonly,trusted/);
+    const permissions = await tools.get("agent_fleet").execute("permissions-test", { action: "permissions" }, new AbortController().signal, () => {}, ctx);
+    assert.match(permissions.content[0].text, /review-readonly \[workspace=read-only git=read-only hardened\]/);
 
     const versions = await tools.get("agent_fleet").execute("versions-test", { action: "versions" }, new AbortController().signal, () => {}, ctx);
     assert.match(versions.content[0].text, /Agent Intercom adapters:/);

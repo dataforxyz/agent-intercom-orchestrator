@@ -25,6 +25,8 @@
   "files": [
     "src/**/*.ts",
     "src/**/*.mjs",
+    "src/guard-bin/git",
+    "src/guard-bin/gh",
     "skills/**/*",
     "examples/**/*",
     "docs/**/*",

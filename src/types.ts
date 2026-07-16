@@ -12,6 +12,20 @@ export type WorkerState =
   | "lost";
 
 export type Effort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type WorkspacePolicy = "host" | "read-only" | "read-write";
+export type GitPolicy = "full" | "read-only";
+
+export interface PermissionProfile {
+  description?: string;
+  workspace: WorkspacePolicy;
+  git: GitPolicy;
+  hardened?: boolean;
+  piTools?: string[];
+  inaccessiblePaths?: string[];
+  writablePaths?: string[];
+  environment?: Record<string, string>;
+  systemdProperties?: Record<string, string>;
+}
 
 export interface LaunchProfile {
   harness: Harness;
@@ -27,6 +41,7 @@ export interface LaunchProfile {
 export interface RolePreset {
   harness?: Harness;
   profile?: string;
+  permissionProfile?: string;
   model?: string;
   effort?: Effort;
   instructions?: string;
@@ -38,6 +53,7 @@ export interface OrchestratorConfig {
   defaultModels: Partial<Record<Harness, string>>;
   defaultEfforts: Partial<Record<Harness, Effort>>;
   profiles: Record<string, LaunchProfile>;
+  permissionProfiles: Record<string, PermissionProfile>;
   roles: Record<string, RolePreset>;
   leaseMinutes: number;
   heartbeatSeconds: number;
@@ -56,6 +72,7 @@ export interface WorkerRecord {
   task: string;
   cwd: string;
   profile?: string;
+  permissionProfile?: string;
   model?: string;
   effort?: Effort;
   instructions?: string;

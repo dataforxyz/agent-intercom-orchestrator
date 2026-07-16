@@ -127,6 +127,7 @@ agent_fleet({ action: "doctor" })
 agent_fleet({ action: "versions" })
 agent_fleet({ action: "capabilities" })
 agent_fleet({ action: "profiles" })
+agent_fleet({ action: "permissions" })
 ```
 
 The plugin requires Linux systemd user services. `doctor` reports missing harness commands, adapter drift, and unsafe package sources. Install only the harnesses you intend to spawn, but keep `agent-intercom-pi` installed for the manager's Intercom control plane.
@@ -468,6 +469,7 @@ agent_fleet({
   action: "spawn",
   harness: "pi",
   profile: "pi-peer",
+  permissionProfile: "review-readonly",
   id: "architecture-advisor",
   role: "advisor",
   model: "claude/claude-opus-4-8",
@@ -488,6 +490,7 @@ agent_fleet({
   action: "spawn",
   harness: "codex",
   profile: "codex-safe",
+  permissionProfile: "builder-restricted",
   id: "codex-builder",
   role: "builder",
   model: "gpt-5.6-sol",
@@ -504,6 +507,7 @@ agent_fleet({
   action: "spawn",
   harness: "claude",
   profile: "claude-safe",
+  permissionProfile: "review-readonly",
   id: "claude-challenger",
   role: "challenger",
   model: "opus",
@@ -520,6 +524,7 @@ agent_fleet({
   action: "spawn",
   harness: "opencode",
   profile: "opencode-peer",
+  permissionProfile: "review-readonly",
   id: "opencode-advisor",
   role: "advisor",
   model: "anthropic/claude-fable-5",
@@ -640,6 +645,18 @@ Before replacing a worker:
 3. record or commit valid inherited work
 4. verify it disappeared from tmux and intercom
 5. launch the replacement with a new unique ID
+
+## Permission profiles
+
+The orchestrator ships three named guardrail profiles:
+
+- `review-readonly` — the host and assigned workspace are read-only except for private temporary storage and harness runtime state; Pi receives only inspection and Intercom tools.
+- `builder-restricted` — only the assigned workspace, private temporary storage, and harness runtime state are writable. The repository's Git metadata (including linked-worktree common metadata) is mounted read-only, common credential paths and environment variables are hidden, and the packaged `git`/`gh` guards allow inspection commands but block mutations and remote writes.
+- `trusted` — preserves broad host and Git access for explicitly trusted work.
+
+Built-in advisor, researcher, and challenger roles use `review-readonly`; the builder role uses `builder-restricted`. Custom roles also default to `builder-restricted` unless `trusted` is selected explicitly. The systemd filesystem policy and Git PATH guard apply to every harness. Pi additionally blocks matching `bash`, `edit`, and `write` calls in a `tool_call` hook. These profiles limit ordinary agent mistakes; they are not hostile-code containers, and a restricted builder can still damage files inside its assigned writable workspace.
+
+Use `agent_fleet({ action: "permissions" })` to inspect the active definitions and pass `permissionProfile` explicitly to override a role default.
 
 ## Access boundaries
 

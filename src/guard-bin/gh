@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+
+const realGh = process.env.AGENT_INTERCOM_REAL_GH || "/usr/bin/gh";
+const policy = process.env.AGENT_INTERCOM_GIT_POLICY || "full";
+const args = process.argv.slice(2);
+
+function isReadOnlyInvocation(argv) {
+  const [command, subcommand] = argv;
+  if (!command || command === "--version" || command === "version" || command === "status" || command === "search" || command === "browse") return true;
+  const safeSubcommands = {
+    auth: new Set(["status"]),
+    repo: new Set(["list", "view"]),
+    pr: new Set(["list", "view", "status", "checks", "diff"]),
+    issue: new Set(["list", "view", "status"]),
+    run: new Set(["list", "view", "watch"]),
+    workflow: new Set(["list", "view"]),
+    release: new Set(["list", "view", "download"]),
+    gist: new Set(["list", "view"]),
+  };
+  return safeSubcommands[command]?.has(subcommand) ?? false;
+}
+
+if (policy === "read-only" && !isReadOnlyInvocation(args)) {
+  process.stderr.write(`gh ${args.slice(0, 2).join(" ") || "write"} blocked by Agent Intercom permission profile ${process.env.AGENT_INTERCOM_PERMISSION_PROFILE || "read-only"}\n`);
+  process.exit(126);
+}
+
+const child = spawn(realGh, args, { stdio: "inherit", env: process.env });
+child.on("error", (error) => {
+  process.stderr.write(`Could not execute real gh at ${realGh}: ${error.message}\n`);
+  process.exit(127);
+});
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => child.kill(signal));
+}
+child.on("exit", (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exit(code ?? 1);
+});

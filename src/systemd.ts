@@ -80,6 +80,7 @@ export interface LaunchUnitInput {
   maxRuntime: string;
   stopTimeoutSeconds: number;
   environment?: Record<string, string>;
+  properties?: string[];
 }
 
 export async function launchUnit(runner: CommandRunner, input: LaunchUnitInput): Promise<void> {
@@ -102,6 +103,10 @@ export async function launchUnit(runner: CommandRunner, input: LaunchUnitInput):
     "--property=StandardOutput=journal",
     "--property=StandardError=journal",
   ];
+  for (const property of input.properties ?? []) {
+    if (!property.includes("=") || property.includes("\0") || property.includes("\n")) continue;
+    args.push(`--property=${property}`);
+  }
   if (input.profile.mode === "one-shot") args.push("--property=RemainAfterExit=yes");
   for (const [key, value] of Object.entries(environment)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) continue;
