@@ -24,7 +24,7 @@ Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The packag
 - The manager owns creation, leases, stopping, and cleanup.
 - Use unique worker ids and give each coworker an exclusive scope and explicit role.
 - All harnesses start inside systemd user services so MCP servers, sidecars, browsers, and other descendants stop with the owned cgroup.
-- `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. Send directly to that target with `intercom_send` or `intercom_ask`; do not call `intercom_list` merely to rediscover a managed worker. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
+- `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. Send directly to that target with `intercom_send` or `intercom_ask`; do not call `intercom_list` merely to rediscover a managed worker. Keep at most one unresolved `intercom_ask` to each coworker and use `intercom_send` for non-blocking follow-ups. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
 - Every owned worker is told its manager target. Coworkers use `intercom_team({})` to get the current manager and live same-manager coworkers; this follows adoption dynamically and does not grant fleet mutation authority.
 - Use `capabilities`, `profiles`, `models`, `variants`, `versions`, or `config` instead of guessing options or installed package state. OpenCode variants are model-specific.
 - Preview update and cleanup before executing them. Never replace a detected Git install with npm, and never kill or forget sessions the orchestrator does not own.

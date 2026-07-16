@@ -535,7 +535,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     promptSnippet: "Create, inspect, update, stop, and clean up owned cross-harness coworkers",
     promptGuidelines: [
       "Pi workers are independent Intercom peers, not pi-subagents. Use role=advisor for a persistent Pi advisor coworker.",
-      "After agent_fleet spawns a worker, use the returned intercomTarget directly with intercom_send or intercom_ask; do not call intercom_list merely to rediscover an owned worker. Pi, Codex, and Claude may need a brief registration delay before first delivery. OpenCode receives its initial task at launch.",
+      "After agent_fleet spawns a worker, use the returned intercomTarget directly with intercom_send or intercom_ask; do not call intercom_list merely to rediscover an owned worker. Keep at most one unresolved intercom_ask to each coworker and use intercom_send for follow-ups until it resolves. Pi, Codex, and Claude may need a brief registration delay before first delivery. OpenCode receives its initial task at launch.",
       "Use capabilities, profiles, models, variants, versions, or config before guessing models, effort levels, package state, or defaults.",
       "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
     ],

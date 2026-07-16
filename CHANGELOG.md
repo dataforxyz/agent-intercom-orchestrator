@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Guide managers to keep one unresolved ask per coworker and use non-blocking sends for follow-ups.
+
 ## 0.10.0 - 2026-07-16
 
 - Put the manager Intercom target in every worker environment and standing prompt, and direct coworkers to the read-only `intercom_team` tool.
