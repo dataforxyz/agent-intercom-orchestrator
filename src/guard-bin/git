@@ -2,7 +2,6 @@
 import { spawn } from "node:child_process";
 
 const realGit = process.env.AGENT_INTERCOM_REAL_GIT || "/usr/bin/git";
-const policy = process.env.AGENT_INTERCOM_GIT_POLICY || "full";
 const args = process.argv.slice(2);
 
 function commandIndex(argv) {
@@ -41,7 +40,7 @@ function isReadOnlyInvocation(argv) {
   return false;
 }
 
-if (policy === "read-only" && !isReadOnlyInvocation(args)) {
+if (!isReadOnlyInvocation(args)) {
   const index = commandIndex(args);
   const command = index >= 0 ? args[index] : "mutation";
   process.stderr.write(`git ${command} blocked by Agent Intercom permission profile ${process.env.AGENT_INTERCOM_PERMISSION_PROFILE || "read-only"}\n`);

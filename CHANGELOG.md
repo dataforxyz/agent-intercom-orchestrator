@@ -7,7 +7,8 @@
 - Reserve worker IDs atomically before launch, patch stop/renew/adopt/forget state inside the store lock, and reclaim dead-process locks without stale-snapshot resurrection or orphaned duplicate units.
 - Reconcile service state before automatic lease renewal, retry persistent OpenCode startup on early port-bind exits, and reset failed systemd units even when stop escalation reports surviving descendants.
 - Add named `review-readonly`, `builder-restricted`, and `trusted` permission profiles selectable per worker and configurable per role.
-- Apply rootless systemd hardening, a read-only host filesystem with explicit assigned-workspace and harness-state write allowances, read-only Git metadata mounts, common credential path masking, and credential-related environment scrubbing to restricted workers across all harnesses.
+- Apply rootless systemd hardening, a read-only host filesystem with explicit assigned-workspace and per-worker harness-state write allowances, read-only Git metadata mounts, user/system D-Bus masking, PID isolation, common credential path masking, and an allowlisted launch environment to restricted workers across all harnesses.
+- Add private per-worker homes and harness configuration, clean-host state bootstrapping, and a supervised short-path Intercom broker proxy so restricted workers retain communication without sharing writable harness state.
 - Add packaged cross-harness `git` and `gh` guards plus a Pi `tool_call` policy hook so read-only Git profiles allow inspection while blocking mutations and GitHub writes.
 - Report permission profiles and managed-user-namespace helper readiness through `agent_fleet` discovery and doctor output.
 

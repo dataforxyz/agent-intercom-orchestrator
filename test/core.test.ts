@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_CONFIG, mergeConfig, readConfig, writeConfig, writeConfigDefaults } from "../src/config.ts";
-import { parseOpenCodeModelsVerbose, parsePiModels, renewObservedWorkerLeases, workersAttachedToManager } from "../src/index.ts";
+import { parseOpenCodeModelsVerbose, parsePiModels, removeWorkerRuntimeAndRecord, renewObservedWorkerLeases, reserveWorkerRecord, workersAttachedToManager } from "../src/index.ts";
+import { workerRuntimeRoot } from "../src/runtime.ts";
 import { WorkerStore } from "../src/store.ts";
 import { launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit } from "../src/systemd.ts";
 import type { WorkerRecord } from "../src/types.ts";
@@ -334,6 +335,47 @@ test("worker store immediately reclaims a lock owned by a dead process", async (
     assert.deepEqual((await store.read()).workers.map((worker) => worker.id), ["recovered"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("forget keeps the worker id reserved until its runtime deletion finishes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-intercom-forget-respawn-"));
+  const agentDir = join(root, ".pi", "agent");
+  const store = new WorkerStore(join(root, "workers.json"));
+  const oldWorker: WorkerRecord = {
+    id: "same-worker", runId: "old-run", harness: "pi", backend: "systemd", role: "builder", task: "old", cwd: "/tmp",
+    state: "stopping", owned: true, managerSessionId: "manager", createdAt: 1, updatedAt: 1, leaseExpiresAt: Date.now() + 60_000,
+  };
+  const newWorker: WorkerRecord = { ...oldWorker, runId: "new-run", task: "new", state: "provisioning" };
+  const runtimeRoot = workerRuntimeRoot(oldWorker.id, agentDir);
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(join(runtimeRoot, "old-state"), "old\n");
+  await store.write({ version: 1, workers: [oldWorker] });
+  let releaseDelete!: () => void;
+  let deleteEntered!: () => void;
+  const deleteBlocked = new Promise<void>((resolve) => { releaseDelete = resolve; });
+  const entered = new Promise<void>((resolve) => { deleteEntered = resolve; });
+  try {
+    const forgetting = removeWorkerRuntimeAndRecord(store, oldWorker, agentDir, async (path) => {
+      deleteEntered();
+      await deleteBlocked;
+      await rm(path, { recursive: true, force: true });
+    });
+    await entered;
+    await assert.rejects(store.mutate((state) => reserveWorkerRecord(state, newWorker)), /already stopping/);
+    assert.equal(await readFile(join(runtimeRoot, "old-state"), "utf8"), "old\n");
+    releaseDelete();
+    await forgetting;
+    await store.mutate((state) => reserveWorkerRecord(state, newWorker));
+    await mkdir(runtimeRoot, { recursive: true });
+    await writeFile(join(runtimeRoot, "new-state"), "new\n");
+    const state = await store.read();
+    assert.equal(state.workers.length, 1);
+    assert.equal(state.workers[0].runId, "new-run");
+    assert.equal(await readFile(join(runtimeRoot, "new-state"), "utf8"), "new\n");
+  } finally {
+    releaseDelete?.();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

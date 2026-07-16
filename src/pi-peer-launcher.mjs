@@ -29,6 +29,7 @@ function stop(signal = "SIGTERM") {
 
 process.on("SIGTERM", () => stop());
 process.on("SIGINT", () => stop("SIGINT"));
+if (process.env.AGENT_INTERCOM_LAUNCHER_READY === "1") process.stderr.write("pi-peer-launcher-ready\n");
 child.on("error", (error) => {
   process.stderr.write(`Could not start Pi coworker: ${error.message}\n`);
   process.exit(1);

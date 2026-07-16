@@ -129,6 +129,9 @@ test("concurrent spawns reserve a worker id before launching a systemd unit", as
     const orchestratorDir = join(agentDir, "intercom", "orchestrator");
     await mkdir(orchestratorDir, { recursive: true });
     const executable = join(agentDir, "fake-pi");
+    const intercomExtension = join(agentDir, "git", "github.com", "dataforxyz", "agent-intercom-pi", "index.ts");
+    await mkdir(join(agentDir, "git", "github.com", "dataforxyz", "agent-intercom-pi"), { recursive: true });
+    await writeFile(intercomExtension, "export default function () {}\n");
     await writeFile(executable, "#!/bin/sh\nexit 0\n");
     await chmod(executable, 0o755);
     await writeFile(join(orchestratorDir, "config.json"), JSON.stringify({
@@ -221,7 +224,12 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
               return [value.slice(0, separator), value.slice(separator + 1)];
             }));
           await mkdir(join(orchestratorDir, "opencode-peers"), { recursive: true });
-          await writeFile(environment.AGENT_INTERCOM_OPENCODE_HEALTH_PATH, JSON.stringify({
+          const bind = args.find((arg) => arg.startsWith("--property=BindPaths="))?.slice("--property=BindPaths=".length);
+          const [bindSource, bindTarget] = bind?.split(":") ?? [];
+          const healthPath = bindSource && bindTarget && environment.AGENT_INTERCOM_OPENCODE_HEALTH_PATH.startsWith(bindTarget)
+            ? `${bindSource}${environment.AGENT_INTERCOM_OPENCODE_HEALTH_PATH.slice(bindTarget.length)}`
+            : environment.AGENT_INTERCOM_OPENCODE_HEALTH_PATH;
+          await writeFile(healthPath, JSON.stringify({
             version: 1,
             runId: environment.AGENT_INTERCOM_RUN_ID,
             ready: true,
@@ -257,11 +265,14 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
     assert.match(result.content[0].text, /session=ses_immediate_state/);
     assert.match(result.content[0].text, /permission=builder-restricted/);
     assert.ok(systemdArgs.includes("--property=PrivateUsers=self"));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--property=InaccessiblePaths=") && arg.includes("worker-runtime")));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--property=BindPaths=") && arg.includes("agent-intercom-worker")));
     assert.ok(systemdArgs.includes('--property=ReadOnlyPaths="-/tmp/.git"'));
     assert.ok(systemdArgs.includes("--setenv=GIT_TERMINAL_PROMPT=0"));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=PATH=") && arg.includes("guard-bin")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GIT=")));
-    const state = JSON.parse(await readFile(join(orchestratorDir, "opencode-peers", "state-race.state.json"), "utf8"));
+    assert.ok(systemdArgs.some((arg) => arg.includes("clean-env-launcher.mjs")));
+    const state = JSON.parse(await readFile(join(orchestratorDir, "worker-runtime", "state-race", "state-race.state.json"), "utf8"));
     assert.equal(state.workerId, "state-race");
     assert.equal(state.sessionId, "ses_immediate_state");
     assert.equal(state.directory, "/tmp");

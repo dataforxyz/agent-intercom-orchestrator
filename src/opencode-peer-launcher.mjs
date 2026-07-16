@@ -49,7 +49,7 @@ async function reservePort() {
   return port;
 }
 
-async function waitForPort(port, child, timeoutMs = 30000) {
+async function waitForPort(port, child, timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
   let childError;
   child.on("error", (error) => { childError = error; });
@@ -95,7 +95,6 @@ const childEnv = {
   OPENCODE_SERVER_PASSWORD: randomBytes(24).toString("hex"),
   ...(resumableSessionId ? { OPENCODE_INTERCOM_TARGET_SESSION: resumableSessionId } : {}),
 };
-
 let server;
 let startingServer;
 let port;
@@ -123,7 +122,9 @@ async function startServer(maxAttempts = 4) {
     if (stopping) throw new Error("OpenCode peer is stopping");
     const candidatePort = await reservePort();
     const candidateUrl = `http://127.0.0.1:${candidatePort}`;
-    const candidate = spawn(command, ["serve", "--hostname", "127.0.0.1", "--port", String(candidatePort)], {
+    const serverArgs = ["serve", "--hostname", "127.0.0.1", "--port", String(candidatePort)];
+    if (process.env.AGENT_INTERCOM_OPENCODE_DEBUG === "1") serverArgs.push("--print-logs", "--log-level", "DEBUG");
+    const candidate = spawn(command, serverArgs, {
       cwd: process.cwd(),
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
@@ -155,8 +156,10 @@ async function runBootstrap(sessionId) {
   });
   let detectedSessionId;
   let buffer = "";
+  let diagnosticOutput = "";
   bootstrap.stdout.on("data", (chunk) => {
     if (process.env.AGENT_INTERCOM_OPENCODE_BOOTSTRAP_LOG === "1") process.stdout.write(chunk);
+    diagnosticOutput = `${diagnosticOutput}${chunk.toString()}`.slice(-8192);
     buffer += chunk.toString();
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
@@ -174,6 +177,9 @@ async function runBootstrap(sessionId) {
     bootstrap.once("error", reject);
     bootstrap.once("exit", (exitCode) => resolve(exitCode ?? 1));
   });
+  if (code !== 0 && diagnosticOutput.trim()) {
+    process.stderr.write(`OpenCode bootstrap output before exit ${code}:\n${diagnosticOutput}\n`);
+  }
   return { code, sessionId: detectedSessionId };
 }
 

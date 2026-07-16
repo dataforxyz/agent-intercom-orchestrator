@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DEFAULT_CONFIG } from "../src/config.ts";
@@ -8,7 +11,6 @@ import {
   blockedToolReason,
   buildPermissionEnvironment,
   buildPermissionUnitProperties,
-  harnessWritableStatePaths,
 } from "../src/permissions.ts";
 
 test("built-in roles choose conservative permission profiles", () => {
@@ -29,15 +31,20 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
 
   const reviewerProperties = buildPermissionUnitProperties(reviewer, "/repo with spaces");
   assert.ok(reviewerProperties.includes("PrivateUsers=self"));
+  assert.ok(reviewerProperties.includes("PrivatePIDs=yes"));
   assert.ok(reviewerProperties.includes("NoNewPrivileges=yes"));
   assert.ok(reviewerProperties.includes("ProtectSystem=strict"));
   assert.ok(reviewerProperties.includes("ProtectHome=read-only"));
   assert.ok(reviewerProperties.includes('ReadOnlyPaths="/repo with spaces"'));
   assert.ok(reviewerProperties.some((property) => property.includes("/.ssh")));
+  assert.ok(reviewerProperties.some((property) => property.includes("/bus")));
+  assert.ok(reviewerProperties.some((property) => property.includes("/systemd")));
+  assert.ok(reviewerProperties.some((property) => property.includes("system_bus_socket")));
 
-  const builderProperties = buildPermissionUnitProperties(builder, "/repo", ["/shared/.git/worktrees/repo", "/shared/.git"], harnessWritableStatePaths("pi"));
+  const builderProperties = buildPermissionUnitProperties(builder, "/repo", ["/repo/.git", "/shared/.git/worktrees/repo", "/shared/.git"], ["/home/example/.local/state/worker"], ["/home/example/.pi/agent/settings.json"]);
   assert.ok(builderProperties.includes('ReadWritePaths="/repo"'));
-  assert.ok(builderProperties.some((property) => property.startsWith("ReadWritePaths=") && property.includes("/.pi/agent/sessions")));
+  assert.ok(builderProperties.some((property) => property.startsWith("ReadWritePaths=") && property.includes("/.local/state/worker")));
+  assert.ok(builderProperties.includes('ReadOnlyPaths="-/home/example/.pi/agent/settings.json"'));
   assert.ok(builderProperties.includes('ReadOnlyPaths="-/shared/.git/worktrees/repo"'));
   assert.ok(builderProperties.includes('ReadOnlyPaths="-/shared/.git"'));
   assert.equal(builderProperties.some((property) => property === 'ReadOnlyPaths="/repo"'), false);
@@ -83,6 +90,8 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
   assert.match(blocked.stderr, /git push blocked/);
   const branchBlocked = spawnSync(guard, ["branch", "new-feature"], { env: environment, encoding: "utf8" });
   assert.equal(branchBlocked.status, 126);
+  const overrideBlocked = spawnSync(guard, ["push", "origin", "main"], { env: { ...environment, AGENT_INTERCOM_GIT_POLICY: "full" }, encoding: "utf8" });
+  assert.equal(overrideBlocked.status, 126);
 
   const ghGuard = fileURLToPath(new URL("../src/guard-bin/gh", import.meta.url));
   const ghEnvironment = { ...environment, AGENT_INTERCOM_REAL_GH: "/bin/echo" };
@@ -91,6 +100,112 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
   const ghBlocked = spawnSync(ghGuard, ["pr", "merge", "42"], { env: ghEnvironment, encoding: "utf8" });
   assert.equal(ghBlocked.status, 126);
   assert.match(ghBlocked.stderr, /gh pr merge blocked/);
+});
+
+test("linked-worktree .git pointer and resolved metadata are immutable in a real hardened unit", (t) => {
+  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
+    t.skip("systemd user manager is unavailable");
+    return;
+  }
+  const base = join(homedir(), ".cache", "agent-intercom-orchestrator-tests");
+  mkdirSync(base, { recursive: true });
+  const root = mkdtempSync(join(base, "linked-worktree-"));
+  const main = join(root, "main");
+  const worktree = join(root, "worker");
+  const git = (...args: string[]) => spawnSync("git", args, { encoding: "utf8" });
+  try {
+    mkdirSync(main);
+    assert.equal(git("-C", main, "init", "-q").status, 0);
+    assert.equal(git("-C", main, "config", "user.email", "proof@example.invalid").status, 0);
+    assert.equal(git("-C", main, "config", "user.name", "Proof").status, 0);
+    writeFileSync(join(main, "file.txt"), "before\n");
+    assert.equal(git("-C", main, "add", "file.txt").status, 0);
+    assert.equal(git("-C", main, "commit", "-qm", "initial").status, 0);
+    assert.equal(git("-C", main, "worktree", "add", "-q", worktree).status, 0);
+    const metadata = git("-C", worktree, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").stdout.trim().split("\n");
+    const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+    assert.ok(builder);
+    const properties = buildPermissionUnitProperties(builder, worktree, [join(worktree, ".git"), ...metadata]);
+    const result = spawnSync("systemd-run", [
+      "--user", "--wait", "--pipe", `--working-directory=${worktree}`,
+      ...properties.map((property) => `--property=${property}`),
+      "/bin/bash", "-c",
+      "! rm .git && ! sh -c ': > .git' && ! mv .git .git.moved && /usr/bin/git status --short >/dev/null",
+    ], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(existsSync(join(worktree, ".git")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("hardened systemd profile cannot delegate an unsandboxed unit to the user manager", (t) => {
+  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
+    t.skip("systemd user manager is unavailable");
+    return;
+  }
+  const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+  assert.ok(builder);
+  const marker = join(tmpdir(), `agent-intercom-systemd-escape-${process.pid}`);
+  const procMarker = join(tmpdir(), `agent-intercom-proc-root-escape-${process.pid}`);
+  const managerPid = spawnSync("pgrep", ["-u", String(process.getuid?.() ?? ""), "-f", "/systemd --user"], { encoding: "utf8" }).stdout.trim().split("\n")[0];
+  assert.match(managerPid, /^\d+$/, "could not identify the systemd user manager PID");
+  const control = join(process.cwd(), `.agent-intercom-systemd-control-${process.pid}`);
+  rmSync(marker, { force: true });
+  rmSync(procMarker, { force: true });
+  rmSync(control, { force: true });
+  const properties = buildPermissionUnitProperties(builder, process.cwd());
+  const result = spawnSync("systemd-run", [
+    "--user",
+    "--wait",
+    "--pipe",
+    ...properties.map((property) => `--property=${property}`),
+    "/bin/sh",
+    "-c",
+    `/usr/bin/touch ${JSON.stringify(control)} && ! /usr/bin/touch /proc/${managerPid}/root${procMarker} && /usr/bin/systemd-run --user --wait /usr/bin/touch ${JSON.stringify(marker)}`,
+  ], { encoding: "utf8", timeout: 15_000 });
+  try {
+    assert.notEqual(result.status, 0, `nested systemd-run unexpectedly succeeded: ${result.stdout}${result.stderr}`);
+    assert.equal(existsSync(control), true, "outer sandbox did not run its allowed control command");
+    assert.equal(existsSync(marker), false, "nested user unit escaped the hardened mount namespace");
+    assert.equal(existsSync(procMarker), false, "worker escaped through the user manager's /proc root");
+  } finally {
+    rmSync(marker, { force: true });
+    rmSync(procMarker, { force: true });
+    rmSync(control, { force: true });
+  }
+});
+
+test("nested bwrap and unshare sandboxes inherit the outer filesystem boundary", (t) => {
+  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
+    t.skip("systemd user manager is unavailable");
+    return;
+  }
+  if (spawnSync("sh", ["-c", "command -v bwrap >/dev/null && command -v unshare >/dev/null"]).status !== 0) {
+    t.skip("bwrap or unshare is unavailable");
+    return;
+  }
+  const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+  assert.ok(builder);
+  const root = mkdtempSync(join(homedir(), ".cache", "agent-intercom-namespace-"));
+  const workspace = join(root, "workspace");
+  const outside = join(root, "outside-proof");
+  mkdirSync(workspace);
+  const properties = buildPermissionUnitProperties(builder, workspace);
+  const result = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", `--working-directory=${workspace}`,
+    ...properties.map((property) => `--property=${property}`),
+    "/bin/sh", "-c",
+    `bwrap --ro-bind / / --bind ${JSON.stringify(workspace)} ${JSON.stringify(workspace)} --dev /dev --proc /proc /bin/sh -c '! touch ${JSON.stringify(outside)} && touch bwrap-ok' && unshare -Ur /bin/sh -c '! touch ${JSON.stringify(outside)} && touch unshare-ok'`,
+  ], { encoding: "utf8", timeout: 15_000 });
+  try {
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(existsSync(outside), false);
+    assert.equal(existsSync(join(workspace, "bwrap-ok")), true);
+    assert.equal(existsSync(join(workspace, "unshare-ok")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("worker Pi keeps permission hook while orchestrator fleet registration is disabled", async () => {

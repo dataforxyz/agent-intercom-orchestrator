@@ -18,9 +18,17 @@ test("Pi peer launcher treats manager SIGTERM as an orderly exit", async () => {
   const launcher = new URL("pi-peer-launcher.mjs", root);
   const child = spawn(process.execPath, [launcher.pathname, "--", process.execPath, "--eval", "setInterval(() => {}, 1000)"], {
     stdio: ["ignore", "ignore", "pipe"],
+    env: { ...process.env, AGENT_INTERCOM_LAUNCHER_READY: "1" },
   });
   const exited = exitCode(child);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      child.stderr.on("data", (chunk) => {
+        if (chunk.toString().includes("pi-peer-launcher-ready")) resolve();
+      });
+    }),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Pi peer launcher did not become ready")), 5000)),
+  ]);
   child.kill("SIGTERM");
   assert.equal(await exited, 0);
 });

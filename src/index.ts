@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -8,7 +8,8 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
-import { buildPermissionEnvironment, buildPermissionUnitProperties, harnessWritableStatePaths, registerWorkerPermissionPolicy } from "./permissions.ts";
+import { buildPermissionEnvironment, buildPermissionUnitProperties, registerWorkerPermissionPolicy } from "./permissions.ts";
+import { prepareWorkerRuntime, workerRuntimeRoot, workerSocketRuntimeRoot } from "./runtime.ts";
 import { WorkerStore } from "./store.ts";
 import { getUnitStatus, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, stopUnit, systemdAvailable } from "./systemd.ts";
 import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
@@ -54,7 +55,10 @@ const STATUS_KEY = "agent-intercom-orchestrator";
 const PI_PEER_LAUNCHER = fileURLToPath(new URL("./pi-peer-launcher.mjs", import.meta.url));
 const OPENCODE_PEER_LAUNCHER = fileURLToPath(new URL("./opencode-peer-launcher.mjs", import.meta.url));
 const GIT_GUARD_BIN = fileURLToPath(new URL("./guard-bin", import.meta.url));
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const CLEAN_ENV_LAUNCHER = fileURLToPath(new URL("./clean-env-launcher.mjs", import.meta.url));
+const SANDBOX_SUPERVISOR = fileURLToPath(new URL("./sandbox-supervisor.mjs", import.meta.url));
+const ORCHESTRATOR_EXTENSION = fileURLToPath(import.meta.url);
+const PACKAGE_ROOT = dirname(dirname(ORCHESTRATOR_EXTENSION));
 
 const AgentFleetParams = Type.Object({
   action: StringEnum(ACTIONS),
@@ -132,7 +136,7 @@ async function readOpenCodePeerHealth(path: string): Promise<OpenCodePeerHealth 
   }
 }
 
-async function waitForOpenCodePeerHealth(path: string, runId: string, timeoutMs = 60000): Promise<OpenCodePeerHealth> {
+async function waitForOpenCodePeerHealth(path: string, runId: string, timeoutMs = 180000): Promise<OpenCodePeerHealth> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const health = await readOpenCodePeerHealth(path);
@@ -165,12 +169,34 @@ function runnerFor(pi: ExtensionAPI): CommandRunner {
   };
 }
 
+async function systemdVersion(runner: CommandRunner): Promise<number | undefined> {
+  const result = await runner.exec("systemd", ["--version"], { timeout: 5000 });
+  const match = result.code === 0 ? /systemd\s+(\d+)/.exec(result.stdout) : undefined;
+  return match ? Number(match[1]) : undefined;
+}
+
 async function discoverGitMetadataPaths(runner: CommandRunner, cwd: string): Promise<string[]> {
   const git = resolveProfileCommand("git");
   if (!git) return [];
   const result = await runner.exec(git, ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { timeout: 5000 });
-  if (result.code !== 0) return [];
-  return [...new Set(result.stdout.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("/")))];
+  if (result.code !== 0) return [resolve(cwd, ".git")];
+  return [...new Set([resolve(cwd, ".git"), ...result.stdout.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("/"))])];
+}
+
+async function resolvePiIntercomExtension(agentDir: string): Promise<string> {
+  const candidates = [
+    join(agentDir, "git", "github.com", "dataforxyz", "agent-intercom-pi", "index.ts"),
+    join(agentDir, "npm", "node_modules", "@dataforxyz", "agent-intercom-pi", "index.ts"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Try the next supported Pi package cache location.
+    }
+  }
+  throw new Error("Hardened Pi workers require agent-intercom-pi in the Pi git or npm package cache");
 }
 
 function formatTime(timestamp: number): string {
@@ -194,6 +220,26 @@ function formatWorkers(workers: WorkerRecord[]): string {
 
 export function workersAttachedToManager(workers: WorkerRecord[], sessionId: string): WorkerRecord[] {
   return workers.filter((worker) => worker.managerSessionId === sessionId);
+}
+
+export function reserveWorkerRecord(state: WorkerStateFile, worker: WorkerRecord): void {
+  const index = state.workers.findIndex((candidate) => candidate.id === worker.id);
+  const existing = index >= 0 ? state.workers[index] : undefined;
+  if (existing && isLiveState(existing.state)) throw new Error(`Worker ${worker.id} is already ${existing.state}`);
+  if (index >= 0) state.workers[index] = worker;
+  else state.workers.push(worker);
+}
+
+export async function removeWorkerRuntimeAndRecord(
+  store: WorkerStore,
+  worker: WorkerRecord,
+  agentDir: string,
+  removeRuntime: (path: string) => Promise<void> = async (path) => rm(path, { recursive: true, force: true }),
+): Promise<void> {
+  await removeRuntime(workerRuntimeRoot(worker.id, agentDir));
+  await store.mutate((state) => {
+    state.workers = state.workers.filter((candidate) => candidate.id !== worker.id || candidate.runId !== worker.runId);
+  });
 }
 
 export function renewObservedWorkerLeases(
@@ -517,24 +563,40 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       config,
     });
     const persistentOpenCode = harness === "opencode" && profile.mode === "persistent";
-    if (persistentOpenCode) {
-      worker.healthPath = join(openCodePeerDir, `${id}.health.json`);
-      worker.runtimeStatePath = join(openCodePeerDir, `${id}.state.json`);
+    if (permissionProfile.hardened) {
+      const version = await systemdVersion(runner);
+      if (version !== undefined && version < 257) throw new Error(`Permission profile ${permissionProfileName} requires systemd 257 or newer for PrivatePIDs (found ${version})`);
+      try {
+        await access("/usr/bin/bwrap");
+      } catch {
+        throw new Error(`Permission profile ${permissionProfileName} requires bubblewrap at /usr/bin/bwrap to isolate shared harness state`);
+      }
     }
-    await store.mutate((state) => {
-      const index = state.workers.findIndex((candidate) => candidate.id === id);
-      const existing = index >= 0 ? state.workers[index] : undefined;
-      if (existing && isLiveState(existing.state)) throw new Error(`Worker ${id} is already ${existing.state}`);
-      if (index >= 0) state.workers[index] = worker;
-      else state.workers.push(worker);
-    });
+    const runtimeRoot = permissionProfile.hardened ? workerRuntimeRoot(id, agentDir) : undefined;
+    const runtimeWorkerRoot = permissionProfile.hardened ? workerSocketRuntimeRoot(id) : undefined;
+    let workerHealthPath: string | undefined;
+    let workerStatePath: string | undefined;
+    if (persistentOpenCode) {
+      const stateDir = runtimeRoot ?? openCodePeerDir;
+      const launchStateDir = runtimeWorkerRoot ?? stateDir;
+      worker.healthPath = join(stateDir, `${id}.health.json`);
+      worker.runtimeStatePath = join(stateDir, `${id}.state.json`);
+      workerHealthPath = join(launchStateDir, `${id}.health.json`);
+      workerStatePath = join(launchStateDir, `${id}.state.json`);
+    }
+    await store.mutate((state) => reserveWorkerRecord(state, worker));
     try {
+      const runtime = permissionProfile.hardened ? await prepareWorkerRuntime(harness, id, agentDir) : undefined;
       if (persistentOpenCode) {
         await rm(worker.healthPath!, { force: true });
         if (params.fresh) await rm(worker.runtimeStatePath!, { force: true });
       }
       const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions, managerTarget: worker.managerSessionId, permissionProfile });
+      if (runtime?.extraArgs.length) harnessArgs.push(...runtime.extraArgs);
       const gitMetadataPaths = permissionProfile.git === "read-only" ? await discoverGitMetadataPaths(runner, cwd) : [];
+      if (harness === "pi" && permissionProfile.hardened) {
+        harnessArgs.push("--no-extensions", "--extension", await resolvePiIntercomExtension(agentDir), "--extension", ORCHESTRATOR_EXTENSION);
+      }
       const permissionEnvironment = buildPermissionEnvironment(permissionProfileName, permissionProfile);
       if (permissionProfile.git === "read-only") {
         permissionEnvironment.AGENT_INTERCOM_REAL_GIT = resolveProfileCommand("git") || "/usr/bin/git";
@@ -549,28 +611,43 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         : harness === "opencode" && profile.mode === "persistent"
           ? OPENCODE_PEER_LAUNCHER
           : undefined;
-      const launchProfile = wrappedLauncher ? { ...profile, command: process.execPath, args: undefined } : profile;
-      const args = wrappedLauncher ? [wrappedLauncher, "--", executable, ...harnessArgs] : harnessArgs;
+      let launchCommand = wrappedLauncher ? process.execPath : executable;
+      let args = wrappedLauncher ? [wrappedLauncher, "--", executable, ...harnessArgs] : harnessArgs;
+      const unitEnvironment: Record<string, string> = {
+        ...permissionEnvironment,
+        ...(runtime?.environment ?? {}),
+        ...buildWorkerEnvironment(harness, id, role, model, {
+          runId,
+          unit,
+          managerSessionId: worker.managerSessionId,
+        }),
+        ...(persistentOpenCode ? {
+          AGENT_INTERCOM_OPENCODE_HEALTH_PATH: workerHealthPath!,
+          AGENT_INTERCOM_OPENCODE_STATE_PATH: workerStatePath!,
+        } : {}),
+      };
+      if (permissionProfile.hardened) {
+        unitEnvironment.AGENT_INTERCOM_ENV_ALLOWLIST = [...new Set([...Object.keys(profile.env ?? {}), ...Object.keys(unitEnvironment)])].join(",");
+        args = [CLEAN_ENV_LAUNCHER, "--", process.execPath, SANDBOX_SUPERVISOR, "--", launchCommand, ...args];
+        launchCommand = process.execPath;
+      }
       await launchUnit(runner, {
         unit,
-        profile: launchProfile,
+        profile: { ...profile, command: launchCommand, args: undefined },
         args,
         cwd,
         maxRuntime: profile.maxRuntime || config.maxRuntime,
         stopTimeoutSeconds: config.stopTimeoutSeconds,
-        properties: buildPermissionUnitProperties(permissionProfile, cwd, gitMetadataPaths, harnessWritableStatePaths(harness)),
-        environment: {
-          ...permissionEnvironment,
-          ...buildWorkerEnvironment(harness, id, role, model, {
-            runId,
-            unit,
-            managerSessionId: worker.managerSessionId,
-          }),
-          ...(persistentOpenCode ? {
-            AGENT_INTERCOM_OPENCODE_HEALTH_PATH: worker.healthPath!,
-            AGENT_INTERCOM_OPENCODE_STATE_PATH: worker.runtimeStatePath!,
-          } : {}),
-        },
+        properties: buildPermissionUnitProperties(
+          permissionProfile,
+          cwd,
+          gitMetadataPaths,
+          runtime?.writablePaths ?? [],
+          runtime?.readOnlyPaths ?? [],
+          runtime?.inaccessiblePaths ?? [],
+          runtime?.bindPaths ?? [],
+        ),
+        environment: unitEnvironment,
       });
       if (persistentOpenCode) {
         const health = await waitForOpenCodePeerHealth(worker.healthPath!, runId);
@@ -733,6 +810,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
               : "not detected — persistent OpenCode peers will not receive Intercom messages";
           }
         }
+        const installedSystemdVersion = await systemdVersion(runner);
+        const bubblewrap = await runner.exec("/usr/bin/bwrap", ["--version"], { timeout: 5000 });
+        const bubblewrapAvailable = bubblewrap.code === 0;
+        const hardenedProfilesReady = installedSystemdVersion === undefined
+          ? "unknown"
+          : installedSystemdVersion >= 257 && bubblewrapAvailable
+            ? "yes"
+            : `no (${installedSystemdVersion < 257 ? "requires systemd 257+" : "requires /usr/bin/bwrap"})`;
         const managedHelpers = await Promise.all([
           runner.exec("systemctl", ["is-active", "systemd-nsresourced.socket"], { timeout: 5000 }),
           runner.exec("systemctl", ["is-active", "systemd-mountfsd.socket"], { timeout: 5000 }),
@@ -746,8 +831,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         const units = available ? await listWorkerUnits(runner) : [];
         const untrackedUnits = units.filter((unit) => !recordedUnits.has(unit));
         return textResult(
-          [`systemd user manager: ${available ? "available" : "unavailable"}`, `managed user namespaces: nsresourced=${managedUserNamespaces.nsresourced} mountfsd=${managedUserNamespaces.mountfsd}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `permission profiles: ${Object.keys(config.permissionProfiles).sort().join(", ")}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
-          { systemd: available, managedUserNamespaces, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
+          [`systemd user manager: ${available ? "available" : "unavailable"} version=${installedSystemdVersion ?? "unknown"} bubblewrap=${bubblewrapAvailable ? "available" : "missing"} hardened-profiles=${hardenedProfilesReady}`, `managed user namespaces: nsresourced=${managedUserNamespaces.nsresourced} mountfsd=${managedUserNamespaces.mountfsd}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `permission profiles: ${Object.keys(config.permissionProfiles).sort().join(", ")}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
+          { systemd: available, systemdVersion: installedSystemdVersion, bubblewrapAvailable, hardenedProfilesReady, managedUserNamespaces, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
         );
       }
 
@@ -802,9 +887,18 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           });
           throw error;
         }
-        await store.mutate((state) => {
-          state.workers = state.workers.filter((candidate) => candidate.id !== worker.id || candidate.runId !== worker.runId);
-        });
+        try {
+          await removeWorkerRuntimeAndRecord(store, worker, agentDir);
+        } catch (error) {
+          await store.mutate((state) => {
+            const current = state.workers.find((candidate) => candidate.id === worker.id && candidate.runId === worker.runId);
+            if (!current) return;
+            current.state = "failed";
+            current.updatedAt = Date.now();
+            current.lastError = error instanceof Error ? error.message : String(error);
+          });
+          throw error;
+        }
         await updateStatus(ctx);
         return textResult(`Forgot worker record ${worker.id}.`);
       }

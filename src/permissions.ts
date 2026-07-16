@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Harness, PermissionProfile } from "./types.ts";
+import type { PermissionProfile } from "./types.ts";
 
 export const SAFE_PI_READ_TOOLS = [
   "read",
@@ -54,6 +54,7 @@ const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   AWS_SESSION_TOKEN: "",
   GOOGLE_APPLICATION_CREDENTIALS: "",
   AZURE_CLIENT_SECRET: "",
+  DBUS_SESSION_BUS_ADDRESS: "",
 };
 
 export const DEFAULT_PERMISSION_PROFILES: Record<string, PermissionProfile> = {
@@ -92,20 +93,20 @@ function quoteSystemdPath(path: string): string {
   return JSON.stringify(path);
 }
 
-export function harnessWritableStatePaths(harness: Harness): string[] {
-  const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ""}`;
-  const registry = `${runtimeDir}/omarchy-session/agents/${harness}`;
-  if (harness === "pi") return ["~/.pi/agent/sessions", "~/.pi/agent/intercom/inbox", "~/.pi/agent/intercom/outbox", "~/.cache/pi", registry];
-  if (harness === "codex") return ["~/.codex", registry];
-  if (harness === "claude") return ["~/.claude", "~/.cache/claude-cli-nodejs", registry];
-  return ["~/.local/share/opencode", "~/.local/state/opencode", "~/.cache/opencode", registry];
-}
-
-export function buildPermissionUnitProperties(profile: PermissionProfile, cwd: string, gitMetadataPaths: string[] = [], runtimeWritablePaths: string[] = []): string[] {
+export function buildPermissionUnitProperties(
+  profile: PermissionProfile,
+  cwd: string,
+  gitMetadataPaths: string[] = [],
+  runtimeWritablePaths: string[] = [],
+  runtimeReadOnlyPaths: string[] = [],
+  runtimeInaccessiblePaths: string[] = [],
+  runtimeBindPaths: string[] = [],
+): string[] {
   const properties: string[] = [];
   if (profile.hardened) {
     properties.push(
       "PrivateUsers=self",
+      "PrivatePIDs=yes",
       "PrivateTmp=yes",
       "NoNewPrivileges=yes",
       "PrivateDevices=yes",
@@ -119,6 +120,12 @@ export function buildPermissionUnitProperties(profile: PermissionProfile, cwd: s
       "CapabilityBoundingSet=",
     );
   }
+  if (profile.hardened) {
+    const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ""}`;
+    for (const path of [`${runtimeDir}/bus`, `${runtimeDir}/systemd`, "/run/dbus/system_bus_socket"]) {
+      properties.push(`InaccessiblePaths=${quoteSystemdPath(`-${path}`)}`);
+    }
+  }
   if (profile.workspace === "read-only") {
     properties.push(`ReadOnlyPaths=${quoteSystemdPath(resolve(cwd))}`);
   } else if (profile.workspace === "read-write") {
@@ -126,6 +133,15 @@ export function buildPermissionUnitProperties(profile: PermissionProfile, cwd: s
   }
   for (const path of [...new Set([...(profile.writablePaths ?? []), ...runtimeWritablePaths])]) {
     properties.push(`ReadWritePaths=${quoteSystemdPath(`-${expandHome(path)}`)}`);
+  }
+  for (const path of [...new Set(runtimeReadOnlyPaths)]) {
+    properties.push(`ReadOnlyPaths=${quoteSystemdPath(`-${expandHome(path)}`)}`);
+  }
+  for (const path of [...new Set(runtimeInaccessiblePaths)]) {
+    properties.push(`InaccessiblePaths=${quoteSystemdPath(expandHome(path))}`);
+  }
+  for (const path of [...new Set(runtimeBindPaths)]) {
+    properties.push(`BindPaths=${path}`);
   }
   if (profile.git === "read-only") {
     const metadataPaths = gitMetadataPaths.length ? gitMetadataPaths : [resolve(cwd, ".git")];

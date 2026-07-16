@@ -2,7 +2,6 @@
 import { spawn } from "node:child_process";
 
 const realGh = process.env.AGENT_INTERCOM_REAL_GH || "/usr/bin/gh";
-const policy = process.env.AGENT_INTERCOM_GIT_POLICY || "full";
 const args = process.argv.slice(2);
 
 function isReadOnlyInvocation(argv) {
@@ -21,7 +20,7 @@ function isReadOnlyInvocation(argv) {
   return safeSubcommands[command]?.has(subcommand) ?? false;
 }
 
-if (policy === "read-only" && !isReadOnlyInvocation(args)) {
+if (!isReadOnlyInvocation(args)) {
   process.stderr.write(`gh ${args.slice(0, 2).join(" ") || "write"} blocked by Agent Intercom permission profile ${process.env.AGENT_INTERCOM_PERMISSION_PROFILE || "read-only"}\n`);
   process.exit(126);
 }
