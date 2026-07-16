@@ -334,24 +334,37 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return workers;
   };
 
-  const stopWorker = async (worker: WorkerRecord): Promise<void> => {
-    worker.state = "stopping";
-    worker.updatedAt = Date.now();
-    await store.upsert(worker);
+  const stopWorker = async (target: WorkerRecord, expectedManagerSessionId?: string): Promise<WorkerRecord> => {
+    const worker = await store.mutate((state) => {
+      const current = state.workers.find((candidate) => candidate.id === target.id && candidate.runId === target.runId);
+      if (!current) throw new Error(`Worker ${target.id} changed before it could be stopped`);
+      if (!current.owned) throw new Error(`Worker ${current.id} is not owned by this orchestrator`);
+      if (expectedManagerSessionId && current.managerSessionId !== expectedManagerSessionId) {
+        throw new Error(`Worker ${current.id} belongs to another manager session; adopt it before stopping`);
+      }
+      current.state = "stopping";
+      current.updatedAt = Date.now();
+      return structuredClone(current);
+    });
+
+    let stopError: unknown;
     try {
       if (worker.unit) await stopUnit(runner, worker.unit);
-      worker.state = "stopped";
-      worker.updatedAt = Date.now();
-      worker.lastError = undefined;
     } catch (error) {
-      worker.state = "failed";
-      worker.updatedAt = Date.now();
-      worker.lastError = error instanceof Error ? error.message : String(error);
-      throw error;
-    } finally {
-      await store.upsert(worker);
-      await updateStatus();
+      stopError = error;
     }
+
+    const finalWorker = await store.mutate((state) => {
+      const current = state.workers.find((candidate) => candidate.id === worker.id && candidate.runId === worker.runId);
+      if (!current) throw new Error(`Worker ${worker.id} changed while it was stopping`);
+      current.state = stopError ? "failed" : "stopped";
+      current.updatedAt = Date.now();
+      current.lastError = stopError ? (stopError instanceof Error ? stopError.message : String(stopError)) : undefined;
+      return structuredClone(current);
+    });
+    await updateStatus();
+    if (stopError) throw stopError;
+    return finalWorker;
   };
 
   const cleanupExpired = async (execute: boolean, now = Date.now()) => {
@@ -440,9 +453,6 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (profile.harness !== harness) throw new Error(`Profile ${profileName} launches ${profile.harness}, not ${harness}`);
     if (profile.spawnable === false) throw new Error(profile.description || `Profile ${profileName} is attach-only`);
     const id = validateWorkerId(params.id || `${harness}-${role}-${newRunId().slice(0, 6)}`);
-    const existing = (await store.read()).workers.find((worker) => worker.id === id && isLiveState(worker.state));
-    if (existing) throw new Error(`Worker ${id} is already ${existing.state}`);
-
     const runId = newRunId();
     const unit = makeUnitName(id, runId);
     const worker = createSystemdRecord({
@@ -464,11 +474,19 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (persistentOpenCode) {
       worker.healthPath = join(openCodePeerDir, `${id}.health.json`);
       worker.runtimeStatePath = join(openCodePeerDir, `${id}.state.json`);
-      await rm(worker.healthPath, { force: true });
-      if (params.fresh) await rm(worker.runtimeStatePath, { force: true });
     }
-    await store.upsert(worker);
+    await store.mutate((state) => {
+      const index = state.workers.findIndex((candidate) => candidate.id === id);
+      const existing = index >= 0 ? state.workers[index] : undefined;
+      if (existing && isLiveState(existing.state)) throw new Error(`Worker ${id} is already ${existing.state}`);
+      if (index >= 0) state.workers[index] = worker;
+      else state.workers.push(worker);
+    });
     try {
+      if (persistentOpenCode) {
+        await rm(worker.healthPath!, { force: true });
+        if (params.fresh) await rm(worker.runtimeStatePath!, { force: true });
+      }
       const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions, managerTarget: worker.managerSessionId });
       const executable = resolveProfileCommand(profile.command);
       if (!executable) throw new Error(`Launch command not found or not executable: ${profile.command}`);
@@ -505,17 +523,25 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         await persistOpenCodePeerState(worker.runtimeStatePath!, id, health.openCodeSessionId!, cwd);
       }
       const status = await getUnitStatus(runner, unit);
-      worker.state = stateFromUnit(status, "provisioning");
-      worker.mainPid = status.mainPid;
-      worker.updatedAt = Date.now();
-      await store.upsert(worker);
-      return worker;
+      return await store.mutate((state) => {
+        const current = state.workers.find((candidate) => candidate.id === id && candidate.runId === runId);
+        if (!current) throw new Error(`Worker ${id} changed while it was starting`);
+        if (current.state === "provisioning") current.state = stateFromUnit(status, "provisioning");
+        current.mainPid = status.mainPid;
+        current.updatedAt = Date.now();
+        if (worker.externalSessionId) current.externalSessionId = worker.externalSessionId;
+        if (worker.backendDetails) current.backendDetails = worker.backendDetails;
+        return structuredClone(current);
+      });
     } catch (error) {
       await stopUnit(runner, unit).catch(() => undefined);
-      worker.state = "failed";
-      worker.updatedAt = Date.now();
-      worker.lastError = error instanceof Error ? error.message : String(error);
-      await store.upsert(worker);
+      await store.mutate((state) => {
+        const current = state.workers.find((candidate) => candidate.id === id && candidate.runId === runId);
+        if (!current) return;
+        current.state = "failed";
+        current.updatedAt = Date.now();
+        current.lastError = error instanceof Error ? error.message : String(error);
+      });
       throw error;
     }
   };
@@ -535,7 +561,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     promptSnippet: "Create, inspect, update, stop, and clean up owned cross-harness coworkers",
     promptGuidelines: [
       "Pi workers are independent Intercom peers, not pi-subagents. Use role=advisor for a persistent Pi advisor coworker.",
-      "After agent_fleet spawns a worker, use the returned intercomTarget directly with intercom_send or intercom_ask; do not call intercom_list merely to rediscover an owned worker. Keep at most one unresolved intercom_ask to each coworker and use intercom_send for follow-ups until it resolves. Pi, Codex, and Claude may need a brief registration delay before first delivery. OpenCode receives its initial task at launch.",
+      "After agent_fleet spawns Pi, Codex, or Claude, send its assignment to the returned intercomTarget with intercom_send; reserve intercom_ask for a question that blocks the manager's next step. Use intercom_send for progress/status checkpoints. Do not call intercom_list merely to rediscover an owned worker. Pi, Codex, and Claude may need a brief registration delay before first delivery; OpenCode receives its initial task at launch.",
+      "For sandboxed builder profiles such as codex-safe, create the feature worktree before spawning and pass that worktree as cwd. Do not ask the worker to create a sibling worktree outside its writable cwd.",
       "Use capabilities, profiles, models, variants, versions, or config before guessing models, effort levels, package state, or defaults.",
       "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
     ],
@@ -555,7 +582,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           ? mode === "persistent"
             ? "\nThe task initialized this persistent OpenCode session. It remains wakeable through Intercom until stopped."
             : "\nThe task was passed to this one-shot OpenCode run as its initial prompt."
-          : `\nNext: send this task directly to '${worker.intercomTarget}' with intercom_send or intercom_ask. Do not call intercom_list just to rediscover this owned target. If first delivery reports that it is not connected yet, wait briefly and retry:\n${worker.task}`;
+          : `\nNext: send this task directly to '${worker.intercomTarget}' with intercom_send. Reserve intercom_ask for a later question that blocks your own next step. Do not call intercom_list just to rediscover this owned target. If first delivery reports that it is not connected yet, wait briefly and retry:\n${worker.task}`;
         return textResult(`Started ${formatWorker(worker)}${next}`, { worker });
       }
 
@@ -584,10 +611,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (params.action === "stop") {
         if (!params.id) throw new Error("stop requires id");
         const worker = extractWorkers(await store.read(), params.id)[0];
-        if (!worker.owned) throw new Error(`Worker ${worker.id} is not owned by this orchestrator`);
-        if (worker.managerSessionId !== managerSessionId(ctx)) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before stopping`);
-        await stopWorker(worker);
-        return textResult(`Stopped ${worker.id}.`, { worker });
+        const stopped = await stopWorker(worker, managerSessionId(ctx));
+        return textResult(`Stopped ${stopped.id}.`, { worker: stopped });
       }
 
       if (params.action === "cleanup") {
@@ -667,41 +692,70 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
 
       if (params.action === "renew") {
-        const workers = extractWorkers(await store.read(), params.id);
+        const owner = managerSessionId(ctx);
         const now = Date.now();
-        for (const worker of workers) {
-          if (!worker.owned || !isLiveState(worker.state)) continue;
-          if (worker.managerSessionId !== managerSessionId(ctx)) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before renewing`);
-          worker.leaseExpiresAt = leaseExpiry(config, now);
-          worker.updatedAt = now;
-          await store.upsert(worker);
-        }
+        const workers = await store.mutate((state) => {
+          const selected = extractWorkers(state, params.id);
+          const renewed: WorkerRecord[] = [];
+          for (const worker of selected) {
+            if (!worker.owned || !isLiveState(worker.state)) continue;
+            if (worker.managerSessionId !== owner) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before renewing`);
+            worker.leaseExpiresAt = leaseExpiry(config, now);
+            worker.updatedAt = now;
+            renewed.push(structuredClone(worker));
+          }
+          return renewed;
+        });
         await updateStatus(ctx);
         return textResult(`Renewed ${workers.length} worker lease${workers.length === 1 ? "" : "s"}.`, { workers });
       }
 
       if (params.action === "forget") {
         if (!params.id) throw new Error("forget requires id");
-        const worker = extractWorkers(await store.read(), params.id)[0];
-        if (isLiveState(worker.state)) {
-          if (worker.managerSessionId !== managerSessionId(ctx)) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before forgetting`);
-          throw new Error(`Refusing to forget live worker ${worker.id}; stop it first`);
+        const owner = managerSessionId(ctx);
+        const worker = await store.mutate((state) => {
+          const current = extractWorkers(state, params.id)[0];
+          if (isLiveState(current.state)) {
+            if (current.managerSessionId !== owner) throw new Error(`Worker ${current.id} belongs to another manager session; adopt it before forgetting`);
+            throw new Error(`Refusing to forget live worker ${current.id}; stop it first`);
+          }
+          current.state = "stopping";
+          current.updatedAt = Date.now();
+          return structuredClone(current);
+        });
+        try {
+          if (worker.unit) await stopUnit(runner, worker.unit);
+        } catch (error) {
+          await store.mutate((state) => {
+            const current = state.workers.find((candidate) => candidate.id === worker.id && candidate.runId === worker.runId);
+            if (!current) return;
+            current.state = "failed";
+            current.updatedAt = Date.now();
+            current.lastError = error instanceof Error ? error.message : String(error);
+          });
+          throw error;
         }
-        if (worker.unit) await stopUnit(runner, worker.unit);
-        await store.remove(worker.id);
+        await store.mutate((state) => {
+          state.workers = state.workers.filter((candidate) => candidate.id !== worker.id || candidate.runId !== worker.runId);
+        });
         await updateStatus(ctx);
         return textResult(`Forgot worker record ${worker.id}.`);
       }
 
       if (params.action === "adopt") {
         if (!params.id) throw new Error("adopt requires id");
-        const worker = extractWorkers({ version: 1, workers: await reconcile() }, params.id)[0];
-        if (!worker.owned) throw new Error(`Worker ${worker.id} was not created by this orchestrator`);
-        if (!isLiveState(worker.state)) throw new Error(`Worker ${worker.id} is ${worker.state}; only live workers can be adopted`);
-        worker.managerSessionId = managerSessionId(ctx);
-        worker.leaseExpiresAt = leaseExpiry(config);
-        worker.updatedAt = Date.now();
-        await store.upsert(worker);
+        const observed = extractWorkers({ version: 1, workers: await reconcile() }, params.id)[0];
+        const owner = managerSessionId(ctx);
+        const worker = await store.mutate((state) => {
+          const current = state.workers.find((candidate) => candidate.id === observed.id && candidate.runId === observed.runId);
+          if (!current) throw new Error(`Worker ${observed.id} changed before it could be adopted`);
+          if (!current.owned) throw new Error(`Worker ${current.id} was not created by this orchestrator`);
+          if (!isLiveState(current.state)) throw new Error(`Worker ${current.id} is ${current.state}; only live workers can be adopted`);
+          current.managerSessionId = owner;
+          current.leaseExpiresAt = leaseExpiry(config);
+          current.updatedAt = Date.now();
+          return structuredClone(current);
+        });
         await updateStatus(ctx);
         return textResult(`Adopted ${worker.id} into this manager session.`, { worker });
       }
@@ -828,7 +882,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const mode = worker.profile ? config.profiles[worker.profile]?.mode : undefined;
       const next = worker.harness === "opencode"
         ? mode === "persistent" ? "The OpenCode session is initialized and remains wakeable through Intercom." : "Task started as the initial OpenCode prompt."
-        : `Send the assignment directly to ${worker.intercomTarget} with intercom_send or intercom_ask; retry briefly if it is still registering.`;
+        : `Send the assignment directly to ${worker.intercomTarget} with intercom_send; retry briefly if it is still registering. Use intercom_ask only for a later blocking decision.`;
       ctx.ui.notify(`Started ${worker.id}. ${next}`, "info");
       await updateStatus(ctx);
     },

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -64,6 +64,7 @@ test("harness launch args include identity or the initial task", () => {
   for (const args of [piArgs, codexArgs, claudeArgs, opencodeArgs]) {
     assert.match(args.join(" "), /manager-a/);
     assert.match(args.join(" "), /intercom_team/);
+    assert.match(args.join(" "), /intercom_send for progress/);
   }
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
@@ -265,6 +266,24 @@ test("default configuration writes preserve custom profiles without serializing 
     assert.equal(raw.defaultProfiles.pi, undefined);
     assert.equal(raw.roles.advisor, undefined);
     assert.equal(raw.roles.custom.instructions, "Stay custom.");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("worker store immediately reclaims a lock owned by a dead process", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-dead-lock-test-"));
+  try {
+    const path = join(dir, "workers.json");
+    const lockPath = `${path}.lock`;
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(join(lockPath, "owner.json"), JSON.stringify({ pid: 99999999, createdAt: Date.now() }));
+    const store = new WorkerStore(path);
+    await store.upsert({
+      id: "recovered", runId: "recovered", harness: "codex", backend: "systemd", role: "worker", task: "test", cwd: "/tmp",
+      state: "stopped", owned: true, managerSessionId: "session", createdAt: 1, updatedAt: 1, leaseExpiresAt: 1,
+    });
+    assert.deepEqual((await store.read()).workers.map((worker) => worker.id), ["recovered"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

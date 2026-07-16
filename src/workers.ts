@@ -49,7 +49,7 @@ export function standingInstructions(role: string, task: string, managerTarget: 
     `Your manager's Intercom target is ${managerTarget}. Use intercom_team whenever you need the current manager or your managed coworkers.`,
     instructions,
     `Standing assignment: ${task}`,
-    "Wait for work through Agent Intercom, report blockers early, and include evidence with completion claims.",
+    "Wait for work through Agent Intercom. Use intercom_send for progress, blockers, status, and completion evidence; use intercom_ask only when your next step genuinely depends on the manager's answer.",
     "Keep downstream tools inside this worker process tree. Do not create detached systemd services, background containers, or remote jobs unless the manager explicitly asks; report every external resource ID so the manager can own its cleanup.",
   ].filter(Boolean).join("\n\n");
 }

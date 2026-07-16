@@ -5,6 +5,16 @@ import type { WorkerRecord, WorkerStateFile } from "./types.ts";
 
 const EMPTY_STATE: WorkerStateFile = { version: 1, workers: [] };
 
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function normalizeState(value: unknown): WorkerStateFile {
   if (!value || typeof value !== "object") return structuredClone(EMPTY_STATE);
   const input = value as { version?: unknown; workers?: unknown };
@@ -39,17 +49,38 @@ export class WorkerStore {
   private async acquireLock(): Promise<() => Promise<void>> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const lockPath = `${this.path}.lock`;
+    const ownerPath = `${lockPath}/owner.json`;
     for (let attempt = 0; attempt < 500; attempt += 1) {
       try {
         await mkdir(lockPath, { recursive: false, mode: 0o700 });
+        try {
+          await writeFile(ownerPath, `${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`, { encoding: "utf8", mode: 0o600 });
+        } catch (error) {
+          await rm(lockPath, { recursive: true, force: true });
+          throw error;
+        }
         return async () => { await rm(lockPath, { recursive: true, force: true }); };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         try {
-          const lockStat = await stat(lockPath);
-          if (Date.now() - lockStat.mtimeMs > 120_000) {
-            await rm(lockPath, { recursive: true, force: true });
-            continue;
+          let ownerPid: number | undefined;
+          try {
+            const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { pid?: unknown };
+            if (typeof owner.pid === "number") ownerPid = owner.pid;
+          } catch {
+            // A creator may not have written owner.json yet; use age as the fallback.
+          }
+          if (ownerPid !== undefined) {
+            if (!isProcessAlive(ownerPid)) {
+              await rm(lockPath, { recursive: true, force: true });
+              continue;
+            }
+          } else {
+            const lockStat = await stat(lockPath);
+            if (Date.now() - lockStat.mtimeMs > 120_000) {
+              await rm(lockPath, { recursive: true, force: true });
+              continue;
+            }
           }
         } catch {
           continue;
@@ -61,29 +92,20 @@ export class WorkerStore {
   }
 
   async mutate<T>(fn: (state: WorkerStateFile) => T | Promise<T>): Promise<T> {
-    let resolveResult!: (value: T | PromiseLike<T>) => void;
-    let rejectResult!: (reason?: unknown) => void;
-    const result = new Promise<T>((resolve, reject) => {
-      resolveResult = resolve;
-      rejectResult = reject;
-    });
-
-    this.queue = this.queue.catch(() => undefined).then(async () => {
+    const operation = this.queue.catch(() => undefined).then(async () => {
       let release: (() => Promise<void>) | undefined;
       try {
         release = await this.acquireLock();
         const state = await this.read();
         const value = await fn(state);
         await this.write(state);
-        resolveResult(value);
-      } catch (error) {
-        rejectResult(error);
+        return value;
       } finally {
         await release?.();
       }
     });
-    await this.queue;
-    return result;
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   async upsert(worker: WorkerRecord): Promise<void> {

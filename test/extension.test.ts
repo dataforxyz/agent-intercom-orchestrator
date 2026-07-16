@@ -59,6 +59,133 @@ test("reconciliation retires completed one-shot units after preserving their com
   }
 });
 
+test("stop patches the current worker record without clobbering concurrent metadata", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-stop-patch-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    const statePath = join(orchestratorDir, "workers.json");
+    await writeFile(statePath, JSON.stringify({ version: 1, workers: [{
+      id: "patch-worker", runId: "run-patch", harness: "codex", role: "builder", task: "work", cwd: "/tmp",
+      state: "running", unit: "agent-intercom-worker-patch-worker.service", owned: true, managerSessionId: "patch-manager",
+      createdAt: 1, updatedAt: 1, leaseExpiresAt: Date.now() + 60_000,
+    }] }));
+
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    let releaseStop!: () => void;
+    const stopBlocked = new Promise<void>((resolve) => { releaseStop = resolve; });
+    let stopStarted!: () => void;
+    const stopEntered = new Promise<void>((resolve) => { stopStarted = resolve; });
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      async exec(command: string, args: string[]) {
+        if (command === "systemctl" && args[1] === "stop") {
+          stopStarted();
+          await stopBlocked;
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: "/tmp", mode: "rpc", hasUI: false,
+      sessionManager: { getSessionId: () => "patch-manager", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?stop-patch=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+
+    const stopping = tools.get("agent_fleet").execute("stop-patch", { action: "stop", id: "patch-worker" }, new AbortController().signal, () => {}, ctx);
+    await stopEntered;
+    const concurrent = JSON.parse(await readFile(statePath, "utf8"));
+    concurrent.workers[0].backendDetails = { marker: "preserve-me" };
+    await writeFile(statePath, JSON.stringify(concurrent));
+    releaseStop();
+    await stopping;
+
+    const saved = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(saved.workers[0].state, "stopped");
+    assert.equal(saved.workers[0].backendDetails.marker, "preserve-me");
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent spawns reserve a worker id before launching a systemd unit", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-spawn-reservation-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    const executable = join(agentDir, "fake-pi");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+    await writeFile(join(orchestratorDir, "config.json"), JSON.stringify({
+      profiles: {
+        "pi-peer": { harness: "pi", command: executable, args: [], mode: "persistent", maxRuntime: "12h" },
+      },
+    }));
+
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    let launches = 0;
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      async exec(command: string, args: string[]) {
+        if (command === "systemd-run") {
+          launches += 1;
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return commandResult();
+        }
+        if (command === "systemctl" && args.includes("show") && args.includes("--property=LoadState,ActiveState,SubState,MainPID,Result,ExecMainStatus")) {
+          return { ...commandResult(), stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\n" };
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: "/tmp", mode: "rpc", hasUI: false,
+      sessionManager: { getSessionId: () => "spawn-manager", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?spawn-reservation=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+
+    const fleet = tools.get("agent_fleet");
+    const calls = await Promise.allSettled([
+      fleet.execute("spawn-a", { action: "spawn", harness: "pi", profile: "pi-peer", id: "same-worker", cwd: "/tmp", task: "work" }, new AbortController().signal, () => {}, ctx),
+      fleet.execute("spawn-b", { action: "spawn", harness: "pi", profile: "pi-peer", id: "same-worker", cwd: "/tmp", task: "work" }, new AbortController().signal, () => {}, ctx),
+    ]);
+    assert.equal(calls.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(calls.filter((result) => result.status === "rejected").length, 1);
+    assert.equal(launches, 1);
+    const state = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    assert.equal(state.workers.filter((worker: any) => worker.id === "same-worker").length, 1);
+
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("persistent OpenCode spawn persists resumable state before returning ready", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-opencode-state-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -256,7 +383,9 @@ test("extension registers discovery tools and interactive configuration commands
     await lifecycle.get("session_start")?.({}, ctx);
 
     assert.ok(tools.has("agent_fleet"));
-    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /returned intercomTarget directly/);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /returned intercomTarget/);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /progress\/status checkpoints/);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /create the feature worktree before spawning/i);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /versions/);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /update/);
     for (const command of ["agents", "agents-new", "agents-config", "agents-models", "agents-cleanup"]) {

@@ -24,7 +24,8 @@ Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The packag
 - The manager owns creation, leases, stopping, and cleanup.
 - Use unique worker ids and give each coworker an exclusive scope and explicit role.
 - All harnesses start inside systemd user services so MCP servers, sidecars, browsers, and other descendants stop with the owned cgroup.
-- `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. Send directly to that target with `intercom_send` or `intercom_ask`; do not call `intercom_list` merely to rediscover a managed worker. Keep at most one unresolved `intercom_ask` to each coworker and use `intercom_send` for non-blocking follow-ups. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
+- `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. For Pi, Codex, and Claude, deliver the assignment with `intercom_send`; reserve `intercom_ask` for a later question that blocks the manager's next step. Progress/status checkpoints also use `intercom_send`. Do not call `intercom_list` merely to rediscover a managed worker. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
+- Create feature worktrees before spawning sandboxed builders such as `codex-safe`, and pass the worktree as `cwd`. A workspace-write worker generally cannot create a sibling under `~/worktrees` when its writable root is the shared checkout.
 - Every owned worker is told its manager target. Coworkers use `intercom_team({})` to get the current manager and live same-manager coworkers; this follows adoption dynamically and does not grant fleet mutation authority.
 - Use `capabilities`, `profiles`, `models`, `variants`, `versions`, or `config` instead of guessing options or installed package state. OpenCode variants are model-specific.
 - Preview update and cleanup before executing them. Never replace a detected Git install with npm, and never kill or forget sessions the orchestrator does not own.
@@ -149,7 +150,7 @@ Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unles
 
 ## Current limitations
 
-- Pi, Codex, and Claude registration is not automatically awaited. Use the `intercomTarget` returned by spawn directly; if the first send reports that it is not connected yet, wait briefly and retry. Use `intercom_list` only as a readiness diagnostic or to discover peers not managed by this fleet session.
+- Pi, Codex, and Claude registration is not automatically awaited. Use the `intercomTarget` returned by spawn directly with `intercom_send`; if the first send reports that it is not connected yet, wait briefly and retry. Use `intercom_list` only as a readiness diagnostic or to discover peers not managed by this fleet session.
 - A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or renew them. Expired leases remain eligible for orchestrator-wide garbage collection.
 - `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns. `opencode-run` remains available for cheaper one-shot assignments.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.

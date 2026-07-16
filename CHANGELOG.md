@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Guide managers to keep one unresolved ask per coworker and use non-blocking sends for follow-ups.
+- Guide managers to use `intercom_send` for assignments and progress/status checkpoints, reserving `intercom_ask` for blocking decisions.
+- Require managers to create sandboxed builder worktrees before spawn and pass the worktree as `cwd`.
+- Reserve worker IDs atomically before launch, patch stop/renew/adopt/forget state inside the store lock, and reclaim dead-process locks without stale-snapshot resurrection or orphaned duplicate units.
 
 ## 0.10.0 - 2026-07-16
 
