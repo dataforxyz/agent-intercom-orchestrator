@@ -32,7 +32,8 @@ test("OpenCode peer launcher waits for health, persists its session, and resumes
     const healthPath = join(dir, "health.json");
     const statePath = join(dir, "state.json");
     const tracePath = join(dir, "trace.jsonl");
-    await writeFile(fake, `#!/usr/bin/env node\nimport fs from "node:fs";\nimport net from "node:net";\nconst mode=process.argv[2];\nif(mode==="run"){const i=process.argv.indexOf("--session");const sessionID=i>=0?process.argv[i+1]:"ses_test";fs.appendFileSync(process.env.TRACE_PATH,JSON.stringify(process.argv.slice(2))+"\\n");fs.writeFileSync(process.env.AGENT_INTERCOM_OPENCODE_HEALTH_PATH,JSON.stringify({version:1,runId:process.env.AGENT_INTERCOM_RUN_ID,ready:true,connected:true,openCodeSessionId:sessionID,status:"idle"}));console.log(JSON.stringify({type:"text",sessionID}));process.exit(0);}\nconst i=process.argv.indexOf("--port");\nconst server=net.createServer();\nserver.listen(Number(process.argv[i+1]),"127.0.0.1");\nprocess.on("SIGTERM",()=>server.close(()=>process.exit(143)));\n`);
+    const failedServePath = join(dir, "failed-serve-once");
+    await writeFile(fake, `#!/usr/bin/env node\nimport fs from "node:fs";\nimport net from "node:net";\nconst mode=process.argv[2];\nif(mode==="run"){const i=process.argv.indexOf("--session");const sessionID=i>=0?process.argv[i+1]:"ses_test";fs.appendFileSync(process.env.TRACE_PATH,JSON.stringify(process.argv.slice(2))+"\\n");fs.writeFileSync(process.env.AGENT_INTERCOM_OPENCODE_HEALTH_PATH,JSON.stringify({version:1,runId:process.env.AGENT_INTERCOM_RUN_ID,ready:true,connected:true,openCodeSessionId:sessionID,status:"idle"}));console.log(JSON.stringify({type:"text",sessionID}));process.exit(0);}\nconst i=process.argv.indexOf("--port");\nif(process.env.FAIL_FIRST_SERVE_PATH&&!fs.existsSync(process.env.FAIL_FIRST_SERVE_PATH)){fs.writeFileSync(process.env.FAIL_FIRST_SERVE_PATH,"failed");console.error("listen EADDRINUSE: address already in use");process.exit(1);}\nconst server=net.createServer();\nserver.listen(Number(process.argv[i+1]),"127.0.0.1");\nprocess.on("SIGTERM",()=>server.close(()=>process.exit(143)));\n`);
     await chmod(fake, 0o755);
     const launcher = new URL("opencode-peer-launcher.mjs", root);
     const run = async (runId: string) => {
@@ -45,6 +46,7 @@ test("OpenCode peer launcher waits for health, persists its session, and resumes
           AGENT_INTERCOM_WORKER_ID: "worker-test",
           AGENT_INTERCOM_OPENCODE_HEALTH_PATH: healthPath,
           AGENT_INTERCOM_OPENCODE_STATE_PATH: statePath,
+          FAIL_FIRST_SERVE_PATH: failedServePath,
         },
       });
       let stderr = "";
@@ -60,7 +62,8 @@ test("OpenCode peer launcher waits for health, persists its session, and resumes
       return stderr;
     };
 
-    await run("run-1");
+    const firstLog = await run("run-1");
+    assert.match(firstLog, /retrying with a new port/);
     const persisted = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(persisted.sessionId, "ses_test");
     const secondLog = await run("run-2");
