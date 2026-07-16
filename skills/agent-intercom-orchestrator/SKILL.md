@@ -113,7 +113,7 @@ agent_fleet({
 })
 ```
 
-Persistent OpenCode spawn waits for broker/plugin/session readiness and records the OpenCode session ID. Reusing the worker ID resumes that session; pass `fresh: true` only for intentional clean context.
+Persistent OpenCode spawn waits for broker/plugin/session readiness and records the OpenCode session ID. Reusing a persistent OpenCode or Codex worker ID resumes its harness session/thread; pass `fresh: true` only when you intentionally want clean context.
 
 ## OpenCode as primary manager
 

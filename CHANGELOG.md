@@ -11,6 +11,7 @@
 - Add private per-worker homes and harness configuration, clean-host state bootstrapping, and a supervised short-path Intercom broker proxy so restricted workers retain communication without sharing writable harness state.
 - Add packaged cross-harness `git`, `gh`, and Forgejo `tea` guards plus a Pi `tool_call` policy hook so read-only Git profiles allow explicitly recognized inspection while blocking repository and hosting-service mutations.
 - Report permission profiles and managed-user-namespace helper readiness through `agent_fleet` discovery and doctor output.
+- Propagate `fresh: true` to harness launchers so Codex workers discard persisted bridge thread state instead of reusing the prior rollout under a new systemd run.
 
 ## 0.10.0 - 2026-07-16
 
