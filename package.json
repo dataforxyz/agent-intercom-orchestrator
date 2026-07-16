@@ -1,6 +1,6 @@
 {
   "name": "@dataforxyz/agent-intercom-orchestrator",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "description": "Pi extension for creating and managing independent Agent Intercom coworkers across Pi, Codex, Claude Code, and OpenCode",
   "license": "AGPL-3.0-or-later",
   "type": "module",
