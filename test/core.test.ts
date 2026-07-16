@@ -73,12 +73,13 @@ test("harness launch args include identity or the initial task", () => {
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
   const ownedEnv = buildWorkerEnvironment("pi", "advisor-a", "advisor", undefined, {
-    runId: "run-a", unit: "worker-a.service", managerSessionId: "manager-a",
+    runId: "run-a", unit: "worker-a.service", managerSessionId: "manager-a", fresh: true,
   });
   assert.equal(ownedEnv.AGENT_INTERCOM_WORKER_ID, "advisor-a");
   assert.equal(ownedEnv.AGENT_INTERCOM_SYSTEMD_UNIT, "worker-a.service");
   assert.equal(ownedEnv.AGENT_INTERCOM_MANAGER_SESSION_ID, "manager-a");
   assert.equal(ownedEnv.AGENT_INTERCOM_MANAGER_TARGET, "manager-a");
+  assert.equal(ownedEnv.AGENT_INTERCOM_FRESH, "1");
 });
 
 test("systemd durations are validated before configuration is saved", () => {

@@ -622,6 +622,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           runId,
           unit,
           managerSessionId: worker.managerSessionId,
+          fresh: params.fresh,
         }),
         ...(persistentOpenCode ? {
           AGENT_INTERCOM_OPENCODE_HEALTH_PATH: workerHealthPath!,

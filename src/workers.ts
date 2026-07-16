@@ -99,7 +99,7 @@ export function buildWorkerEnvironment(
   workerId: string,
   role: string,
   model?: string,
-  ownership?: { runId: string; unit: string; managerSessionId: string },
+  ownership?: { runId: string; unit: string; managerSessionId: string; fresh?: boolean },
 ): Record<string, string> {
   const ownedEnvironment = {
     AGENT_INTERCOM_ROLE: role,
@@ -110,6 +110,7 @@ export function buildWorkerEnvironment(
       AGENT_INTERCOM_SYSTEMD_UNIT: ownership.unit,
       AGENT_INTERCOM_MANAGER_SESSION_ID: ownership.managerSessionId,
       AGENT_INTERCOM_MANAGER_TARGET: ownership.managerSessionId,
+      ...(ownership.fresh ? { AGENT_INTERCOM_FRESH: "1" } : {}),
     } : {}),
   };
   if (harness === "opencode") {
