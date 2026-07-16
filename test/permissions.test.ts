@@ -220,8 +220,8 @@ test("Tea guard is executable and explicitly included in package files", () => {
 
 test("hardened systemd profile makes host Tea configuration inaccessible", (t) => {
   const teaConfig = join(homedir(), ".config", "tea", "config.yml");
-  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
-    t.skip("systemd user manager is unavailable");
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
     return;
   }
   if (!existsSync(teaConfig)) {
