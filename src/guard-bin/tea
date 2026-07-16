@@ -1,0 +1,141 @@
+#!/bin/sh
+set -f
+
+is_read_only_api() {
+  method=GET
+  method_seen=0
+  endpoint_count=0
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      --) return 1 ;;
+      --field|-f|--Field|-F|--data|-d|--header|-H) return 1 ;;
+      --field=*|--Field=*|--data=*|--header=*|-f?*|-F?*|-d?*|-H?*) return 1 ;;
+      --method|-X)
+        [ "$method_seen" -eq 0 ] && [ "$#" -gt 0 ] || return 1
+        method_seen=1
+        method=$1
+        shift
+        ;;
+      --method=*)
+        [ "$method_seen" -eq 0 ] || return 1
+        method_seen=1
+        method=${arg#--method=}
+        ;;
+      -X?*)
+        [ "$method_seen" -eq 0 ] || return 1
+        method_seen=1
+        method=${arg#-X}
+        method=${method#=}
+        ;;
+      --output|-o|--login|-l|--repo|-r|--remote|-R)
+        [ "$#" -gt 0 ] || return 1
+        shift
+        ;;
+      --output=*|--login=*|--repo=*|--remote=*|-o?*|-l?*|-r?*|-R?*) ;;
+      --include|-i) ;;
+      -*) return 1 ;;
+      *) endpoint_count=$((endpoint_count + 1)) ;;
+    esac
+  done
+  [ "$endpoint_count" -eq 1 ] || return 1
+  case "$method" in GET|get|HEAD|head) return 0 ;; *) return 1 ;; esac
+}
+
+is_read_only() {
+  [ "$#" -gt 0 ] || return 0
+  help_requested=0
+  for arg do
+    case "$arg" in
+      --help|-h) help_requested=1 ;;
+      --debug|--vvv) [ "$help_requested" -eq 1 ] || return 1 ;;
+    esac
+  done
+  [ "$help_requested" -eq 0 ] || return 0
+  if [ "$#" -eq 1 ]; then
+    case "$1" in --version|-v) return 0 ;; esac
+  fi
+  case "$1" in help|h) return 0 ;; esac
+
+  command=$1
+  shift
+  case "$command" in
+    issue|i) command=issues ;;
+    pull|pr) command=pulls ;;
+    label) command=labels ;;
+    milestone|ms) command=milestones ;;
+    release|r) command=releases ;;
+    time|t) command=times ;;
+    organization|org) command=organizations ;;
+    repo) command=repos ;;
+    branch|b) command=branches ;;
+    action) command=actions ;;
+    webhook|hooks|hook) command=webhooks ;;
+    comment|c) command=comments ;;
+    notification|n) command=notifications ;;
+    login) command=logins ;;
+    ssh-key) command=ssh-keys ;;
+  esac
+
+  case "$command" in
+    whoami) [ "$#" -eq 0 ] ;;
+    api) is_read_only_api "$@" ;;
+    actions)
+      [ "$#" -ge 2 ] || return 1
+      group=$1
+      subcommand=$2
+      case "$group:$subcommand" in
+        secrets:list|secrets:ls|secret:list|secret:ls) return 0 ;;
+        variables:list|variables:ls|variable:list|variable:ls|vars:list|vars:ls|var:list|var:ls) return 0 ;;
+        runs:list|runs:ls|runs:view|runs:show|runs:get|runs:logs|runs:log|run:list|run:ls|run:view|run:show|run:get|run:logs|run:log) return 0 ;;
+        workflows:list|workflows:ls|workflows:view|workflows:show|workflows:get|workflow:list|workflow:ls|workflow:view|workflow:show|workflow:get) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    issues|pulls|milestones|releases|times|organizations|branches|wiki|webhooks|comments|notifications|logins|ssh-keys)
+      [ "$#" -ge 1 ] || return 1
+      case "$1" in list|ls) return 0 ;; esac
+      case "$command:$1" in pulls:review-comments|pulls:rc|wiki:view|wiki:revisions|wiki:history) return 0 ;; esac
+      return 1
+      ;;
+    repos)
+      [ "$#" -ge 1 ] || return 1
+      case "$1" in list|ls|search|s) return 0 ;; *) return 1 ;; esac
+      ;;
+    labels)
+      [ "$#" -ge 1 ] || return 1
+      case "$1" in list|ls) ;; *) return 1 ;; esac
+      shift
+      for arg do case "$arg" in --save|--save=*|-s|-s?*) return 1 ;; esac; done
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+if ! is_read_only "$@"; then
+  printf '%s\n' "tea ${1:-write} ${2:-} ${3:-} blocked by Agent Intercom read-only remote policy" >&2
+  exit 126
+fi
+
+real_tea=${AGENT_INTERCOM_REAL_TEA:-/usr/bin/tea}
+case "$real_tea" in /*) ;; *) printf '%s\n' "Refusing untrusted real tea path $real_tea: path is not absolute" >&2; exit 127 ;; esac
+resolved=$(/usr/bin/readlink -f -- "$real_tea" 2>/dev/null) || resolved=
+case "$resolved" in */tea) ;; *) printf '%s\n' "Refusing untrusted real tea path $real_tea: resolved executable is not named tea" >&2; exit 127 ;; esac
+[ -x "$resolved" ] || { printf '%s\n' "Refusing untrusted real tea path $real_tea: executable is unavailable" >&2; exit 127; }
+current=$resolved
+while [ "$current" != / ]; do
+  if [ -w "$current" ]; then
+    printf '%s\n' "Refusing untrusted real tea path $real_tea: path is worker-writable: $current" >&2
+    exit 127
+  fi
+  current=${current%/*}
+  [ -n "$current" ] || current=/
+done
+if [ -w / ]; then
+  printf '%s\n' "Refusing untrusted real tea path $real_tea: filesystem root is worker-writable" >&2
+  exit 127
+fi
+
+exec "$resolved" "$@"

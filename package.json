@@ -27,6 +27,7 @@
     "src/**/*.mjs",
     "src/guard-bin/git",
     "src/guard-bin/gh",
+    "src/guard-bin/tea",
     "skills/**/*",
     "examples/**/*",
     "docs/**/*",

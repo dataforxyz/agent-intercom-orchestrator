@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import {
   blockedToolReason,
   buildPermissionEnvironment,
   buildPermissionUnitProperties,
+  isReadOnlyTeaInvocation,
 } from "../src/permissions.ts";
 
 test("built-in roles choose conservative permission profiles", () => {
@@ -37,6 +38,7 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(reviewerProperties.includes("ProtectHome=read-only"));
   assert.ok(reviewerProperties.includes('ReadOnlyPaths="/repo with spaces"'));
   assert.ok(reviewerProperties.some((property) => property.includes("/.ssh")));
+  assert.ok(reviewerProperties.some((property) => property.includes("/.config/tea")));
   assert.ok(reviewerProperties.some((property) => property.includes("/bus")));
   assert.ok(reviewerProperties.some((property) => property.includes("/systemd")));
   assert.ok(reviewerProperties.some((property) => property.includes("system_bus_socket")));
@@ -60,6 +62,12 @@ test("restricted permission environment disables common Git credential paths", (
   assert.equal(environment.GIT_OPTIONAL_LOCKS, "0");
   assert.equal(environment.SSH_AUTH_SOCK, "");
   assert.equal(environment.GH_TOKEN, "");
+  assert.equal(environment.TEA_TOKEN, "");
+  assert.equal(environment.TEA_TRACE, "");
+  assert.equal(environment.GITEA_TOKEN, "");
+  assert.equal(environment.GITEA_SERVER_PASSWORD, "");
+  assert.equal(environment.GITEA_SERVER_TOKEN, "");
+  assert.equal(environment.FORGEJO_TOKEN, "");
 });
 
 test("read-only Git policy allows inspection and blocks mutations or remote writes", () => {
@@ -70,6 +78,10 @@ test("read-only Git policy allows inspection and blocks mutations or remote writ
   assert.match(blockedToolReason("bash", { command: "cd repo && /usr/bin/git reset --hard HEAD~1" }, "read-write", "read-only") ?? "", /git reset/);
   assert.match(blockedToolReason("bash", { command: "git -C repo push origin main" }, "read-write", "read-only") ?? "", /git push/);
   assert.match(blockedToolReason("bash", { command: "gh pr merge 42" }, "read-write", "read-only") ?? "", /GitHub write/);
+  assert.equal(blockedToolReason("bash", { command: "tea issues list --state all" }, "read-write", "read-only"), undefined);
+  assert.equal(blockedToolReason("bash", { command: "/usr/bin/tea api --method GET /user" }, "read-write", "read-only"), undefined);
+  assert.match(blockedToolReason("bash", { command: "/usr/bin/tea issues create --title nope" }, "read-write", "read-only") ?? "", /Forgejo write/);
+  assert.match(blockedToolReason("bash", { command: "tea api /repos/o/r/issues -X POST -f title=nope" }, "read-write", "read-only") ?? "", /Forgejo write/);
   assert.match(blockedToolReason("edit", { path: "src/a.ts" }, "read-only", "read-only") ?? "", /read-only workspace/);
   assert.equal(blockedToolReason("bash", { command: "git push origin main" }, "read-write", "full"), undefined);
 });
@@ -100,6 +112,130 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
   const ghBlocked = spawnSync(ghGuard, ["pr", "merge", "42"], { env: ghEnvironment, encoding: "utf8" });
   assert.equal(ghBlocked.status, 126);
   assert.match(ghBlocked.stderr, /gh pr merge blocked/);
+});
+
+test("Tea policy is allowlist-based and rejects ambiguous or write-shaped invocations", () => {
+  assert.equal(isReadOnlyTeaInvocation(["--version"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "list", "--state", "all"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["actions", "runs", "view", "42"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["wiki", "view", "Home"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["api", "/user"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["api", "--method", "GET", "/user"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "create", "--title", "nope"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["comments", "42", "body"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["notifications", "read"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["logins", "default", "prod"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["labels", "list", "--save"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["labels", "list", "--save=true"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["labels", "list", "--save=false"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["labels", "list", "-s=true"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["labels", "list", "-sfoo"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["--debug", "issues", "list"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "--repo", "owner/repo", "list"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "/issues", "-XPOST"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "-X=DELETE", "/issues/1"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "/issues", "--method=PATCH"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "/issues", "-f", "title=nope"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "/issues", "-H", "X-HTTP-Method-Override: DELETE"]), false);
+});
+
+test("cross-harness Tea guard allows inspection and cannot be disabled by worker environment", (t) => {
+  const realTea = "/usr/bin/tea";
+  if (!existsSync(realTea)) {
+    t.skip("real Tea executable is absent");
+    return;
+  }
+  const guard = fileURLToPath(new URL("../src/guard-bin/tea", import.meta.url));
+  const isolatedConfig = mkdtempSync(join(tmpdir(), "agent-intercom-tea-config-"));
+  const environment = {
+    ...process.env,
+    XDG_CONFIG_HOME: isolatedConfig,
+    AGENT_INTERCOM_REAL_TEA: realTea,
+    AGENT_INTERCOM_GIT_POLICY: "full",
+    AGENT_INTERCOM_PERMISSION_PROFILE: "trusted",
+  };
+  try {
+    for (const args of [
+      ["--version"],
+      ["issues", "list", "--help"],
+      ["actions", "runs", "view", "--help"],
+      ["logins", "list"],
+      ["api", "--help"],
+    ]) {
+      const allowed = spawnSync(guard, args, { env: environment, encoding: "utf8" });
+      assert.equal(allowed.status, 0, `${args.join(" ")}: ${allowed.stderr}`);
+    }
+    for (const args of [
+      ["issues", "create", "--title", "nope"],
+      ["pulls", "merge", "42"],
+      ["repos", "delete", "owner/repo"],
+      ["comments", "42", "body"],
+      ["notifications", "read"],
+      ["labels", "list", "--save=true"],
+      ["labels", "list", "--save=false"],
+      ["labels", "list", "-s=true"],
+      ["labels", "list", "-sfoo"],
+      ["logout", "prod"],
+      ["api", "/issues", "-X", "POST", "-f", "title=nope"],
+      ["api", "-XDELETE", "/issues/1"],
+      ["--debug", "issues", "list"],
+      ["issues", "--repo", "owner/repo", "list"],
+    ]) {
+      const blocked = spawnSync(guard, args, { env: environment, encoding: "utf8" });
+      assert.equal(blocked.status, 126, `${args.join(" ")}: ${blocked.stdout}${blocked.stderr}`);
+      assert.match(blocked.stderr, /blocked by Agent Intercom/);
+    }
+
+    const marker = join(isolatedConfig, "environment-bypass-marker");
+    const shellOverride = spawnSync(guard, ["-c", `touch ${marker}`, "-h"], {
+      env: { ...environment, AGENT_INTERCOM_REAL_TEA: "/bin/sh" },
+      encoding: "utf8",
+    });
+    assert.equal(shellOverride.status, 127);
+    assert.equal(existsSync(marker), false);
+
+    const writableBin = join(isolatedConfig, "bin");
+    const writableTea = join(writableBin, "tea");
+    mkdirSync(writableBin);
+    writeFileSync(writableTea, `#!/bin/sh\ntouch ${marker}\n`);
+    chmodSync(writableTea, 0o555);
+    const writableOverride = spawnSync(guard, ["--version"], {
+      env: { ...environment, AGENT_INTERCOM_REAL_TEA: writableTea },
+      encoding: "utf8",
+    });
+    assert.equal(writableOverride.status, 127);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(isolatedConfig, { recursive: true, force: true });
+  }
+});
+
+test("Tea guard is executable and explicitly included in package files", () => {
+  const guard = fileURLToPath(new URL("../src/guard-bin/tea", import.meta.url));
+  assert.notEqual(statSync(guard).mode & 0o111, 0);
+  const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+  assert.ok(packageJson.files.includes("src/guard-bin/tea"));
+});
+
+test("hardened systemd profile makes host Tea configuration inaccessible", (t) => {
+  const teaConfig = join(homedir(), ".config", "tea", "config.yml");
+  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
+    t.skip("systemd user manager is unavailable");
+    return;
+  }
+  if (!existsSync(teaConfig)) {
+    t.skip("host Tea configuration is absent");
+    return;
+  }
+  const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
+  assert.ok(reviewer);
+  const properties = buildPermissionUnitProperties(reviewer, process.cwd());
+  const result = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe",
+    ...properties.map((property) => `--property=${property}`),
+    "/bin/sh", "-c", `! test -r ${JSON.stringify(teaConfig)} && ! cat ${JSON.stringify(teaConfig)} >/dev/null 2>&1`,
+  ], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
 test("linked-worktree .git pointer and resolved metadata are immutable in a real hardened unit", (t) => {

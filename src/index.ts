@@ -602,6 +602,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         permissionEnvironment.AGENT_INTERCOM_REAL_GIT = resolveProfileCommand("git") || "/usr/bin/git";
         const realGh = resolveProfileCommand("gh");
         if (realGh) permissionEnvironment.AGENT_INTERCOM_REAL_GH = realGh;
+        const realTea = resolveProfileCommand("tea");
+        if (realTea) permissionEnvironment.AGENT_INTERCOM_REAL_TEA = realTea;
         permissionEnvironment.PATH = `${GIT_GUARD_BIN}:${profile.env?.PATH || process.env.PATH || ""}`;
       }
       const executable = resolveProfileCommand(profile.command);

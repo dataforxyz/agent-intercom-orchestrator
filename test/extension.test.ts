@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -271,6 +272,9 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
     assert.ok(systemdArgs.includes("--setenv=GIT_TERMINAL_PROMPT=0"));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=PATH=") && arg.includes("guard-bin")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GIT=")));
+    if (spawnSync("sh", ["-c", "command -v tea >/dev/null"]).status === 0) {
+      assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_TEA=")));
+    }
     assert.ok(systemdArgs.some((arg) => arg.includes("clean-env-launcher.mjs")));
     const state = JSON.parse(await readFile(join(orchestratorDir, "worker-runtime", "state-race", "state-race.state.json"), "utf8"));
     assert.equal(state.workerId, "state-race");

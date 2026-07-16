@@ -33,6 +33,10 @@ const SENSITIVE_HOME_PATHS = [
   "~/.azure",
   "~/.config/gcloud",
   "~/.config/gh",
+  "~/.config/tea",
+  "~/.config/gitea",
+  "~/.config/forgejo",
+  "~/.tea",
   "~/.netrc",
   "~/.npmrc",
   "~/.pypirc",
@@ -49,6 +53,28 @@ const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   GH_TOKEN: "",
   GITHUB_TOKEN: "",
   GITLAB_TOKEN: "",
+  TEA_CONFIG: "",
+  TEA_CONFIG_FILE: "",
+  TEA_TOKEN: "",
+  TEA_LOGIN: "",
+  TEA_DEBUG: "",
+  TEA_TRACE: "",
+  GITEA_TOKEN: "",
+  GITEA_URL: "",
+  GITEA_SERVER: "",
+  GITEA_SERVER_URL: "",
+  GITEA_SERVER_TOKEN: "",
+  GITEA_SERVER_USER: "",
+  GITEA_SERVER_PASSWORD: "",
+  GITEA_SERVER_OTP: "",
+  GITEA_INSTANCE_URL: "",
+  GITEA_INSTANCE_SSH_HOST: "",
+  GITEA_INSTANCE_INSECURE: "",
+  GITEA_LOGIN_VIA_ENV: "",
+  FORGEJO_TOKEN: "",
+  FORGEJO_URL: "",
+  FORGEJO_SERVER: "",
+  FORGEJO_SERVER_URL: "",
   AWS_ACCESS_KEY_ID: "",
   AWS_SECRET_ACCESS_KEY: "",
   AWS_SESSION_TOKEN: "",
@@ -190,6 +216,115 @@ const SAFE_GIT_COMMANDS = new Set([
   "for-each-ref",
 ]);
 
+const TEA_COMMAND_ALIASES: Record<string, string> = {
+  issues: "issues", issue: "issues", i: "issues",
+  pulls: "pulls", pull: "pulls", pr: "pulls",
+  labels: "labels", label: "labels",
+  milestones: "milestones", milestone: "milestones", ms: "milestones",
+  releases: "releases", release: "releases", r: "releases",
+  times: "times", time: "times", t: "times",
+  organizations: "organizations", organization: "organizations", org: "organizations",
+  repos: "repos", repo: "repos",
+  branches: "branches", branch: "branches", b: "branches",
+  actions: "actions", action: "actions",
+  wiki: "wiki",
+  webhooks: "webhooks", webhook: "webhooks", hooks: "webhooks", hook: "webhooks",
+  comments: "comments", comment: "comments", c: "comments",
+  notifications: "notifications", notification: "notifications", n: "notifications",
+  logins: "logins", login: "logins",
+  "ssh-keys": "ssh-keys", "ssh-key": "ssh-keys",
+  whoami: "whoami",
+  api: "api",
+};
+
+const SAFE_TEA_SUBCOMMANDS: Record<string, Set<string>> = {
+  issues: new Set(["list", "ls"]),
+  pulls: new Set(["list", "ls", "review-comments", "rc"]),
+  labels: new Set(["list", "ls"]),
+  milestones: new Set(["list", "ls"]),
+  releases: new Set(["list", "ls"]),
+  times: new Set(["list", "ls"]),
+  organizations: new Set(["list", "ls"]),
+  repos: new Set(["list", "ls", "search", "s"]),
+  branches: new Set(["list", "ls"]),
+  wiki: new Set(["list", "ls", "view", "revisions", "history"]),
+  webhooks: new Set(["list", "ls"]),
+  comments: new Set(["list", "ls"]),
+  notifications: new Set(["list", "ls"]),
+  logins: new Set(["list", "ls"]),
+  "ssh-keys": new Set(["list", "ls"]),
+};
+
+const SAFE_TEA_ACTION_SUBCOMMANDS: Record<string, Set<string>> = {
+  secrets: new Set(["list", "ls"]), secret: new Set(["list", "ls"]),
+  variables: new Set(["list", "ls"]), variable: new Set(["list", "ls"]), vars: new Set(["list", "ls"]), var: new Set(["list", "ls"]),
+  runs: new Set(["list", "ls", "view", "show", "get", "logs", "log"]), run: new Set(["list", "ls", "view", "show", "get", "logs", "log"]),
+  workflows: new Set(["list", "ls", "view", "show", "get"]), workflow: new Set(["list", "ls", "view", "show", "get"]),
+};
+
+function readOnlyTeaApiArgs(args: string[]): boolean {
+  let method = "GET";
+  let methodSeen = false;
+  let endpointCount = 0;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") return false;
+    if (["--field", "-f", "--Field", "-F", "--data", "-d", "--header", "-H"].includes(arg)) return false;
+    if (/^(?:--field|--Field|--data|--header)=/.test(arg) || /^-(?:f|F|d|H).+/.test(arg)) return false;
+    if (arg === "--method" || arg === "-X") {
+      if (methodSeen || index + 1 >= args.length) return false;
+      methodSeen = true;
+      method = args[++index].toUpperCase();
+      continue;
+    }
+    if (arg.startsWith("--method=")) {
+      if (methodSeen) return false;
+      methodSeen = true;
+      method = arg.slice("--method=".length).toUpperCase();
+      continue;
+    }
+    if (/^-X(?:=)?.+/.test(arg)) {
+      if (methodSeen) return false;
+      methodSeen = true;
+      method = arg.slice(2).replace(/^=/, "").toUpperCase();
+      continue;
+    }
+    if (["--output", "-o", "--login", "-l", "--repo", "-r", "--remote", "-R"].includes(arg)) {
+      if (index + 1 >= args.length) return false;
+      index += 1;
+      continue;
+    }
+    if (/^(?:--output|--login|--repo|--remote)=.+/.test(arg) || /^-(?:o|l|r|R).+/.test(arg)) continue;
+    if (arg === "--include" || arg === "-i") continue;
+    if (arg.startsWith("-")) return false;
+    endpointCount += 1;
+  }
+  return endpointCount === 1 && (method === "GET" || method === "HEAD");
+}
+
+export function isReadOnlyTeaInvocation(args: string[]): boolean {
+  if (args.length === 0) return true;
+  if (args.some((arg) => arg === "--help" || arg === "-h")) return true;
+  if (args.length === 1 && ["--version", "-v"].includes(args[0])) return true;
+  if (["help", "h"].includes(args[0])) return true;
+  if (args.some((arg) => arg === "--debug" || arg === "--vvv")) return false;
+  const teaCommand = TEA_COMMAND_ALIASES[args[0]];
+  if (!teaCommand) return false;
+  if (teaCommand === "whoami") return args.length === 1;
+  if (teaCommand === "api") return readOnlyTeaApiArgs(args.slice(1));
+  if (teaCommand === "actions") {
+    if (args.length < 3) return false;
+    return SAFE_TEA_ACTION_SUBCOMMANDS[args[1]]?.has(args[2]) ?? false;
+  }
+  if (args.length < 2 || !(SAFE_TEA_SUBCOMMANDS[teaCommand]?.has(args[1]) ?? false)) return false;
+  if (teaCommand === "labels" && args.slice(2).some((arg) => arg === "--save" || arg.startsWith("--save=") || arg === "-s" || /^-s.+/.test(arg))) return false;
+  return true;
+}
+
+function shellWords(input: string): string[] {
+  return [...input.matchAll(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/g)].map((match) => match[0].replace(/^(?:"|')|(?:"|')$/g, ""));
+}
+
 function gitInvocationReason(command: string): string | undefined {
   const invocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?git\s+(?:(?:(?:-C|-c|--git-dir|--work-tree)\s+\S+|(?:--git-dir|--work-tree)=\S+|--no-pager)\s+)*([a-z][a-z-]*)([^\n;&|)]*)/gi);
   for (const match of invocations) {
@@ -205,6 +340,12 @@ function gitInvocationReason(command: string): string | undefined {
   }
   if (/(?:^|[\s;&|()])gh\s+(?:api\b|pr\s+(?:create|merge|close|reopen)\b|issue\s+(?:create|close|reopen|delete)\b|release\s+(?:create|delete|upload)\b|repo\s+(?:create|delete|fork|rename|archive)\b|workflow\s+run\b)/i.test(command)) {
     return "GitHub write operation is blocked by the read-only Git policy";
+  }
+  const teaInvocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?tea(?:\s+([^\n;&|)]*))?/gi);
+  for (const match of teaInvocations) {
+    if (!isReadOnlyTeaInvocation(shellWords((match[1] ?? "").trim()))) {
+      return "Forgejo write operation is blocked by the read-only Git policy";
+    }
   }
   return undefined;
 }
