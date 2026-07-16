@@ -17,7 +17,7 @@ pi install npm:@dataforxyz/agent-intercom-pi
 pi install npm:@dataforxyz/agent-intercom-orchestrator
 ```
 
-For Git-pinned installs, use `git:github.com/dataforxyz/agent-intercom-pi@v0.9.2` and `git:github.com/dataforxyz/agent-intercom-orchestrator@v0.9.2` instead.
+For Git-pinned installs, use `git:github.com/dataforxyz/agent-intercom-pi@v0.9.3` and `git:github.com/dataforxyz/agent-intercom-orchestrator@v0.9.3` instead.
 
 Restart Pi, or run `/reload` in every already-open Pi session. Confirm both packages are installed:
 
