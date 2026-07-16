@@ -148,19 +148,22 @@ export async function readUnitProcessTree(runner: CommandRunner, unit: string): 
 }
 
 export async function stopUnit(runner: CommandRunner, unit: string): Promise<void> {
-  const result = await runner.exec("systemctl", ["--user", "stop", unit], { timeout: 15000 });
-  if (result.code !== 0 && !/not loaded|not found/i.test(`${result.stdout}\n${result.stderr}`)) {
-    throw new Error(`Could not stop ${unit}: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`);
+  try {
+    const result = await runner.exec("systemctl", ["--user", "stop", unit], { timeout: 15000 });
+    if (result.code !== 0 && !/not loaded|not found/i.test(`${result.stdout}\n${result.stderr}`)) {
+      throw new Error(`Could not stop ${unit}: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`);
+    }
+    let remaining = await readUnitProcessTree(runner, unit);
+    if (remaining.pids.length) {
+      await runner.exec("systemctl", ["--user", "kill", "--kill-whom=all", "--signal=SIGKILL", unit], { timeout: 5000 });
+      remaining = await readUnitProcessTree(runner, unit);
+    }
+    if (remaining.pids.length) {
+      throw new Error(`Worker unit ${unit} still owns processes after stop: ${remaining.pids.join(", ")}`);
+    }
+  } finally {
+    await runner.exec("systemctl", ["--user", "reset-failed", unit], { timeout: 5000 }).catch(() => undefined);
   }
-  let remaining = await readUnitProcessTree(runner, unit);
-  if (remaining.pids.length) {
-    await runner.exec("systemctl", ["--user", "kill", "--kill-whom=all", "--signal=SIGKILL", unit], { timeout: 5000 });
-    remaining = await readUnitProcessTree(runner, unit);
-  }
-  if (remaining.pids.length) {
-    throw new Error(`Worker unit ${unit} still owns processes after stop: ${remaining.pids.join(", ")}`);
-  }
-  await runner.exec("systemctl", ["--user", "reset-failed", unit], { timeout: 5000 });
 }
 
 export async function listWorkerUnits(runner: CommandRunner): Promise<string[]> {

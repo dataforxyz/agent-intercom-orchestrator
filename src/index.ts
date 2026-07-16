@@ -180,6 +180,27 @@ export function workersAttachedToManager(workers: WorkerRecord[], sessionId: str
   return workers.filter((worker) => worker.managerSessionId === sessionId);
 }
 
+export function renewObservedWorkerLeases(
+  state: WorkerStateFile,
+  observedWorkers: WorkerRecord[],
+  managerId: string,
+  config: OrchestratorConfig,
+  now = Date.now(),
+): WorkerRecord[] {
+  const observedLiveRuns = new Set(observedWorkers
+    .filter((worker) => worker.managerSessionId === managerId && worker.owned && isLiveState(worker.state))
+    .map((worker) => `${worker.id}\u0000${worker.runId}`));
+  const renewed: WorkerRecord[] = [];
+  for (const worker of state.workers) {
+    if (!observedLiveRuns.has(`${worker.id}\u0000${worker.runId}`)) continue;
+    if (worker.managerSessionId !== managerId || !worker.owned || !isLiveState(worker.state)) continue;
+    worker.leaseExpiresAt = leaseExpiry(config, now);
+    worker.updatedAt = now;
+    renewed.push(structuredClone(worker));
+  }
+  return renewed;
+}
+
 function extractWorkers(state: WorkerStateFile, id?: string): WorkerRecord[] {
   if (!id) return [...state.workers];
   const worker = state.workers.find((candidate) => candidate.id === id);
@@ -258,6 +279,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   let config: OrchestratorConfig;
   let currentCtx: ExtensionContext | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
+  let heartbeatRunning = false;
   const modelCache = new Map<Harness, { expiresAt: number; models: string[] }>();
   let openCodeModelInfoCache: { expiresAt: number; models: OpenCodeModelInfo[] } | undefined;
 
@@ -999,16 +1021,18 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     await reconcile();
     if (config.cleanupExpiredOnStart) await cleanupExpired(true);
     clearInterval(heartbeat);
+    heartbeatRunning = false;
     heartbeat = setInterval(() => {
-      const sessionId = managerSessionId(ctx);
-      const now = Date.now();
-      void store.mutate((state) => {
-        for (const worker of state.workers) {
-          if (worker.managerSessionId !== sessionId || !worker.owned || !isLiveState(worker.state)) continue;
-          worker.leaseExpiresAt = leaseExpiry(config, now);
-          worker.updatedAt = now;
-        }
-      }).then(() => updateStatus(ctx)).catch(() => undefined);
+      if (heartbeatRunning) return;
+      heartbeatRunning = true;
+      void reconcile().then(async (observedWorkers) => {
+        if (currentCtx !== ctx) return;
+        const now = Date.now();
+        await store.mutate((state) => renewObservedWorkerLeases(state, observedWorkers, managerSessionId(ctx), config, now));
+        await updateStatus(ctx);
+      }).catch(() => undefined).finally(() => {
+        heartbeatRunning = false;
+      });
     }, Math.max(10, config.heartbeatSeconds) * 1000);
     heartbeat.unref?.();
   });
@@ -1016,6 +1040,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (event, ctx) => {
     clearInterval(heartbeat);
     heartbeat = undefined;
+    heartbeatRunning = false;
     ctx.ui.setStatus(STATUS_KEY, undefined);
     if (config?.cleanupOnShutdown && event.reason !== "reload") {
       const sessionId = managerSessionId(ctx);

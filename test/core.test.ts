@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_CONFIG, mergeConfig, readConfig, writeConfig, writeConfigDefaults } from "../src/config.ts";
-import { parseOpenCodeModelsVerbose, parsePiModels, workersAttachedToManager } from "../src/index.ts";
+import { parseOpenCodeModelsVerbose, parsePiModels, renewObservedWorkerLeases, workersAttachedToManager } from "../src/index.ts";
 import { WorkerStore } from "../src/store.ts";
 import { launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit } from "../src/systemd.ts";
 import type { WorkerRecord } from "../src/types.ts";
@@ -13,6 +13,7 @@ import {
   buildWorkerEnvironment,
   cleanupReason,
   createSystemdRecord,
+  leaseExpiry,
   normalizeModelForHarness,
   stateFromUnit,
   validateEffort,
@@ -122,6 +123,22 @@ test("stop verifies the worker cgroup and escalates remaining descendants", asyn
   cgroupReads = 0;
   await stopUnit(runner, "worker.service");
   assert.ok(calls.some((call) => call.command === "systemctl" && call.args.includes("kill") && call.args.includes("--signal=SIGKILL")));
+  assert.ok(calls.some((call) => call.command === "systemctl" && call.args.includes("reset-failed")));
+});
+
+test("stop resets a failed unit even when descendants survive escalation", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const runner = {
+    async exec(command: string, args: string[]) {
+      calls.push({ command, args });
+      if (command === "systemd-cgls") {
+        return { stdout: "Control group /user.slice/worker.service:\n└─4242 stuck-child\n", stderr: "", code: 0 };
+      }
+      return { stdout: "", stderr: "", code: 0 };
+    },
+  };
+  await assert.rejects(stopUnit(runner, "worker.service"), /still owns processes/);
+  assert.ok(calls.some((call) => call.command === "systemctl" && call.args.includes("reset-failed")));
 });
 
 test("unit status maps to normalized worker states", () => {
@@ -144,6 +161,27 @@ test("Pi agent-info views only include workers attached to that manager session"
     unit: "second.service", managerSessionId: "pi-session-b", config: DEFAULT_CONFIG,
   });
   assert.deepEqual(workersAttachedToManager([first, second], "pi-session-a").map((worker) => worker.id), ["first-worker"]);
+});
+
+test("heartbeat lease renewal only applies to workers still live after reconciliation", () => {
+  const running = createSystemdRecord({
+    id: "running-worker", runId: "run-running", harness: "codex", role: "builder", task: "test", cwd: "/tmp",
+    profile: "codex-safe", unit: "running.service", managerSessionId: "session-a", config: DEFAULT_CONFIG, now: 1000,
+  });
+  running.state = "running";
+  running.leaseExpiresAt = 2000;
+  const failed = createSystemdRecord({
+    id: "failed-worker", runId: "run-failed", harness: "codex", role: "builder", task: "test", cwd: "/tmp",
+    profile: "codex-safe", unit: "failed.service", managerSessionId: "session-a", config: DEFAULT_CONFIG, now: 1000,
+  });
+  failed.state = "running";
+  failed.leaseExpiresAt = 2000;
+  const observedFailed = { ...failed, state: "failed" as const };
+  const state = { version: 1 as const, workers: [running, failed] };
+  const renewed = renewObservedWorkerLeases(state, [structuredClone(running), observedFailed], "session-a", DEFAULT_CONFIG, 3000);
+  assert.deepEqual(renewed.map((worker) => worker.id), ["running-worker"]);
+  assert.equal(running.leaseExpiresAt, leaseExpiry(DEFAULT_CONFIG, 3000));
+  assert.equal(failed.leaseExpiresAt, 2000);
 });
 
 test("cleanup only selects owned live workers with expired leases", () => {

@@ -152,7 +152,8 @@ Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unles
 
 - Pi, Codex, and Claude registration is not automatically awaited. Use the `intercomTarget` returned by spawn directly with `intercom_send`; if the first send reports that it is not connected yet, wait briefly and retry. Use `intercom_list` only as a readiness diagnostic or to discover peers not managed by this fleet session.
 - A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or renew them. Expired leases remain eligible for orchestrator-wide garbage collection.
-- `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns. `opencode-run` remains available for cheaper one-shot assignments.
+- `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns, and retries early server bind/startup exits on a fresh port. `opencode-run` remains available for cheaper one-shot assignments.
+- Automatic lease renewal reconciles the systemd unit first, so missing, exited, and failed services are not kept alive by manager activity. A process that remains active but is application-level hung still requires status/log inspection and an explicit stop.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.
 - Playwright, browsers, MCP servers, and ordinary descendants are contained and verified through the worker cgroup. Detached systemd services, containers, remote browsers, and cloud jobs require explicit manager ownership and recorded resource IDs.
 - Linux systemd user services are the only process backend in this draft.

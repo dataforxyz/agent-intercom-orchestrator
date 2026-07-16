@@ -51,7 +51,10 @@ async function reservePort() {
 
 async function waitForPort(port, child, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
+  let childError;
+  child.on("error", (error) => { childError = error; });
   while (Date.now() < deadline) {
+    if (childError) throw childError;
     if (child.exitCode !== null) throw new Error(`OpenCode server exited with ${child.exitCode}`);
     const connected = await new Promise((resolve) => {
       const socket = net.createConnection({ host: "127.0.0.1", port });
@@ -59,7 +62,12 @@ async function waitForPort(port, child, timeoutMs = 30000) {
       socket.once("error", () => resolve(false));
       socket.setTimeout(500, () => { socket.destroy(); resolve(false); });
     });
-    if (connected) return;
+    if (connected) {
+      await delay(50);
+      if (childError) throw childError;
+      if (child.exitCode !== null) throw new Error(`OpenCode server exited with ${child.exitCode}`);
+      return;
+    }
     await delay(100);
   }
   throw new Error(`Timed out waiting for OpenCode server on port ${port}`);
@@ -82,36 +90,61 @@ const priorState = await readJson(statePath);
 const resumableSessionId = priorState && priorState.workerId === workerId && typeof priorState.sessionId === "string"
   ? priorState.sessionId
   : undefined;
-const port = await reservePort();
-const url = `http://127.0.0.1:${port}`;
 const childEnv = {
   ...process.env,
   OPENCODE_SERVER_PASSWORD: randomBytes(24).toString("hex"),
   ...(resumableSessionId ? { OPENCODE_INTERCOM_TARGET_SESSION: resumableSessionId } : {}),
 };
-const server = spawn(command, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
-  cwd: process.cwd(),
-  env: childEnv,
-  stdio: ["ignore", "pipe", "pipe"],
-});
-server.stdout.pipe(process.stdout);
-server.stderr.pipe(process.stderr);
 
+let server;
+let startingServer;
+let port;
+let url;
 let bootstrap;
 let stopping = false;
 function stop(signal = "SIGTERM") {
   if (stopping) return;
   stopping = true;
   bootstrap?.kill(signal);
-  server.kill(signal);
+  startingServer?.kill(signal);
+  server?.kill(signal);
   const timer = setTimeout(() => {
     bootstrap?.kill("SIGKILL");
-    server.kill("SIGKILL");
+    startingServer?.kill("SIGKILL");
+    server?.kill("SIGKILL");
   }, 3000);
   timer.unref?.();
 }
 process.on("SIGTERM", () => stop());
 process.on("SIGINT", () => stop("SIGINT"));
+
+async function startServer(maxAttempts = 4) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (stopping) throw new Error("OpenCode peer is stopping");
+    const candidatePort = await reservePort();
+    const candidateUrl = `http://127.0.0.1:${candidatePort}`;
+    const candidate = spawn(command, ["serve", "--hostname", "127.0.0.1", "--port", String(candidatePort)], {
+      cwd: process.cwd(),
+      env: childEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    startingServer = candidate;
+    candidate.stdout.pipe(process.stdout);
+    candidate.stderr.pipe(process.stderr);
+    try {
+      await waitForPort(candidatePort, candidate);
+      startingServer = undefined;
+      return { server: candidate, port: candidatePort, url: candidateUrl };
+    } catch (error) {
+      startingServer = undefined;
+      candidate.kill("SIGTERM");
+      if (stopping || attempt === maxAttempts || candidate.exitCode === null) throw error;
+      process.stderr.write(`OpenCode server could not bind/start on port ${candidatePort}; retrying with a new port (${attempt}/${maxAttempts}).\n`);
+      await delay(50);
+    }
+  }
+  throw new Error("Could not start the OpenCode server");
+}
 
 async function runBootstrap(sessionId) {
   const resumeArgs = sessionId ? ["--session", sessionId] : [];
@@ -145,7 +178,7 @@ async function runBootstrap(sessionId) {
 }
 
 try {
-  await waitForPort(port, server);
+  ({ server, port, url } = await startServer());
   let bootstrapResult = await runBootstrap(resumableSessionId);
   if (bootstrapResult.code !== 0 && resumableSessionId && !stopping) {
     process.stderr.write(`Could not resume OpenCode session ${resumableSessionId}; creating a fresh session.\n`);

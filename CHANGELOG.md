@@ -5,6 +5,7 @@
 - Guide managers to use `intercom_send` for assignments and progress/status checkpoints, reserving `intercom_ask` for blocking decisions.
 - Require managers to create sandboxed builder worktrees before spawn and pass the worktree as `cwd`.
 - Reserve worker IDs atomically before launch, patch stop/renew/adopt/forget state inside the store lock, and reclaim dead-process locks without stale-snapshot resurrection or orphaned duplicate units.
+- Reconcile service state before automatic lease renewal, retry persistent OpenCode startup on early port-bind exits, and reset failed systemd units even when stop escalation reports surviving descendants.
 
 ## 0.10.0 - 2026-07-16
 
