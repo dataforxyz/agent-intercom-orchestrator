@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DEFAULT_CONFIG } from "../src/config.ts";
+import { supportsHardenedUserUnits } from "./systemd-support.ts";
 import {
   applyPiPermissionArgs,
   blockedToolReason,
@@ -239,8 +240,8 @@ test("hardened systemd profile makes host Tea configuration inaccessible", (t) =
 });
 
 test("linked-worktree .git pointer and resolved metadata are immutable in a real hardened unit", (t) => {
-  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
-    t.skip("systemd user manager is unavailable");
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
     return;
   }
   const base = join(homedir(), ".cache", "agent-intercom-orchestrator-tests");
@@ -276,8 +277,8 @@ test("linked-worktree .git pointer and resolved metadata are immutable in a real
 });
 
 test("hardened systemd profile cannot delegate an unsandboxed unit to the user manager", (t) => {
-  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
-    t.skip("systemd user manager is unavailable");
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
     return;
   }
   const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
@@ -313,8 +314,8 @@ test("hardened systemd profile cannot delegate an unsandboxed unit to the user m
 });
 
 test("nested bwrap and unshare sandboxes inherit the outer filesystem boundary", (t) => {
-  if (process.platform !== "linux" || spawnSync("systemctl", ["--user", "show-environment"]).status !== 0) {
-    t.skip("systemd user manager is unavailable");
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
     return;
   }
   if (spawnSync("sh", ["-c", "command -v bwrap >/dev/null && command -v unshare >/dev/null"]).status !== 0) {
