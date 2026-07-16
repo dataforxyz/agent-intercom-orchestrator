@@ -25,6 +25,7 @@ import {
   validateEffort,
   validateWorkerId,
 } from "./workers.ts";
+import { detectHarnessVersions, formatAdapterVersions, formatHarnessVersions, formatUpdatePlan, inspectAdapterFamily } from "./updates.ts";
 
 const ACTIONS = [
   "spawn",
@@ -33,6 +34,8 @@ const ACTIONS = [
   "stop",
   "cleanup",
   "doctor",
+  "versions",
+  "update",
   "logs",
   "renew",
   "forget",
@@ -48,6 +51,7 @@ const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as c
 const STATUS_KEY = "agent-intercom-orchestrator";
 const PI_PEER_LAUNCHER = fileURLToPath(new URL("./pi-peer-launcher.mjs", import.meta.url));
 const OPENCODE_PEER_LAUNCHER = fileURLToPath(new URL("./opencode-peer-launcher.mjs", import.meta.url));
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const AgentFleetParams = Type.Object({
   action: StringEnum(ACTIONS),
@@ -62,7 +66,7 @@ const AgentFleetParams = Type.Object({
   instructions: Type.Optional(Type.String({ description: "Additional standing instructions for the coworker" })),
   fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
   all: Type.Optional(Type.Boolean({ description: "Include workers owned by other manager sessions for list/status diagnostics" })),
-  execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup; false previews it" })),
+  execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup or updates; false previews them" })),
   lines: Type.Optional(Type.Number({ description: "Journal lines for logs (1-500)" })),
 });
 
@@ -262,6 +266,23 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return config;
   };
 
+  const inspectVersions = () => inspectAdapterFamily({
+    agentDir,
+    currentPackageRoot: PACKAGE_ROOT,
+    home: process.env.HOME,
+    commandPaths: {
+      coi: resolveProfileCommand("coi"),
+      cci: resolveProfileCommand("cci"),
+    },
+  });
+
+  const harnessVersions = () => detectHarnessVersions({
+    pi: resolveProfileCommand("pi"),
+    codex: resolveProfileCommand("codex"),
+    claude: resolveProfileCommand("claude"),
+    opencode: resolveProfileCommand("opencode"),
+  });
+
   const updateStatus = async (ctx = currentCtx) => {
     if (!ctx) return;
     const state = await store.read();
@@ -448,7 +469,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
     await store.upsert(worker);
     try {
-      const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions });
+      const harnessArgs = buildWorkerArgs({ harness, profile, workerId: id, cwd, role, task, model, effort, instructions, managerTarget: worker.managerSessionId });
       const executable = resolveProfileCommand(profile.command);
       if (!executable) throw new Error(`Launch command not found or not executable: ${profile.command}`);
       const wrappedLauncher = harness === "pi"
@@ -510,13 +531,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     name: "agent_fleet",
     label: "Agent Fleet",
     description:
-      "Create and manage owned independent Pi, Codex, Claude Code, and OpenCode coworkers. Spawn/list results include direct Intercom targets; list/status default to workers owned by the current manager session. Workers run in systemd user services so their process trees are owned and cleanable.",
-    promptSnippet: "Create, inspect, configure, stop, and clean up owned cross-harness coworkers",
+      "Create and manage owned independent Pi, Codex, Claude Code, and OpenCode coworkers. Inspect coordinated adapter versions and preview or execute source-aware updates. Spawn/list results include direct Intercom targets; list/status default to workers owned by the current manager session.",
+    promptSnippet: "Create, inspect, update, stop, and clean up owned cross-harness coworkers",
     promptGuidelines: [
       "Pi workers are independent Intercom peers, not pi-subagents. Use role=advisor for a persistent Pi advisor coworker.",
       "After agent_fleet spawns a worker, use the returned intercomTarget directly with intercom_send or intercom_ask; do not call intercom_list merely to rediscover an owned worker. Pi, Codex, and Claude may need a brief registration delay before first delivery. OpenCode receives its initial task at launch.",
-      "Use capabilities, profiles, models, or config before guessing model names, effort levels, or defaults.",
-      "Preview cleanup before execute=true, and never kill sessions the fleet does not own.",
+      "Use capabilities, profiles, models, variants, versions, or config before guessing models, effort levels, package state, or defaults.",
+      "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
     ],
     parameters: AgentFleetParams,
 
@@ -579,8 +600,40 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         );
       }
 
+      if (params.action === "versions") {
+        const adapters = await inspectVersions();
+        const harnesses = harnessVersions();
+        return textResult(`${formatAdapterVersions(adapters)}\n\n${formatHarnessVersions(harnesses)}`, { adapters, harnesses });
+      }
+
+      if (params.action === "update") {
+        const adapters = await inspectVersions();
+        const plan = formatUpdatePlan(adapters);
+        if (!params.execute) {
+          return textResult(`${plan}\n\nPreview only. Run update with execute=true to apply recognized safe adapter updates.`, { adapters, executed: false });
+        }
+        const results: Array<{ id: string; command?: string; code?: number; stdout?: string; stderr?: string; skipped?: string }> = [];
+        for (const adapter of adapters.filter((candidate) => candidate.status === "outdated" || candidate.status === "missing")) {
+          if (!adapter.update) {
+            results.push({ id: adapter.id, skipped: adapter.blockedReason ?? "no safe update command detected" });
+            continue;
+          }
+          const result = await runner.exec(adapter.update.command, adapter.update.args, { timeout: 180000 });
+          results.push({ id: adapter.id, command: adapter.update.display, code: result.code, stdout: result.stdout.trim(), stderr: result.stderr.trim() });
+        }
+        const lines = results.length === 0
+          ? ["All detected Agent Intercom adapters are current."]
+          : results.map((result) => result.skipped
+            ? `${result.id}: skipped — ${result.skipped}`
+            : `${result.id}: ${result.code === 0 ? "updated" : `failed (${result.code})`} — ${result.command}${result.stderr ? `\n  ${result.stderr}` : ""}`);
+        lines.push("Restart updated coworkers. Run /reload in Pi after Pi or orchestrator updates.");
+        return textResult(lines.join("\n"), { adapters, executed: true, results });
+      }
+
       if (params.action === "doctor") {
         const available = await systemdAvailable(runner);
+        const adapters = await inspectVersions();
+        const adapterDrift = adapters.filter((adapter) => adapter.status === "outdated" || adapter.status === "missing");
         const profileLines = Object.entries(config.profiles).map(([name, profile]) => {
           const resolved = resolveProfileCommand(profile.command);
           return `${name} [${profile.harness}/${profile.mode ?? "persistent"}] ${profile.spawnable === false ? "attach-only" : resolved ? `ok: ${resolved}` : `missing: ${profile.command}`}`;
@@ -601,8 +654,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         const units = available ? await listWorkerUnits(runner) : [];
         const untrackedUnits = units.filter((unit) => !recordedUnits.has(unit));
         return textResult(
-          [`systemd user manager: ${available ? "available" : "unavailable"}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
-          { systemd: available, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, configPath, statePath, untrackedUnits },
+          [`systemd user manager: ${available ? "available" : "unavailable"}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
+          { systemd: available, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
         );
       }
 

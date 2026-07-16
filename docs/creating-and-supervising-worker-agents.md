@@ -124,20 +124,20 @@ pi list
 
 ```typescript
 agent_fleet({ action: "doctor" })
+agent_fleet({ action: "versions" })
 agent_fleet({ action: "capabilities" })
 agent_fleet({ action: "profiles" })
 ```
 
-The plugin requires Linux systemd user services. `doctor` reports missing harness commands or adapters. Install only the harnesses you intend to spawn, but keep `agent-intercom-pi` installed for the manager's Intercom control plane.
+The plugin requires Linux systemd user services. `doctor` reports missing harness commands, adapter drift, and unsafe package sources. Install only the harnesses you intend to spawn, but keep `agent-intercom-pi` installed for the manager's Intercom control plane.
 
-Update both Pi packages with:
+Preview updates for all five coordinated adapters with:
 
-```bash
-pi update --extension npm:@dataforxyz/agent-intercom-pi
-pi update --extension npm:@dataforxyz/agent-intercom-orchestrator
+```typescript
+agent_fleet({ action: "update" })
 ```
 
-After updating, run `/reload` and `doctor` again. For a temporary checkout test without modifying Pi settings, use `pi -e ./src/index.ts` from the orchestrator repository.
+The preview detects Pi package sources, npm-global packages, active Git-linked binaries, and the configured OpenCode plugin path. It prints exact commands without replacing Git installs with npm. Apply only recognized safe commands with `agent_fleet({ action: "update", execute: true })`; dirty or version-pinned Git sources remain blocked. After updating, restart affected workers, run `/reload`, and call `doctor` again. For a temporary checkout test without modifying Pi settings, use `pi -e ./src/index.ts` from the orchestrator repository.
 
 ### Full Pi manager stack
 
@@ -567,6 +567,16 @@ intercom_list({})
 ```
 
 Do not confuse worker registration with task execution.
+
+## Coworkers can find their manager
+
+Every spawned worker receives its manager target in both the standing instructions and `AGENT_INTERCOM_MANAGER_TARGET`. The normal model-facing path is deliberately simpler:
+
+```typescript
+intercom_team({})
+```
+
+The result names the manager and live same-manager coworkers with direct Intercom targets. It reads the orchestrator worker store on every call, validates the worker/run identity, and therefore follows `adopt` without requiring a worker restart. Owned workers still do not receive fleet mutation authority; they use `intercom_send` or `intercom_ask` with the returned targets.
 
 ## Worker preflight
 

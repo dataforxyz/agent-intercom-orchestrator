@@ -25,13 +25,16 @@ Verify with `pi list`, then call `agent_fleet({ action: "doctor" })`. The packag
 - Use unique worker ids and give each coworker an exclusive scope and explicit role.
 - All harnesses start inside systemd user services so MCP servers, sidecars, browsers, and other descendants stop with the owned cgroup.
 - `agent_fleet` spawn and list results include each owned worker's `intercomTarget`. Send directly to that target with `intercom_send` or `intercom_ask`; do not call `intercom_list` merely to rediscover a managed worker. Pi, Codex, and Claude may need a brief registration delay before the first delivery. OpenCode receives its initial task at launch.
-- Use `capabilities`, `profiles`, `models`, `variants`, or `config` instead of guessing options. OpenCode variants are model-specific.
-- Preview cleanup before executing it. Never kill or forget sessions the orchestrator does not own.
+- Every owned worker is told its manager target. Coworkers use `intercom_team({})` to get the current manager and live same-manager coworkers; this follows adoption dynamically and does not grant fleet mutation authority.
+- Use `capabilities`, `profiles`, `models`, `variants`, `versions`, or `config` instead of guessing options or installed package state. OpenCode variants are model-specific.
+- Preview update and cleanup before executing them. Never replace a detected Git install with npm, and never kill or forget sessions the orchestrator does not own.
 
 ## Discover options
 
 ```typescript
 agent_fleet({ action: "doctor" })
+agent_fleet({ action: "versions" })
+agent_fleet({ action: "update" }) // source-aware preview
 agent_fleet({ action: "capabilities" })
 agent_fleet({ action: "profiles" })
 agent_fleet({ action: "profiles", harness: "pi" })
@@ -118,9 +121,12 @@ opencode
 
 The OpenCode `agent_fleet` tool invokes the packaged `agent-intercom-fleet` CLI and uses the same state, ownership, leases, readiness, and systemd cleanup as Pi. Owned workers suppress recursive fleet registration by default.
 
-## Lifecycle
+## Updates and lifecycle
+
+`versions` checks the coordinated Pi, Codex, Claude, OpenCode, and orchestrator adapter packages and reports detected harness CLI versions. `update` previews exact commands for the detected Pi/npm/Git source; `execute: true` applies only recognized safe commands and refuses dirty or pinned Git sources.
 
 ```typescript
+agent_fleet({ action: "update", execute: true })
 agent_fleet({ action: "status", id: "codex-build-api" }) // includes its systemd cgroup process tree
 agent_fleet({ action: "logs", id: "codex-build-api", lines: 100 })
 agent_fleet({ action: "renew", id: "codex-build-api" })

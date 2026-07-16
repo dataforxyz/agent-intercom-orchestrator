@@ -221,7 +221,9 @@ test("agent_fleet list and unqualified status default to the current manager's w
 test("extension registers discovery tools and interactive configuration commands", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-extension-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousFetch = globalThis.fetch;
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  globalThis.fetch = async () => new Response(JSON.stringify({ version: "0.9.3" }), { status: 200, headers: { "content-type": "application/json" } });
   try {
     const lifecycle = new Map<string, (...args: any[]) => any>();
     const tools = new Map<string, any>();
@@ -255,6 +257,8 @@ test("extension registers discovery tools and interactive configuration commands
 
     assert.ok(tools.has("agent_fleet"));
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /returned intercomTarget directly/);
+    assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /versions/);
+    assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /update/);
     for (const command of ["agents", "agents-new", "agents-config", "agents-models", "agents-cleanup"]) {
       assert.ok(commands.has(command), `missing /${command}`);
     }
@@ -268,6 +272,12 @@ test("extension registers discovery tools and interactive configuration commands
     );
     assert.match(capabilities.content[0].text, /pi: modes=persistent/);
     assert.match(capabilities.content[0].text, /opencode: modes=persistent,one-shot/);
+
+    const versions = await tools.get("agent_fleet").execute("versions-test", { action: "versions" }, new AbortController().signal, () => {}, ctx);
+    assert.match(versions.content[0].text, /Agent Intercom adapters:/);
+    assert.match(versions.content[0].text, /Harness CLIs:/);
+    const update = await tools.get("agent_fleet").execute("update-test", { action: "update" }, new AbortController().signal, () => {}, ctx);
+    assert.match(update.content[0].text, /Preview only/);
 
     const doctor = await tools.get("agent_fleet").execute(
       "doctor-test",
@@ -286,6 +296,7 @@ test("extension registers discovery tools and interactive configuration commands
 
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
   } finally {
+    globalThis.fetch = previousFetch;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     await rm(agentDir, { recursive: true, force: true });

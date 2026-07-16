@@ -43,9 +43,10 @@ export function validateEffort(harness: Harness, effort: Effort | undefined): Ef
   return effort;
 }
 
-export function standingInstructions(role: string, task: string, instructions?: string): string {
+export function standingInstructions(role: string, task: string, managerTarget: string, instructions?: string): string {
   return [
     `You are the independent ${role} coworker managed by Agent Intercom. You are a peer, not a child subagent.`,
+    `Your manager's Intercom target is ${managerTarget}. Use intercom_team whenever you need the current manager or your managed coworkers.`,
     instructions,
     `Standing assignment: ${task}`,
     "Wait for work through Agent Intercom, report blockers early, and include evidence with completion claims.",
@@ -63,10 +64,11 @@ export function buildWorkerArgs(input: {
   model?: string;
   effort?: Effort;
   instructions?: string;
+  managerTarget: string;
 }): string[] {
-  const { harness, profile, workerId, cwd, role, task, model, effort, instructions } = input;
+  const { harness, profile, workerId, cwd, role, task, model, effort, instructions, managerTarget } = input;
   const args = [...(profile.args ?? [])];
-  const mandate = standingInstructions(role, task, instructions);
+  const mandate = standingInstructions(role, task, managerTarget, instructions);
 
   if (harness === "pi") {
     args.push("--name", workerId, "--session-id", workerId);
@@ -104,6 +106,7 @@ export function buildWorkerEnvironment(
       AGENT_INTERCOM_RUN_ID: ownership.runId,
       AGENT_INTERCOM_SYSTEMD_UNIT: ownership.unit,
       AGENT_INTERCOM_MANAGER_SESSION_ID: ownership.managerSessionId,
+      AGENT_INTERCOM_MANAGER_TARGET: ownership.managerSessionId,
     } : {}),
   };
   if (harness === "opencode") {

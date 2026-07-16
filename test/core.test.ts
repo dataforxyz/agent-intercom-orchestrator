@@ -38,10 +38,11 @@ test("harness launch args include identity or the initial task", () => {
   const claude = DEFAULT_CONFIG.profiles["claude-safe"];
   const opencode = DEFAULT_CONFIG.profiles["opencode-run"];
   assert.ok(pi && codex && claude && opencode);
-  const piArgs = buildWorkerArgs({ harness: "pi", profile: pi, workerId: "advisor-a", cwd: "/repo", role: "advisor", task: "Review", model: "codex/gpt-5.6-sol", effort: "high" });
-  const codexArgs = buildWorkerArgs({ harness: "codex", profile: codex, workerId: "worker-a", cwd: "/repo", role: "builder", task: "Build", model: "gpt-5.6-sol", effort: "high" });
-  const claudeArgs = buildWorkerArgs({ harness: "claude", profile: claude, workerId: "worker-b", cwd: "/repo", role: "challenger", task: "Challenge", model: "opus", effort: "max" });
-  const opencodeArgs = buildWorkerArgs({ harness: "opencode", profile: opencode, workerId: "worker-c", cwd: "/repo", role: "tester", task: "Return OPEN_OK", model: "opencode/claude-sonnet-5", effort: "high" });
+  const managerTarget = "manager-a";
+  const piArgs = buildWorkerArgs({ harness: "pi", profile: pi, workerId: "advisor-a", cwd: "/repo", role: "advisor", task: "Review", model: "codex/gpt-5.6-sol", effort: "high", managerTarget });
+  const codexArgs = buildWorkerArgs({ harness: "codex", profile: codex, workerId: "worker-a", cwd: "/repo", role: "builder", task: "Build", model: "gpt-5.6-sol", effort: "high", managerTarget });
+  const claudeArgs = buildWorkerArgs({ harness: "claude", profile: claude, workerId: "worker-b", cwd: "/repo", role: "challenger", task: "Challenge", model: "opus", effort: "max", managerTarget });
+  const opencodeArgs = buildWorkerArgs({ harness: "opencode", profile: opencode, workerId: "worker-c", cwd: "/repo", role: "tester", task: "Return OPEN_OK", model: "opencode/claude-sonnet-5", effort: "high", managerTarget });
   assert.deepEqual(codexArgs.slice(codexArgs.indexOf("--name"), codexArgs.indexOf("--name") + 4), [
     "--name",
     "worker-a",
@@ -60,6 +61,10 @@ test("harness launch args include identity or the initial task", () => {
   assert.equal(opencodeArgs[0], "run");
   assert.ok(opencodeArgs.includes("--variant"));
   assert.match(opencodeArgs.at(-1) ?? "", /Return OPEN_OK/);
+  for (const args of [piArgs, codexArgs, claudeArgs, opencodeArgs]) {
+    assert.match(args.join(" "), /manager-a/);
+    assert.match(args.join(" "), /intercom_team/);
+  }
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
   const ownedEnv = buildWorkerEnvironment("pi", "advisor-a", "advisor", undefined, {
@@ -68,6 +73,7 @@ test("harness launch args include identity or the initial task", () => {
   assert.equal(ownedEnv.AGENT_INTERCOM_WORKER_ID, "advisor-a");
   assert.equal(ownedEnv.AGENT_INTERCOM_SYSTEMD_UNIT, "worker-a.service");
   assert.equal(ownedEnv.AGENT_INTERCOM_MANAGER_SESSION_ID, "manager-a");
+  assert.equal(ownedEnv.AGENT_INTERCOM_MANAGER_TARGET, "manager-a");
 });
 
 test("systemd durations are validated before configuration is saved", () => {
