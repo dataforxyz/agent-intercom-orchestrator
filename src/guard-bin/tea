@@ -1,46 +1,73 @@
 #!/bin/sh
 set -f
 
+is_slug() {
+  value=$1
+  [ -n "$value" ] || return 1
+  case "$value" in /*|*/|*//*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "$value" in */*) ;; *) return 1 ;; esac
+  old_ifs=$IFS; IFS=/; set -- $value; IFS=$old_ifs
+  for segment do case "$segment" in ""|.|..) return 1 ;; esac; done
+}
+
+is_name() {
+  case "$1" in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+}
+
+has_unsafe_external_target() {
+  for value do
+    sanitized=$(printf '%s' "$value" | /usr/bin/tr -d '\001-\037\177')
+    [ "$sanitized" = "$value" ] || return 0
+    case "$value" in *://*|//*|*\\*|*@*|*:*|*%*) return 0 ;; esac
+  done
+  return 1
+}
+
+validate_target_flags() {
+  while [ "$#" -gt 0 ]; do
+    arg=$1; shift
+    case "$arg" in
+      --repo|-r) [ "$#" -gt 0 ] && is_slug "$1" || return 1; shift ;;
+      --remote|-R|--login|-l) [ "$#" -gt 0 ] && is_name "$1" || return 1; shift ;;
+      --repo=*) is_slug "${arg#--repo=}" || return 1 ;;
+      --remote=*) is_name "${arg#--remote=}" || return 1 ;;
+      --login=*) is_name "${arg#--login=}" || return 1 ;;
+      -r?*) value=${arg#-r}; value=${value#=}; is_slug "$value" || return 1 ;;
+      -R?*) value=${arg#-R}; value=${value#=}; is_name "$value" || return 1 ;;
+      -l?*) value=${arg#-l}; value=${value#=}; is_name "$value" || return 1 ;;
+    esac
+  done
+}
+
 is_read_only_api() {
   method=GET
   method_seen=0
+  endpoint=
   endpoint_count=0
   while [ "$#" -gt 0 ]; do
-    arg=$1
-    shift
+    arg=$1; shift
     case "$arg" in
       --) return 1 ;;
-      --field|-f|--Field|-F|--data|-d|--header|-H) return 1 ;;
-      --field=*|--Field=*|--data=*|--header=*|-f?*|-F?*|-d?*|-H?*) return 1 ;;
+      --field|-f|--Field|-F|--data|-d|--header|-H|--login|-l|--repo|-r|--remote|-R) return 1 ;;
+      --field=*|--Field=*|--data=*|--header=*|--login=*|--repo=*|--remote=*|-f?*|-F?*|-d?*|-H?*|-l?*|-r?*|-R?*) return 1 ;;
       --method|-X)
         [ "$method_seen" -eq 0 ] && [ "$#" -gt 0 ] || return 1
-        method_seen=1
-        method=$1
-        shift
-        ;;
-      --method=*)
-        [ "$method_seen" -eq 0 ] || return 1
-        method_seen=1
-        method=${arg#--method=}
-        ;;
-      -X?*)
-        [ "$method_seen" -eq 0 ] || return 1
-        method_seen=1
-        method=${arg#-X}
-        method=${method#=}
-        ;;
-      --output|-o|--login|-l|--repo|-r|--remote|-R)
-        [ "$#" -gt 0 ] || return 1
-        shift
-        ;;
-      --output=*|--login=*|--repo=*|--remote=*|-o?*|-l?*|-r?*|-R?*) ;;
+        method_seen=1; method=$1; shift ;;
+      --method=*) [ "$method_seen" -eq 0 ] || return 1; method_seen=1; method=${arg#--method=} ;;
+      -X?*) [ "$method_seen" -eq 0 ] || return 1; method_seen=1; method=${arg#-X}; method=${method#=} ;;
+      --output|-o) [ "$#" -gt 0 ] && [ "$1" = - ] || return 1; shift ;;
+      --output=-|-o-) ;;
       --include|-i) ;;
       -*) return 1 ;;
-      *) endpoint_count=$((endpoint_count + 1)) ;;
+      *) endpoint_count=$((endpoint_count + 1)); endpoint=$arg ;;
     esac
   done
   [ "$endpoint_count" -eq 1 ] || return 1
-  case "$method" in GET|get|HEAD|head) return 0 ;; *) return 1 ;; esac
+  case "$method" in GET|get|HEAD|head) ;; *) return 1 ;; esac
+  case "$endpoint" in *://*|//*|*\\*|*%*) return 1 ;; esac
+  lower_endpoint=$(printf '%s' "$endpoint" | /usr/bin/tr '[:upper:]' '[:lower:]')
+  case "$lower_endpoint" in *\?method=*|*\&method=*|*\?_method=*|*\&_method=*|*\?http_method_override=*|*\&http_method_override=*) return 1 ;; esac
+  return 0
 }
 
 is_read_only() {
@@ -53,63 +80,39 @@ is_read_only() {
     esac
   done
   [ "$help_requested" -eq 0 ] || return 0
-  if [ "$#" -eq 1 ]; then
-    case "$1" in --version|-v) return 0 ;; esac
-  fi
-  case "$1" in help|h) return 0 ;; esac
+  if [ "$#" -eq 1 ]; then case "$1" in --version|-v) return 0 ;; esac; fi
+  case "$1" in help|h) return 0 ;; api) shift; is_read_only_api "$@"; return $? ;; esac
+  has_unsafe_external_target "$@" && return 1
+  validate_target_flags "$@" || return 1
 
-  command=$1
-  shift
+  command=$1; shift
   case "$command" in
-    issue|i) command=issues ;;
-    pull|pr) command=pulls ;;
-    label) command=labels ;;
-    milestone|ms) command=milestones ;;
-    release|r) command=releases ;;
-    time|t) command=times ;;
-    organization|org) command=organizations ;;
-    repo) command=repos ;;
-    branch|b) command=branches ;;
-    action) command=actions ;;
-    webhook|hooks|hook) command=webhooks ;;
-    comment|c) command=comments ;;
-    notification|n) command=notifications ;;
-    login) command=logins ;;
-    ssh-key) command=ssh-keys ;;
+    issue|i) command=issues ;; pull|pr) command=pulls ;; label) command=labels ;;
+    milestone|ms) command=milestones ;; release|r) command=releases ;; time|t) command=times ;;
+    organization|org) command=organizations ;; repo) command=repos ;; branch|b) command=branches ;;
+    action) command=actions ;; webhook|hooks|hook) command=webhooks ;; comment|c) command=comments ;;
+    notification|n) command=notifications ;; login) command=logins ;; ssh-key) command=ssh-keys ;;
   esac
 
   case "$command" in
     whoami) [ "$#" -eq 0 ] ;;
-    api) is_read_only_api "$@" ;;
     actions)
       [ "$#" -ge 2 ] || return 1
-      group=$1
-      subcommand=$2
-      case "$group:$subcommand" in
-        secrets:list|secrets:ls|secret:list|secret:ls) return 0 ;;
-        variables:list|variables:ls|variable:list|variable:ls|vars:list|vars:ls|var:list|var:ls) return 0 ;;
+      case "$1:$2" in
+        secrets:list|secrets:ls|secret:list|secret:ls|variables:list|variables:ls|variable:list|variable:ls|vars:list|vars:ls|var:list|var:ls) return 0 ;;
         runs:list|runs:ls|runs:view|runs:show|runs:get|runs:logs|runs:log|run:list|run:ls|run:view|run:show|run:get|run:logs|run:log) return 0 ;;
         workflows:list|workflows:ls|workflows:view|workflows:show|workflows:get|workflow:list|workflow:ls|workflow:view|workflow:show|workflow:get) return 0 ;;
         *) return 1 ;;
-      esac
-      ;;
+      esac ;;
     issues|pulls|milestones|releases|times|organizations|branches|wiki|webhooks|comments|notifications|logins|ssh-keys)
       [ "$#" -ge 1 ] || return 1
       case "$1" in list|ls) return 0 ;; esac
       case "$command:$1" in pulls:review-comments|pulls:rc|wiki:view|wiki:revisions|wiki:history) return 0 ;; esac
-      return 1
-      ;;
-    repos)
-      [ "$#" -ge 1 ] || return 1
-      case "$1" in list|ls|search|s) return 0 ;; *) return 1 ;; esac
-      ;;
+      return 1 ;;
+    repos) [ "$#" -ge 1 ] || return 1; case "$1" in list|ls|search|s) return 0 ;; *) return 1 ;; esac ;;
     labels)
-      [ "$#" -ge 1 ] || return 1
-      case "$1" in list|ls) ;; *) return 1 ;; esac
-      shift
-      for arg do case "$arg" in --save|--save=*|-s|-s?*) return 1 ;; esac; done
-      return 0
-      ;;
+      [ "$#" -ge 1 ] || return 1; case "$1" in list|ls) ;; *) return 1 ;; esac
+      shift; for arg do case "$arg" in --save|--save=*|-s|-s?*) return 1 ;; esac; done; return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -126,16 +129,21 @@ case "$resolved" in */tea) ;; *) printf '%s\n' "Refusing untrusted real tea path
 [ -x "$resolved" ] || { printf '%s\n' "Refusing untrusted real tea path $real_tea: executable is unavailable" >&2; exit 127; }
 current=$resolved
 while [ "$current" != / ]; do
-  if [ -w "$current" ]; then
-    printf '%s\n' "Refusing untrusted real tea path $real_tea: path is worker-writable: $current" >&2
-    exit 127
-  fi
-  current=${current%/*}
-  [ -n "$current" ] || current=/
+  if [ -w "$current" ]; then printf '%s\n' "Refusing untrusted real tea path $real_tea: path is worker-writable: $current" >&2; exit 127; fi
+  current=${current%/*}; [ -n "$current" ] || current=/
 done
-if [ -w / ]; then
-  printf '%s\n' "Refusing untrusted real tea path $real_tea: filesystem root is worker-writable" >&2
-  exit 127
-fi
+[ ! -w / ] || { printf '%s\n' "Refusing untrusted real tea path $real_tea: filesystem root is worker-writable" >&2; exit 127; }
 
-exec "$resolved" "$@"
+umask 077
+private_config=$(/usr/bin/mktemp -d /tmp/agent-intercom-tea.XXXXXX) || exit 127
+cleanup() { /usr/bin/rm -rf -- "$private_config"; }
+trap cleanup EXIT HUP INT TERM
+unset TEA_CONFIG TEA_CONFIG_FILE TEA_TOKEN TEA_LOGIN TEA_DEBUG TEA_TRACE
+unset GITEA_TOKEN GITEA_URL GITEA_SERVER GITEA_SERVER_URL GITEA_SERVER_TOKEN GITEA_SERVER_USER GITEA_SERVER_PASSWORD GITEA_SERVER_OTP
+unset GITEA_INSTANCE_URL GITEA_INSTANCE_SSH_HOST GITEA_INSTANCE_INSECURE GITEA_LOGIN_VIA_ENV
+unset FORGEJO_TOKEN FORGEJO_URL FORGEJO_SERVER FORGEJO_SERVER_URL FORGEJO_SERVER_TOKEN FORGEJO_SERVER_USER FORGEJO_SERVER_PASSWORD FORGEJO_SERVER_OTP FORGEJO_LOGIN_VIA_ENV
+unset CI_JOB_TOKEN GITHUB_TOKEN GH_TOKEN
+XDG_CONFIG_HOME=$private_config
+export XDG_CONFIG_HOME
+"$resolved" "$@"
+exit $?

@@ -605,6 +605,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         if (realTea) permissionEnvironment.AGENT_INTERCOM_REAL_TEA = realTea;
         const realGlab = resolveProfileCommand("glab");
         if (realGlab) permissionEnvironment.AGENT_INTERCOM_REAL_GLAB = realGlab;
+        const realNpm = resolveProfileCommand("npm");
+        if (realNpm) permissionEnvironment.AGENT_INTERCOM_REAL_NPM = realNpm;
+        for (const command of ["gcloud", "wrangler", "cloudflared", "cf"]) {
+          const executable = resolveProfileCommand(command);
+          if (executable) permissionEnvironment[`AGENT_INTERCOM_REAL_${command.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`] = executable;
+        }
         permissionEnvironment.PATH = `${GIT_GUARD_BIN}:${profile.env?.PATH || process.env.PATH || ""}`;
       }
       const executable = resolveProfileCommand(profile.command);

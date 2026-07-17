@@ -34,6 +34,26 @@ const SENSITIVE_HOME_PATHS = [
   "~/.azure",
   "~/.config/gcloud",
   "~/.config/gh",
+  "~/.config/google-cloud-sdk",
+  "~/.cache/gcloud",
+  "~/.gsutil",
+  "~/.boto",
+  "~/.bigqueryrc",
+  "~/.wrangler",
+  "~/.config/.wrangler",
+  "~/.config/wrangler",
+  "~/.cloudflared",
+  "~/.config/cloudflared",
+  "~/.cf",
+  "~/.cf8",
+  "~/.config/cf",
+  "~/.config/cloudfoundry",
+  "~/.ibmcloud",
+  "~/.1password",
+  "~/.config/1Password",
+  "~/.config/Bitwarden",
+  "~/.bitwarden-ssh-agent.sock",
+  "~/.config/keepassxc",
   "~/.config/glab-cli",
   "~/.config/glab",
   "~/.glab-cli",
@@ -44,11 +64,21 @@ const SENSITIVE_HOME_PATHS = [
   "~/.tea",
   "~/.netrc",
   "~/.npmrc",
+  "~/.yarnrc",
+  "~/.yarnrc.yml",
+  "~/.config/yarn",
+  "~/.pnpmrc",
+  "~/.config/pnpm",
+  "~/.bunfig.toml",
+  "~/.config/bun",
   "~/.pypirc",
 ];
 
 const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   SSH_AUTH_SOCK: "",
+  SSH_AGENT_PID: "",
+  GPG_AGENT_INFO: "",
+  GNUPGHOME: "",
   SSH_ASKPASS: "/bin/false",
   GIT_ASKPASS: "/bin/false",
   GIT_TERMINAL_PROMPT: "0",
@@ -57,6 +87,11 @@ const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   GIT_CONFIG_SYSTEM: "/dev/null",
   GH_TOKEN: "",
   GITHUB_TOKEN: "",
+  GH_ENTERPRISE_TOKEN: "",
+  GITHUB_ENTERPRISE_TOKEN: "",
+  GH_HOST: "",
+  GH_REPO: "",
+  GH_CONFIG_DIR: "",
   GLAB_TOKEN: "",
   GLAB_CONFIG: "",
   GLAB_CONFIG_DIR: "",
@@ -132,10 +167,81 @@ const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   FORGEJO_URL: "",
   FORGEJO_SERVER: "",
   FORGEJO_SERVER_URL: "",
+  FORGEJO_SERVER_TOKEN: "",
+  FORGEJO_SERVER_USER: "",
+  FORGEJO_SERVER_PASSWORD: "",
+  FORGEJO_SERVER_OTP: "",
+  FORGEJO_LOGIN_VIA_ENV: "",
   AWS_ACCESS_KEY_ID: "",
   AWS_SECRET_ACCESS_KEY: "",
   AWS_SESSION_TOKEN: "",
   GOOGLE_APPLICATION_CREDENTIALS: "",
+  GOOGLE_APPLICATION_CREDENTIALS_JSON: "",
+  GOOGLE_CREDENTIALS: "",
+  GOOGLE_OAUTH_ACCESS_TOKEN: "",
+  GOOGLE_GHA_CREDS_PATH: "",
+  CLOUDSDK_CONFIG: "",
+  CLOUDSDK_AUTH_ACCESS_TOKEN: "",
+  CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "",
+  CLOUDSDK_CORE_ACCOUNT: "",
+  CLOUDSDK_CORE_PROJECT: "",
+  CLOUDSDK_ACTIVE_CONFIG_NAME: "",
+  GOOGLE_API_KEY: "",
+  GCE_METADATA_HOST: "",
+  GCE_METADATA_IP: "",
+  CLOUDFLARE_API_TOKEN: "",
+  CLOUDFLARE_API_KEY: "",
+  CLOUDFLARE_EMAIL: "",
+  CF_EMAIL: "",
+  CLOUDFLARE_API_USER_SERVICE_KEY: "",
+  CLOUDFLARE_ACCESS_CLIENT_ID: "",
+  CLOUDFLARE_ACCESS_CLIENT_SECRET: "",
+  CLOUDFLARE_ACCOUNT_ID: "",
+  CLOUDFLARE_ZONE_ID: "",
+  CF_API_TOKEN: "",
+  CF_API_KEY: "",
+  CF_ACCOUNT_ID: "",
+  WRANGLER_CONFIG: "",
+  WRANGLER_CONFIG_FILENAME: "",
+  CLOUDFLARE_CONFIG_FILENAME: "",
+  WRANGLER_HOME: "",
+  WRANGLER_CF_AUTHORIZATION_TOKEN: "",
+  WRANGLER_R2_SQL_AUTH_TOKEN: "",
+  CLOUDFLARE_AUTH_USE_KEYRING: "",
+  WRANGLER_AUTH_DOMAIN: "",
+  WRANGLER_AUTH_URL: "",
+  WRANGLER_TOKEN_URL: "",
+  WRANGLER_REVOKE_URL: "",
+  CLOUDFLARE_API_BASE_URL: "",
+  CLOUDFLARE_BASE_URL: "",
+  CLOUDFLARED_TOKEN: "",
+  TUNNEL_TOKEN: "",
+  TUNNEL_ORIGIN_CERT: "",
+  TUNNEL_CRED_FILE: "",
+  TUNNEL_CREDENTIALS_FILE: "",
+  CF_HOME: "",
+  CF_PLUGIN_HOME: "",
+  CF_USERNAME: "",
+  CF_PASSWORD: "",
+  CF_CLIENT_ID: "",
+  CF_CLIENT_SECRET: "",
+  CF_CLIENT: "",
+  CF_DOCKER_PASSWORD: "",
+  CF_API: "",
+  CF_ORG: "",
+  CF_SPACE: "",
+  CF_TRACE: "",
+  CF_TRACE_FILE: "",
+  CF_SKIP_SSL_VALIDATION: "",
+  NPM_TOKEN: "",
+  NODE_AUTH_TOKEN: "",
+  NPM_AUTH_TOKEN: "",
+  NPM_CONFIG_USERCONFIG: "/dev/null",
+  npm_config_userconfig: "/dev/null",
+  NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
+  YARN_NPM_AUTH_TOKEN: "",
+  YARN_RC_FILENAME: "",
+  BUN_AUTH_TOKEN: "",
   AZURE_CLIENT_SECRET: "",
   DBUS_SESSION_BUS_ADDRESS: "",
 };
@@ -261,6 +367,26 @@ const STATIC_PRIVILEGED_RUNTIME_PATHS = [
   "/run/tailscale/tailscaled.sock",
 ];
 
+export function credentialAgentPaths(uid = process.getuid?.()): string[] {
+  const workerUid = Number.isInteger(uid) && Number(uid) >= 0 ? Number(uid) : undefined;
+  if (workerUid === undefined) return [];
+  const runtime = `/run/user/${workerUid}`;
+  return [
+    `${runtime}/gnupg`,
+    `${runtime}/keyring`,
+    `${runtime}/p11-kit`,
+    `${runtime}/gcr`,
+    `${runtime}/ssh-agent`,
+    `${runtime}/ssh-agent.socket`,
+    `${runtime}/openssh_agent`,
+    `${runtime}/1password`,
+    `${runtime}/op-ssh-sign.sock`,
+    `${runtime}/bitwarden`,
+    `${runtime}/bitwarden-ssh-agent.sock`,
+    `${runtime}/keepassxc`,
+  ];
+}
+
 export function privilegedRuntimePaths(uid = process.getuid?.()): string[] {
   const workerUid = Number.isInteger(uid) && Number(uid) >= 0 ? Number(uid) : undefined;
   const userRuntimePaths = workerUid === undefined ? [] : [
@@ -311,6 +437,7 @@ export function buildPermissionUnitProperties(
       ...(runtimeDir ? [`${runtimeDir}/bus`, `${runtimeDir}/systemd`] : []),
       "/run/dbus/system_bus_socket",
       ...privilegedRuntimePaths(workerUid),
+      ...credentialAgentPaths(workerUid),
     ];
     for (const path of [...new Set(controlPaths)]) {
       properties.push(`InaccessiblePaths=${quoteSystemdPath(`-${path}`)}`);
@@ -332,6 +459,11 @@ export function buildPermissionUnitProperties(
   }
   for (const path of [...new Set(runtimeBindPaths)]) {
     properties.push(`BindPaths=${path}`);
+  }
+  if (profile.hardened) {
+    for (const name of [".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", "bunfig.toml", ".netrc"]) {
+      properties.push(`InaccessiblePaths=${quoteSystemdPath(`-${resolve(cwd, name)}`)}`);
+    }
   }
   if (profile.git === "read-only") {
     const metadataPaths = gitMetadataPaths.length ? gitMetadataPaths : [resolve(cwd, ".git")];
@@ -427,15 +559,53 @@ const SAFE_TEA_ACTION_SUBCOMMANDS: Record<string, Set<string>> = {
   workflows: new Set(["list", "ls", "view", "show", "get"]), workflow: new Set(["list", "ls", "view", "show", "get"]),
 };
 
+function isSafeTeaSlug(value: string): boolean {
+  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+$/.test(value)) return false;
+  return value.split("/").every((segment) => segment !== "." && segment !== "..");
+}
+
+function isSafeTeaName(value: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(value) && value !== "." && value !== "..";
+}
+
+function validateTeaTargetArgs(args: string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--repo" || arg === "-r") {
+      if (index + 1 >= args.length || !isSafeTeaSlug(args[++index])) return false;
+      continue;
+    }
+    if (["--remote", "-R", "--login", "-l"].includes(arg)) {
+      if (index + 1 >= args.length || !isSafeTeaName(args[++index])) return false;
+      continue;
+    }
+    if (arg.startsWith("--repo=")) {
+      if (!isSafeTeaSlug(arg.slice("--repo=".length))) return false;
+      continue;
+    }
+    if (arg.startsWith("--remote=")) {
+      if (!isSafeTeaName(arg.slice("--remote=".length))) return false;
+      continue;
+    }
+    if (arg.startsWith("--login=")) {
+      if (!isSafeTeaName(arg.slice("--login=".length))) return false;
+      continue;
+    }
+    if (/^-r.+/.test(arg) && !isSafeTeaSlug(arg.slice(2).replace(/^=/, ""))) return false;
+    if (/^-[Rl].+/.test(arg) && !isSafeTeaName(arg.slice(2).replace(/^=/, ""))) return false;
+  }
+  return true;
+}
+
 function readOnlyTeaApiArgs(args: string[]): boolean {
   let method = "GET";
   let methodSeen = false;
-  let endpointCount = 0;
+  let endpoint: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--") return false;
-    if (["--field", "-f", "--Field", "-F", "--data", "-d", "--header", "-H"].includes(arg)) return false;
-    if (/^(?:--field|--Field|--data|--header)=/.test(arg) || /^-(?:f|F|d|H).+/.test(arg)) return false;
+    if (["--field", "-f", "--Field", "-F", "--data", "-d", "--header", "-H", "--login", "-l", "--repo", "-r", "--remote", "-R"].includes(arg)) return false;
+    if (/^(?:--field|--Field|--data|--header|--login|--repo|--remote)=/.test(arg) || /^-(?:f|F|d|H|l|r|R).+/.test(arg)) return false;
     if (arg === "--method" || arg === "-X") {
       if (methodSeen || index + 1 >= args.length) return false;
       methodSeen = true;
@@ -454,17 +624,20 @@ function readOnlyTeaApiArgs(args: string[]): boolean {
       method = arg.slice(2).replace(/^=/, "").toUpperCase();
       continue;
     }
-    if (["--output", "-o", "--login", "-l", "--repo", "-r", "--remote", "-R"].includes(arg)) {
-      if (index + 1 >= args.length) return false;
-      index += 1;
+    if (arg === "--output" || arg === "-o") {
+      if (index + 1 >= args.length || args[++index] !== "-") return false;
       continue;
     }
-    if (/^(?:--output|--login|--repo|--remote)=.+/.test(arg) || /^-(?:o|l|r|R).+/.test(arg)) continue;
+    if (arg === "--output=-" || arg === "-o-") continue;
     if (arg === "--include" || arg === "-i") continue;
     if (arg.startsWith("-")) return false;
-    endpointCount += 1;
+    if (endpoint !== undefined) return false;
+    endpoint = arg;
   }
-  return endpointCount === 1 && (method === "GET" || method === "HEAD");
+  if (!endpoint || !["GET", "HEAD"].includes(method)) return false;
+  if (endpoint.includes("://") || endpoint.startsWith("//") || endpoint.includes("\\") || endpoint.includes("%")) return false;
+  if (/[?&](?:_?method|http_method_override)=/i.test(endpoint)) return false;
+  return true;
 }
 
 export function isReadOnlyTeaInvocation(args: string[]): boolean {
@@ -477,6 +650,7 @@ export function isReadOnlyTeaInvocation(args: string[]): boolean {
   if (!teaCommand) return false;
   if (teaCommand === "whoami") return args.length === 1;
   if (teaCommand === "api") return readOnlyTeaApiArgs(args.slice(1));
+  if (hasUnsafeGlabExternalTarget(args) || !validateTeaTargetArgs(args)) return false;
   if (teaCommand === "actions") {
     if (args.length < 3) return false;
     return SAFE_TEA_ACTION_SUBCOMMANDS[args[1]]?.has(args[2]) ?? false;
@@ -484,6 +658,100 @@ export function isReadOnlyTeaInvocation(args: string[]): boolean {
   if (args.length < 2 || !(SAFE_TEA_SUBCOMMANDS[teaCommand]?.has(args[1]) ?? false)) return false;
   if (teaCommand === "labels" && args.slice(2).some((arg) => arg === "--save" || arg.startsWith("--save=") || arg === "-s" || /^-s.+/.test(arg))) return false;
   return true;
+}
+
+function isSafeGhRepo(value: string): boolean {
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(value)) return false;
+  return value.split("/").every((segment) => segment !== "." && segment !== "..");
+}
+
+function normalizeGhTargetArgs(args: string[]): string[] | undefined {
+  const normalized: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") return undefined;
+    if (arg === "-R" || arg === "--repo") {
+      if (index + 1 >= args.length || !isSafeGhRepo(args[index + 1])) return undefined;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--repo=")) {
+      if (!isSafeGhRepo(arg.slice("--repo=".length))) return undefined;
+      continue;
+    }
+    if (/^-R.+/.test(arg)) {
+      if (!isSafeGhRepo(arg.slice(2).replace(/^=/, ""))) return undefined;
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return normalized;
+}
+
+function readOnlyGhApiArgs(args: string[]): boolean {
+  let method = "GET";
+  let methodSeen = false;
+  let endpoint: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") return false;
+    if (["--field", "-F", "--raw-field", "-f", "--input", "--header", "-H", "--hostname", "--cache", "--preview", "-p", "--jq", "-q", "--template", "-t"].includes(arg)) return false;
+    if (/^(?:--field|--raw-field|--input|--header|--hostname|--cache|--preview|--jq|--template)=/.test(arg) || /^-(?:F|f|H|p|q|t).+/.test(arg)) return false;
+    if (arg === "--method" || arg === "-X") {
+      if (methodSeen || index + 1 >= args.length) return false;
+      methodSeen = true;
+      method = args[++index].toUpperCase();
+      continue;
+    }
+    if (arg.startsWith("--method=")) {
+      if (methodSeen) return false;
+      methodSeen = true;
+      method = arg.slice("--method=".length).toUpperCase();
+      continue;
+    }
+    if (/^-X(?:=)?.+/.test(arg)) {
+      if (methodSeen) return false;
+      methodSeen = true;
+      method = arg.slice(2).replace(/^=/, "").toUpperCase();
+      continue;
+    }
+    if (["--include", "-i", "--paginate", "--silent", "--slurp"].includes(arg)) continue;
+    if (arg.startsWith("-")) return false;
+    if (endpoint !== undefined) return false;
+    endpoint = arg;
+  }
+  if (!endpoint || !["GET", "HEAD"].includes(method)) return false;
+  if (endpoint.includes("://") || endpoint.startsWith("//") || endpoint.includes("\\") || endpoint.includes("%")) return false;
+  const lower = endpoint.toLowerCase();
+  if (/(^|\/)graphql(?:[/?]|$)/.test(lower)) return false;
+  if (/[?&](?:_?method|http_method_override)=/i.test(lower)) return false;
+  return true;
+}
+
+export function isReadOnlyGhInvocation(args: string[]): boolean {
+  if (args.length === 0) return true;
+  if (args.some((arg) => arg === "--help" || arg === "-h")) return true;
+  if (args.length === 1 && ["--version", "version"].includes(args[0])) return true;
+  if (args[0] === "help") return true;
+  if (args.some((arg) => arg === "--web" || arg.startsWith("--web=") || arg === "-w" || /^-w.+/.test(arg) || arg === "--browser" || arg.startsWith("--browser=") || arg === "--hostname" || arg.startsWith("--hostname=") || arg === "--show-token" || arg.startsWith("--show-token=") || arg === "-t" || /^-t.+/.test(arg))) return false;
+  if (args[0] === "api") return readOnlyGhApiArgs(args.slice(1));
+  if (hasUnsafeGlabExternalTarget(args)) return false;
+  const normalized = normalizeGhTargetArgs(args);
+  if (!normalized?.length) return false;
+  const [command, subcommand] = normalized;
+  if (command === "status") return normalized.length === 1;
+  if (command === "search") return ["code", "commits", "issues", "prs", "repos"].includes(subcommand);
+  const safe: Record<string, Set<string>> = {
+    auth: new Set(["status"]),
+    repo: new Set(["list", "view"]),
+    pr: new Set(["list", "view", "status", "checks", "diff"]),
+    issue: new Set(["list", "view", "status"]),
+    run: new Set(["list", "view", "watch"]),
+    workflow: new Set(["list", "view"]),
+    release: new Set(["list", "view"]),
+    gist: new Set(["list", "view"]),
+  };
+  return safe[command]?.has(subcommand) ?? false;
 }
 
 interface NormalizedGlabArgs {
@@ -626,6 +894,43 @@ export function isReadOnlyGlabInvocation(args: string[]): boolean {
   return safeSubcommands[command]?.has(subcommand) ?? false;
 }
 
+function isNpmCredentialOrRegistryOverride(arg: string): boolean {
+  if (!/^-{1,2}[^-]/.test(arg)) return false;
+  const withoutDashes = arg.replace(/^-{1,2}/, "");
+  const key = withoutDashes.slice(0, withoutDashes.indexOf("=") >= 0 ? withoutDashes.indexOf("=") : undefined).toLowerCase();
+  return /^(?:reg|userc|globalc|_?auth|always-auth|otp|cert|key|caf|proxy|https-proxy|noproxy|strict-ssl|scope|prefix)/.test(key)
+    || /(?:token|password)/.test(key);
+}
+
+export function isReadOnlyNpmInvocation(args: string[]): boolean {
+  if (args.length === 0 || args.some((arg) => arg === "--help" || arg === "-h")) return true;
+  if (args.length === 1 && ["--version", "-v"].includes(args[0])) return true;
+  if (args.some(isNpmCredentialOrRegistryOverride)) return false;
+  const index = args.findIndex((arg) => !arg.startsWith("-"));
+  if (index < 0) return false;
+  const aliases: Record<string, string> = {
+    i: "install", in: "install", isntall: "install", t: "test", tst: "test", rb: "rebuild",
+    rm: "uninstall", r: "uninstall", remove: "uninstall", unlink: "uninstall", up: "update",
+    list: "ls", ll: "ls", la: "ls", x: "exec", "run-script": "run", show: "view", why: "explain",
+  };
+  const command = aliases[args[index]] ?? args[index];
+  if (command === "config") return ["get", "list", "ls"].includes(args[index + 1]);
+  if (command === "dist-tag") return ["ls", "list"].includes(args[index + 1]);
+  return new Set([
+    "install", "ci", "uninstall", "update", "dedupe", "prune", "rebuild", "run", "test", "exec", "start", "stop", "restart", "init",
+    "ls", "view", "info", "search", "outdated", "explain", "root", "prefix", "bin", "pack", "ping", "doctor", "audit", "fund", "cache", "help", "help-search",
+  ]).has(command);
+}
+
+const CLOUD_CONTROL_COMMANDS = new Set(["gcloud", "wrangler", "cloudflared", "cf"]);
+export function isCloudControlInspection(command: string, args: string[]): boolean {
+  if (!CLOUD_CONTROL_COMMANDS.has(command)) return false;
+  if (args.length === 0 || args.some((arg) => arg === "--help" || arg === "-h" || arg === "-help")) return true;
+  if (args.length === 1 && args[0] === "--version") return true;
+  if (command === "gcloud") return args.length === 1 && args[0] === "version";
+  return args.length === 1 && ["version", "-v"].includes(args[0]);
+}
+
 function shellWords(input: string): string[] {
   return [...input.matchAll(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/g)].map((match) => match[0].replace(/^(?:"|')|(?:"|')$/g, ""));
 }
@@ -643,8 +948,11 @@ function gitInvocationReason(command: string): string | undefined {
     if (subcommand === "stash" && (rest[0] === "list" || rest[0] === "show")) continue;
     return `git ${subcommand} is blocked by the read-only Git policy`;
   }
-  if (/(?:^|[\s;&|()])gh\s+(?:api\b|pr\s+(?:create|merge|close|reopen)\b|issue\s+(?:create|close|reopen|delete)\b|release\s+(?:create|delete|upload)\b|repo\s+(?:create|delete|fork|rename|archive)\b|workflow\s+run\b)/i.test(command)) {
-    return "GitHub write operation is blocked by the read-only Git policy";
+  const ghInvocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?gh(?:\s+([^\n;&|)]*))?/gi);
+  for (const match of ghInvocations) {
+    if (!isReadOnlyGhInvocation(shellWords((match[1] ?? "").trim()))) {
+      return "GitHub write operation is blocked by the read-only Git policy";
+    }
   }
   const teaInvocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?tea(?:\s+([^\n;&|)]*))?/gi);
   for (const match of teaInvocations) {
@@ -656,6 +964,19 @@ function gitInvocationReason(command: string): string | undefined {
   for (const match of glabInvocations) {
     if (!isReadOnlyGlabInvocation(shellWords((match[1] ?? "").trim()))) {
       return "GitLab write operation is blocked by the read-only Git policy";
+    }
+  }
+  const npmInvocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?npm\b(?:\s+([^\n;&|)]*))?/gi);
+  for (const match of npmInvocations) {
+    if (!isReadOnlyNpmInvocation(shellWords((match[1] ?? "").trim()))) {
+      return "npm registry write operation is blocked by the restricted credential policy";
+    }
+  }
+  const cloudInvocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?(gcloud|wrangler|cloudflared|cf)\b(?:\s+([^\n;&|)]*))?/gi);
+  for (const match of cloudInvocations) {
+    const name = match[1].toLowerCase();
+    if (!isCloudControlInspection(name, shellWords((match[2] ?? "").trim()))) {
+      return `${name} control operation is blocked by the restricted credential policy`;
     }
   }
   return undefined;

@@ -2,4 +2,4 @@
 unset NODE_OPTIONS NODE_PATH
 case "$0" in */*) guard_dir=${0%/*} ;; *) guard_dir=. ;; esac
 guard_dir=$(CDPATH= cd -- "$guard_dir" && /bin/pwd) || exit 127
-exec /usr/bin/node "$guard_dir/gh-guard.mjs" "$@"
+exec /usr/bin/node "$guard_dir/npm-guard.mjs" "$@"

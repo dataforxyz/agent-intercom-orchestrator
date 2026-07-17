@@ -272,11 +272,16 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
     assert.ok(systemdArgs.includes("--setenv=GIT_TERMINAL_PROMPT=0"));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=PATH=") && arg.includes("guard-bin")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GIT=")));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GH=")));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_NPM=")));
     if (spawnSync("sh", ["-c", "command -v tea >/dev/null"]).status === 0) {
       assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_TEA=")));
     }
     if (spawnSync("sh", ["-c", "command -v glab >/dev/null"]).status === 0) {
       assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GLAB=")));
+    }
+    if (spawnSync("sh", ["-c", "command -v gcloud >/dev/null"]).status === 0) {
+      assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GCLOUD=")));
     }
     assert.ok(systemdArgs.some((arg) => arg.includes("clean-env-launcher.mjs")));
     const state = JSON.parse(await readFile(join(orchestratorDir, "worker-runtime", "state-race", "state-race.state.json"), "utf8"));

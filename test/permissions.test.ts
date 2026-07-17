@@ -12,7 +12,11 @@ import {
   blockedToolReason,
   buildPermissionEnvironment,
   buildPermissionUnitProperties,
+  credentialAgentPaths,
+  isCloudControlInspection,
+  isReadOnlyGhInvocation,
   isReadOnlyGlabInvocation,
+  isReadOnlyNpmInvocation,
   isReadOnlyTeaInvocation,
   privilegedRuntimePaths,
 } from "../src/permissions.ts";
@@ -136,8 +140,11 @@ test("privileged runtime socket masks are optional and use the launched worker u
   const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
   assert.ok(reviewer);
   const properties = buildPermissionUnitProperties(reviewer, "/repo");
-  for (const path of privilegedRuntimePaths(process.getuid?.())) {
+  for (const path of [...privilegedRuntimePaths(process.getuid?.()), ...credentialAgentPaths(process.getuid?.())]) {
     assert.ok(properties.includes(`InaccessiblePaths=${JSON.stringify(`-${path}`)}`), `missing optional mask for ${path}`);
+  }
+  for (const name of [".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", "bunfig.toml", ".netrc"]) {
+    assert.ok(properties.includes(`InaccessiblePaths=${JSON.stringify(`-/repo/${name}`)}`));
   }
 });
 
@@ -150,7 +157,10 @@ test("restricted permission environment disables common Git credential paths", (
   assert.equal(environment.GIT_TERMINAL_PROMPT, "0");
   assert.equal(environment.GIT_OPTIONAL_LOCKS, "0");
   assert.equal(environment.SSH_AUTH_SOCK, "");
+  assert.equal(environment.GPG_AGENT_INFO, "");
   assert.equal(environment.GH_TOKEN, "");
+  assert.equal(environment.GH_ENTERPRISE_TOKEN, "");
+  assert.equal(environment.GH_CONFIG_DIR, "");
   assert.equal(environment.GLAB_TOKEN, "");
   assert.equal(environment.GLAB_CONFIG_DIR, "");
   assert.equal(environment.GLAB_CONFIG_FILE, "");
@@ -171,6 +181,13 @@ test("restricted permission environment disables common Git credential paths", (
   assert.equal(environment.GITEA_SERVER_PASSWORD, "");
   assert.equal(environment.GITEA_SERVER_TOKEN, "");
   assert.equal(environment.FORGEJO_TOKEN, "");
+  assert.equal(environment.CLOUDSDK_AUTH_ACCESS_TOKEN, "");
+  assert.equal(environment.CLOUDFLARE_API_TOKEN, "");
+  assert.equal(environment.CLOUDFLARED_TOKEN, "");
+  assert.equal(environment.CF_PASSWORD, "");
+  assert.equal(environment.NPM_TOKEN, "");
+  assert.equal(environment.NODE_AUTH_TOKEN, "");
+  assert.equal(environment.NPM_CONFIG_USERCONFIG, "/dev/null");
 });
 
 test("read-only Git policy allows inspection and blocks mutations or remote writes", () => {
@@ -189,6 +206,12 @@ test("read-only Git policy allows inspection and blocks mutations or remote writ
   assert.equal(blockedToolReason("bash", { command: "/usr/bin/glab mr diff 42" }, "read-write", "read-only"), undefined);
   assert.match(blockedToolReason("bash", { command: "/usr/bin/glab issue create --title nope" }, "read-write", "read-only") ?? "", /GitLab write/);
   assert.match(blockedToolReason("bash", { command: "glab api /projects/1 -X POST -F name=nope" }, "read-write", "read-only") ?? "", /GitLab write/);
+  assert.equal(blockedToolReason("bash", { command: "gh repo view owner/repo" }, "read-write", "read-only"), undefined);
+  assert.match(blockedToolReason("bash", { command: "gh -R https://evil.invalid/o/r issue list" }, "read-write", "read-only") ?? "", /GitHub write/);
+  assert.equal(blockedToolReason("bash", { command: "npm run test" }, "read-write", "read-only"), undefined);
+  assert.match(blockedToolReason("bash", { command: "npm login" }, "read-write", "read-only") ?? "", /npm registry write/);
+  assert.equal(blockedToolReason("bash", { command: "gcloud --version" }, "read-write", "read-only"), undefined);
+  assert.match(blockedToolReason("bash", { command: "gcloud projects list" }, "read-write", "read-only") ?? "", /gcloud control operation/);
   assert.match(blockedToolReason("edit", { path: "src/a.ts" }, "read-only", "read-only") ?? "", /read-only workspace/);
   assert.equal(blockedToolReason("bash", { command: "git push origin main" }, "read-write", "full"), undefined);
 });
@@ -197,13 +220,12 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
   const guard = fileURLToPath(new URL("../src/guard-bin/git", import.meta.url));
   const environment = {
     ...process.env,
-    AGENT_INTERCOM_REAL_GIT: "/bin/echo",
+    AGENT_INTERCOM_REAL_GIT: "/usr/bin/git",
     AGENT_INTERCOM_GIT_POLICY: "read-only",
     AGENT_INTERCOM_PERMISSION_PROFILE: "builder-restricted",
   };
-  const allowed = spawnSync(guard, ["-C", "/repo", "status", "--short"], { env: environment, encoding: "utf8" });
-  assert.equal(allowed.status, 0);
-  assert.match(allowed.stdout, /-C \/repo status --short/);
+  const allowed = spawnSync(guard, ["-C", process.cwd(), "status", "--short"], { env: environment, encoding: "utf8" });
+  assert.equal(allowed.status, 0, allowed.stderr);
   const blocked = spawnSync(guard, ["push", "origin", "main"], { env: environment, encoding: "utf8" });
   assert.equal(blocked.status, 126);
   assert.match(blocked.stderr, /git push blocked/);
@@ -211,14 +233,84 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
   assert.equal(branchBlocked.status, 126);
   const overrideBlocked = spawnSync(guard, ["push", "origin", "main"], { env: { ...environment, AGENT_INTERCOM_GIT_POLICY: "full" }, encoding: "utf8" });
   assert.equal(overrideBlocked.status, 126);
+  const executableOverride = spawnSync(guard, ["status"], { env: { ...environment, AGENT_INTERCOM_REAL_GIT: "/bin/sh" }, encoding: "utf8" });
+  assert.equal(executableOverride.status, 127);
 
   const ghGuard = fileURLToPath(new URL("../src/guard-bin/gh", import.meta.url));
-  const ghEnvironment = { ...environment, AGENT_INTERCOM_REAL_GH: "/bin/echo" };
-  const ghAllowed = spawnSync(ghGuard, ["pr", "view", "42"], { env: ghEnvironment, encoding: "utf8" });
+  const ghEnvironment = { ...environment, AGENT_INTERCOM_REAL_GH: "/usr/bin/gh" };
+  const ghAllowed = spawnSync(ghGuard, ["pr", "view", "--help"], { env: ghEnvironment, encoding: "utf8" });
   assert.equal(ghAllowed.status, 0);
   const ghBlocked = spawnSync(ghGuard, ["pr", "merge", "42"], { env: ghEnvironment, encoding: "utf8" });
   assert.equal(ghBlocked.status, 126);
-  assert.match(ghBlocked.stderr, /gh pr merge blocked/);
+  assert.match(ghBlocked.stderr, /gh pr merge .*blocked/);
+});
+
+test("GitHub policy validates repository targets and API reads", () => {
+  for (const args of [
+    ["--version"], ["auth", "status"], ["repo", "view", "owner/repo"], ["-R", "owner/repo", "pr", "diff", "42"],
+    ["issue", "list"], ["run", "view", "42"], ["workflow", "view", "ci.yml"], ["search", "issues", "guard"],
+    ["api", "/repos/owner/repo"], ["api", "/user", "-XHEAD", "--include"],
+  ]) assert.equal(isReadOnlyGhInvocation(args), true, args.join(" "));
+  for (const args of [
+    ["repo", "create", "nope"], ["pr", "merge", "42"], ["release", "download", "v1"], ["browse"], ["auth", "status", "--show-token"], ["auth", "status", "-t"],
+    ["-R", "evil.invalid/owner/repo", "issue", "list"], ["--repo=https://evil.invalid/o/r", "issue", "list"],
+    ["issue", "view", "https://evil.invalid/o/r/issues/1"], ["api", "graphql"], ["api", "https://evil.invalid/api/v3/user"],
+    ["api", "/user", "-XPOST"], ["api", "/user", "-H", "Authorization: token"], ["api", "/user", "--hostname", "evil.invalid"],
+  ]) assert.equal(isReadOnlyGhInvocation(args), false, args.join(" "));
+});
+
+test("cross-harness GitHub guard fails closed on targets, tokens, and executable overrides", (t) => {
+  const guard = fileURLToPath(new URL("../src/guard-bin/gh", import.meta.url));
+  const allowed = spawnSync(guard, ["repo", "view", "--help"], { encoding: "utf8", env: { ...process.env, AGENT_INTERCOM_REAL_GH: "/usr/bin/gh" } });
+  assert.equal(allowed.status, 0, allowed.stderr);
+  for (const args of [["pr", "merge", "42"], ["-R", "evil.invalid/o/r", "issue", "list"], ["api", "/user", "-XPOST"]]) {
+    const blocked = spawnSync(guard, args, { encoding: "utf8", env: { ...process.env, GH_TOKEN: "SENTINEL", AGENT_INTERCOM_REAL_GH: "/usr/bin/gh" } });
+    assert.equal(blocked.status, 126, `${args.join(" ")}: ${blocked.stderr}`);
+  }
+  const override = spawnSync(guard, ["--version"], { encoding: "utf8", env: { ...process.env, AGENT_INTERCOM_REAL_GH: "/bin/sh" } });
+  assert.equal(override.status, 127);
+  if (!supportsHardenedUserUnits()) {
+    t.diagnostic("systemd fake-gh credential proof skipped: hardened user namespaces unavailable");
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), "agent-intercom-gh-env-proof-"));
+  const fake = join(root, "gh");
+  try {
+    writeFileSync(fake, `#!/bin/sh\nprintf 'GH_TOKEN=%s\\nGH_HOST=%s\\nGH_CONFIG_DIR=%s\\n' "$GH_TOKEN" "$GH_HOST" "$GH_CONFIG_DIR"\n`);
+    chmodSync(fake, 0o555);
+    const result = spawnSync("systemd-run", ["--user", "--wait", "--pipe", "--property=ProtectSystem=strict", "--property=PrivateTmp=yes", `--property=BindReadOnlyPaths=${fake}:/usr/bin/gh`, "/usr/bin/env", "AGENT_INTERCOM_REAL_GH=/usr/bin/gh", "GH_TOKEN=GH_SENTINEL", "GH_HOST=evil.invalid", guard, "--version"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /GH_SENTINEL|evil\.invalid/);
+    assert.match(result.stdout, /^GH_TOKEN=$/m);
+    assert.match(result.stdout, /^GH_HOST=$/m);
+    assert.match(result.stdout, /^GH_CONFIG_DIR=\/tmp\/agent-intercom-gh\./m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Tea guard strips command-level Forgejo credentials and server overrides", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), "agent-intercom-tea-env-proof-"));
+  const fake = join(root, "tea");
+  const guard = fileURLToPath(new URL("../src/guard-bin/tea", import.meta.url));
+  try {
+    writeFileSync(fake, `#!/bin/sh\nprintf 'TEA_TOKEN=%s\\nGITEA_SERVER_URL=%s\\nGITEA_SERVER_TOKEN=%s\\nFORGEJO_TOKEN=%s\\nXDG_CONFIG_HOME=%s\\n' "$TEA_TOKEN" "$GITEA_SERVER_URL" "$GITEA_SERVER_TOKEN" "$FORGEJO_TOKEN" "$XDG_CONFIG_HOME"\n`);
+    chmodSync(fake, 0o555);
+    const result = spawnSync("systemd-run", ["--user", "--wait", "--pipe", "--property=ProtectSystem=strict", "--property=PrivateTmp=yes", `--property=BindReadOnlyPaths=${fake}:/usr/bin/tea`, "/usr/bin/env", "AGENT_INTERCOM_REAL_TEA=/usr/bin/tea", "TEA_TOKEN=TEA_SENTINEL", "GITEA_SERVER_URL=https://evil.invalid", "GITEA_SERVER_TOKEN=TEA_SENTINEL", "FORGEJO_TOKEN=TEA_SENTINEL", guard, "--version"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /TEA_SENTINEL|evil\.invalid/);
+    assert.match(result.stdout, /^TEA_TOKEN=$/m);
+    assert.match(result.stdout, /^GITEA_SERVER_URL=$/m);
+    assert.match(result.stdout, /^GITEA_SERVER_TOKEN=$/m);
+    assert.match(result.stdout, /^FORGEJO_TOKEN=$/m);
+    assert.match(result.stdout, /^XDG_CONFIG_HOME=\/tmp\/agent-intercom-tea\./m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Tea policy is allowlist-based and rejects ambiguous or write-shaped invocations", () => {
@@ -238,7 +330,12 @@ test("Tea policy is allowlist-based and rejects ambiguous or write-shaped invoca
   assert.equal(isReadOnlyTeaInvocation(["labels", "list", "-s=true"]), false);
   assert.equal(isReadOnlyTeaInvocation(["labels", "list", "-sfoo"]), false);
   assert.equal(isReadOnlyTeaInvocation(["--debug", "issues", "list"]), false);
-  assert.equal(isReadOnlyTeaInvocation(["issues", "--repo", "owner/repo", "list"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "list", "--repo", "owner/repo"]), true);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "--repo", "https://evil.invalid/o/r", "list"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "-r", "git@evil.invalid:o/r", "list"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["issues", "list", "https://evil.invalid/o/r/issues"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "https://evil.invalid/api/v1/user"]), false);
+  assert.equal(isReadOnlyTeaInvocation(["api", "/user", "--login", "prod"]), false);
   assert.equal(isReadOnlyTeaInvocation(["api", "/issues", "-XPOST"]), false);
   assert.equal(isReadOnlyTeaInvocation(["api", "-X=DELETE", "/issues/1"]), false);
   assert.equal(isReadOnlyTeaInvocation(["api", "/issues", "--method=PATCH"]), false);
@@ -274,6 +371,11 @@ test("cross-harness Tea guard allows inspection and cannot be disabled by worker
     }
     for (const args of [
       ["issues", "create", "--title", "nope"],
+      ["issues", "--repo", "https://evil.invalid/o/r", "list"],
+      ["issues", "-r", "git@evil.invalid:o/r", "list"],
+      ["issues", "list", "https://evil.invalid/o/r/issues"],
+      ["api", "https://evil.invalid/api/v1/user"],
+      ["api", "/user", "--login", "prod"],
       ["pulls", "merge", "42"],
       ["repos", "delete", "owner/repo"],
       ["comments", "42", "body"],
@@ -540,6 +642,109 @@ test("glab guard strips command-level credentials and host overrides before exec
   }
 });
 
+test("npm registry guard permits local development and blocks account or publish operations", () => {
+  for (const args of [["--version"], ["install"], ["ci"], ["run", "test"], ["view", "typescript", "version"], ["config", "get", "registry"], ["dist-tag", "ls", "pkg"]]) {
+    assert.equal(isReadOnlyNpmInvocation(args), true, args.join(" "));
+  }
+  for (const args of [["login"], ["adduser"], ["publish"], ["unpublish", "pkg"], ["token", "list"], ["owner", "add", "x", "pkg"], ["config", "set", "//registry.npmjs.org/:_authToken=x"], ["install", "--registry=https://evil.invalid"], ["view", "pkg", "--reg=https://evil.invalid"], ["view", "pkg", "--reg", "https://evil.invalid"], ["view", "pkg", "--regi", "https://evil.invalid"], ["view", "pkg", "-reg=https://evil.invalid"], ["view", "pkg", "-registry=https://evil.invalid"], ["view", "pkg", "-reg", "https://evil.invalid"], ["view", "pkg", "--userconfig", "/tmp/host.npmrc"], ["view", "pkg", "--userc=/tmp/host.npmrc"], ["view", "pkg", "-userconfig=/tmp/host.npmrc"], ["view", "pkg", "-userconfig", "/tmp/host.npmrc"], ["view", "pkg", "-globalconfig=/tmp/global.npmrc"], ["install", "--proxy=http://evil.invalid"], ["install", "-proxy=http://evil.invalid"], ["install", "--strict-ssl=false"], ["install", "-strict-ssl=false"], ["view", "pkg", "--prefix=/tmp/other"], ["view", "pkg", "--prefix", "/tmp/other"], ["view", "pkg", "-prefix=/tmp/other"], ["view", "pkg", "-prefix", "/tmp/other"], ["dist-tag", "add", "pkg@1", "latest"]]) {
+    assert.equal(isReadOnlyNpmInvocation(args), false, args.join(" "));
+  }
+  const guard = fileURLToPath(new URL("../src/guard-bin/npm", import.meta.url));
+  const version = spawnSync(guard, ["--version"], { encoding: "utf8", env: { ...process.env, AGENT_INTERCOM_REAL_NPM: "/usr/bin/npm" } });
+  assert.equal(version.status, 0, version.stderr);
+  for (const args of [["login"], ["publish"], ["token", "list"], ["config", "set", "registry", "https://evil.invalid"], ["install", "--registry=https://evil.invalid"], ["view", "pkg", "--reg=https://evil.invalid"], ["view", "pkg", "--reg", "https://evil.invalid"], ["view", "pkg", "-reg=https://evil.invalid"], ["view", "pkg", "-registry=https://evil.invalid"], ["view", "pkg", "-userconfig=/tmp/host.npmrc"], ["view", "pkg", "-globalconfig=/tmp/global.npmrc"], ["install", "--proxy=http://evil.invalid"], ["install", "-proxy=http://evil.invalid"], ["install", "-strict-ssl=false"], ["view", "pkg", "--prefix=/tmp/other"], ["view", "pkg", "--prefix", "/tmp/other"], ["view", "pkg", "-prefix=/tmp/other"], ["view", "pkg", "-prefix", "/tmp/other"]]) {
+    const blocked = spawnSync(guard, args, { encoding: "utf8", env: { ...process.env, NPM_TOKEN: "NPM_SENTINEL", AGENT_INTERCOM_REAL_NPM: "/usr/bin/npm" } });
+    assert.equal(blocked.status, 126, `${args.join(" ")}: ${blocked.stderr}`);
+  }
+  const override = spawnSync(guard, ["--version"], { encoding: "utf8", env: { ...process.env, AGENT_INTERCOM_REAL_NPM: "/bin/sh" } });
+  assert.equal(override.status, 127);
+});
+
+test("npm and cloud guards strip command-level credential overrides", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), "agent-intercom-control-env-proof-"));
+  try {
+    const npmFake = join(root, "npm");
+    writeFileSync(npmFake, `#!/bin/sh\nprintf 'NPM_TOKEN=%s\\nNODE_AUTH_TOKEN=%s\\nNPM_CONFIG_USERCONFIG=%s\\nNPM_CONFIG_REGISTRY=%s\\n' "$NPM_TOKEN" "$NODE_AUTH_TOKEN" "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_REGISTRY"\n`);
+    chmodSync(npmFake, 0o555);
+    const npmGuard = fileURLToPath(new URL("../src/guard-bin/npm", import.meta.url));
+    const npmResult = spawnSync("systemd-run", ["--user", "--wait", "--pipe", "--property=ProtectSystem=strict", "--property=PrivateTmp=yes", `--property=BindReadOnlyPaths=${npmFake}:/usr/bin/npm`, "/usr/bin/env", "AGENT_INTERCOM_REAL_NPM=/usr/bin/npm", "NPM_TOKEN=PACKAGE_SENTINEL", "NODE_AUTH_TOKEN=PACKAGE_SENTINEL", "NPM_CONFIG_USERCONFIG=/home/dxyz/.npmrc", "NPM_CONFIG_REGISTRY=https://evil.invalid", npmGuard, "--version"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(npmResult.status, 0, `${npmResult.stdout}${npmResult.stderr}`);
+    assert.doesNotMatch(npmResult.stdout, /PACKAGE_SENTINEL|evil\.invalid|\/home\/dxyz\/\.npmrc/);
+    assert.match(npmResult.stdout, /^NPM_TOKEN=$/m);
+    assert.match(npmResult.stdout, /^NODE_AUTH_TOKEN=$/m);
+    assert.match(npmResult.stdout, /^NPM_CONFIG_USERCONFIG=\/tmp\/agent-intercom-npm\./m);
+    assert.match(npmResult.stdout, /^NPM_CONFIG_REGISTRY=https:\/\/registry\.npmjs\.org\/$/m);
+
+    const cloudFake = join(root, "gcloud");
+    writeFileSync(cloudFake, `#!/bin/sh\nprintf 'GOOGLE_OAUTH_ACCESS_TOKEN=%s\\nCLOUDSDK_AUTH_ACCESS_TOKEN=%s\\nCLOUDFLARE_API_TOKEN=%s\\n' "$GOOGLE_OAUTH_ACCESS_TOKEN" "$CLOUDSDK_AUTH_ACCESS_TOKEN" "$CLOUDFLARE_API_TOKEN"\n`);
+    chmodSync(cloudFake, 0o555);
+    const cloudGuard = fileURLToPath(new URL("../src/guard-bin/gcloud", import.meta.url));
+    const cloudResult = spawnSync("systemd-run", ["--user", "--wait", "--pipe", "--property=ProtectSystem=strict", `--property=BindReadOnlyPaths=${cloudFake}:/usr/bin/gcloud`, "/usr/bin/env", "AGENT_INTERCOM_REAL_GCLOUD=/usr/bin/gcloud", "GOOGLE_OAUTH_ACCESS_TOKEN=CLOUD_SENTINEL", "CLOUDSDK_AUTH_ACCESS_TOKEN=CLOUD_SENTINEL", "CLOUDFLARE_API_TOKEN=CLOUD_SENTINEL", cloudGuard, "--version"], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(cloudResult.status, 0, `${cloudResult.stdout}${cloudResult.stderr}`);
+    assert.doesNotMatch(cloudResult.stdout, /CLOUD_SENTINEL/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cloud-control guards allow help/version only", () => {
+  const allowed: Array<[string, string[]]> = [
+    ["gcloud", ["version"]], ["wrangler", ["--version"]], ["cloudflared", ["--version"]], ["cf", ["version"]],
+  ];
+  for (const [command, args] of allowed) assert.equal(isCloudControlInspection(command, args), true, `${command} ${args.join(" ")}`);
+  for (const [command, args] of [["gcloud", ["projects", "list"]], ["wrangler", ["deploy"]], ["cloudflared", ["tunnel", "run"]], ["cf", ["apps"]]] as Array<[string, string[]]>) {
+    assert.equal(isCloudControlInspection(command, args), false, `${command} ${args.join(" ")}`);
+    const guard = fileURLToPath(new URL(`../src/guard-bin/${command}`, import.meta.url));
+    const blocked = spawnSync(guard, args, { encoding: "utf8" });
+    assert.equal(blocked.status, 126, `${command}: ${blocked.stderr}`);
+  }
+  const gcloudGuard = fileURLToPath(new URL("../src/guard-bin/gcloud", import.meta.url));
+  if (existsSync("/usr/bin/gcloud")) {
+    const version = spawnSync(gcloudGuard, ["--version"], { encoding: "utf8", env: { ...process.env, AGENT_INTERCOM_REAL_GCLOUD: "/usr/bin/gcloud" } });
+    assert.equal(version.status, 0, version.stderr);
+  }
+});
+
+test("Node-based guards clear preload injection before policy code", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-intercom-node-options-proof-"));
+  const marker = join(root, "preload-marker");
+  const preload = join(root, "preload.cjs");
+  const fakeDirname = join(root, "dirname");
+  try {
+    writeFileSync(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed')\n`);
+    writeFileSync(fakeDirname, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`);
+    chmodSync(fakeDirname, 0o755);
+    for (const [name, args, realEnv, realPath, expectedStatus] of [
+      ["git", ["--version"], "AGENT_INTERCOM_REAL_GIT", "/usr/bin/git", 0],
+      ["gh", ["--version"], "AGENT_INTERCOM_REAL_GH", "/usr/bin/gh", 0],
+      ["npm", ["--version"], "AGENT_INTERCOM_REAL_NPM", "/usr/bin/npm", 0],
+      ["gcloud", ["projects", "list"], "AGENT_INTERCOM_REAL_GCLOUD", "/usr/bin/gcloud", 126],
+    ] as Array<[string, string[], string, string, number]>) {
+      if (!existsSync(realPath)) continue;
+      rmSync(marker, { force: true });
+      const guard = fileURLToPath(new URL(`../src/guard-bin/${name}`, import.meta.url));
+      const result = spawnSync(guard, args, { encoding: "utf8", env: { ...process.env, PATH: `${root}:${process.env.PATH}`, NODE_OPTIONS: `--require=${preload}`, NODE_PATH: root, [realEnv]: realPath } });
+      assert.equal(result.status, expectedStatus, `${name}: ${result.stderr}`);
+      assert.equal(existsSync(marker), false, `${name} executed NODE_OPTIONS preload`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("new credential guards are executable and packaged", () => {
+  const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+  for (const name of ["npm", "gcloud", "wrangler", "cloudflared", "cf"]) {
+    const guard = fileURLToPath(new URL(`../src/guard-bin/${name}`, import.meta.url));
+    assert.notEqual(statSync(guard).mode & 0o111, 0, name);
+    assert.ok(packageJson.files.includes(`src/guard-bin/${name}`), name);
+  }
+});
+
 test("glab guard is executable and explicitly included in package files", () => {
   const guard = fileURLToPath(new URL("../src/guard-bin/glab", import.meta.url));
   assert.notEqual(statSync(guard).mode & 0o111, 0);
@@ -552,6 +757,79 @@ test("Tea guard is executable and explicitly included in package files", () => {
   assert.notEqual(statSync(guard).mode & 0o111, 0);
   const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
   assert.ok(packageJson.files.includes("src/guard-bin/tea"));
+});
+
+test("hardened systemd profile masks project-local package-manager credentials", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const root = mkdtempSync(join(homedir(), ".agent-intercom-package-config-test-"));
+  const npmrc = join(root, ".npmrc");
+  try {
+    writeFileSync(npmrc, "//registry.npmjs.org/:_authToken=PACKAGE_SENTINEL\n", { mode: 0o600 });
+    assert.match(readFileSync(npmrc, "utf8"), /PACKAGE_SENTINEL/);
+    const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+    assert.ok(builder);
+    const properties = buildPermissionUnitProperties(builder, root);
+    const result = spawnSync("systemd-run", ["--user", "--wait", "--pipe", ...properties.map((property) => `--property=${property}`), "/bin/sh", "-c", `! test -r ${JSON.stringify(npmrc)} && ! cat ${JSON.stringify(npmrc)} >/dev/null 2>&1`], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("hardened systemd profile blocks host SSH and GPG agent sockets", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const uid = process.getuid?.();
+  if (!Number.isInteger(uid)) {
+    t.skip("numeric uid unavailable");
+    return;
+  }
+  const candidates = credentialAgentPaths(uid).flatMap((path) => existsSync(path) && statSync(path).isSocket() ? [path] : []);
+  const socket = candidates[0] ?? join(`/run/user/${uid}`, "gnupg", "S.gpg-agent.ssh");
+  if (!existsSync(socket)) {
+    t.skip("host SSH/GPG agent socket is absent");
+    return;
+  }
+  const probe = "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()";
+  const host = spawnSync("python3", ["-c", probe, socket], { encoding: "utf8", timeout: 5_000 });
+  if (host.status !== 0) {
+    t.skip(`host agent socket is not connectable: ${host.stderr.trim()}`);
+    return;
+  }
+  const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
+  assert.ok(reviewer);
+  const properties = buildPermissionUnitProperties(reviewer, process.cwd());
+  const deniedProbe = "import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close(); sys.exit(1)\nexcept OSError:\n sys.exit(0)";
+  const result = spawnSync("systemd-run", ["--user", "--wait", "--pipe", ...properties.map((property) => `--property=${property}`), "python3", "-c", deniedProbe, socket], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
+test("hardened systemd profile makes host Google Cloud credentials inaccessible", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const candidates = [
+    join(homedir(), ".config", "gcloud", "credentials.db"),
+    join(homedir(), ".config", "gcloud", "access_tokens.db"),
+    join(homedir(), ".config", "gcloud", "application_default_credentials.json"),
+  ];
+  const credential = candidates.find((path) => existsSync(path));
+  if (!credential) {
+    t.skip("host Google Cloud credential files are absent");
+    return;
+  }
+  assert.equal(spawnSync("/bin/sh", ["-c", `test -r ${JSON.stringify(credential)}`]).status, 0, "host Google credential proof must be non-vacuous");
+  const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
+  assert.ok(reviewer);
+  const properties = buildPermissionUnitProperties(reviewer, process.cwd());
+  const result = spawnSync("systemd-run", ["--user", "--wait", "--pipe", ...properties.map((property) => `--property=${property}`), "/bin/sh", "-c", `! test -r ${JSON.stringify(credential)} && ! head -c 1 ${JSON.stringify(credential)} >/dev/null 2>&1`], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
 test("hardened systemd profile makes host glab configuration inaccessible", (t) => {
