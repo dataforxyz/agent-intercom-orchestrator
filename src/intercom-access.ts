@@ -151,6 +151,7 @@ export async function checkRemoteAccessHealth(configuredAgentDir?: string): Prom
     || health.requestId !== healthRequestId
     || health.protocol !== "pi-intercom"
     || health.version !== 3
+    || health.endpoint !== "local"
     || typeof contract !== "object"
     || contract === null
     || contract.feature !== "remote-access-v1"

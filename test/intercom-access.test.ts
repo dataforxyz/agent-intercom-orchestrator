@@ -32,6 +32,7 @@ async function fakeBroker(socketPath: string, policyHash = "f3b00e503631bc91123a
           requestId: request.requestId,
           protocol: "pi-intercom",
           version: 3,
+          endpoint: "local",
           remoteAccess: {
             feature: "remote-access-v1",
             policySemanticsVersion: 2,
@@ -209,10 +210,12 @@ test("revocation returns only affected identities and sends no credentials", asy
   }
 });
 
-test("remote health probe defaults to the non-authoritative gateway socket", async () => {
-  const source = await readFile(new URL("../examples/check-remote-gateway.py", import.meta.url), "utf8");
-  assert.match(source, /bridge-agent\/intercom\/remote-gateway\.sock/);
-  assert.doesNotMatch(source, /bridge-agent\/intercom\/broker\.sock/);
+test("tunnel and remote probe distinguish the authenticated listener from the authoritative local socket", async () => {
+  const probe = await readFile(new URL("../examples/check-remote-gateway.py", import.meta.url), "utf8");
+  const tunnel = await readFile(new URL("../examples/secure-remote-tunnel.sh", import.meta.url), "utf8");
+  assert.match(probe, /bridge-agent\/intercom\/broker\.sock/);
+  assert.match(probe, /response\.get\("endpoint"\) == "remote"/);
+  assert.match(tunnel, /intercom\/remote-gateway\.sock/);
 });
 
 test("enrollment fails closed when the broker policy hash differs", async () => {

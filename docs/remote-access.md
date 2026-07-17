@@ -3,11 +3,11 @@
 Remote access uses a broker-owned Unix endpoint distinct from the local broker:
 
 ```text
-local sessions  -> broker.sock
-SSH forwarding -> remote-gateway.sock -> broker policy
+local sessions                    -> local broker.sock
+remote host broker.sock over SSH  -> local remote-gateway.sock -> broker policy
 ```
 
-Never forward `broker.sock`. Possession of the remote socket alone does not permit registration.
+Never forward the authoritative local `broker.sock`. A conventional `broker.sock` path may exist on the remote host for client compatibility, but its SSH target must be the distinct local `remote-gateway.sock`. Health responses are listener-stamped (`local` or `remote`) so a probe cannot mistake a raw authoritative-socket forward for the authenticated gateway.
 
 ## Compatibility check
 
@@ -104,7 +104,7 @@ Install `examples/check-remote-gateway.py` on the remote host and configure `exa
 
 - verifies the local semantic contract before forwarding;
 - forwards only `remote-gateway.sock`;
-- verifies the contract again through the remote socket;
+- verifies the contract again through the remote socket and requires the broker-stamped `remote` listener identity;
 - drops the tunnel if the local broker becomes absent or incompatible;
 - does not automatically restart the remote manager until three health samples pass.
 
