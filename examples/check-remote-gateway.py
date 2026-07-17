@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Fail-closed health probe for a forwarded Agent Intercom remote gateway."""
+import json
+import os
+import socket
+import struct
+import sys
+import uuid
+
+SOCKET_PATH = os.environ.get("AGENT_INTERCOM_REMOTE_SOCKET", os.path.expanduser("~/.pi/bridge-agent/intercom/broker.sock"))
+EXPECTED_HASH = os.environ.get("AGENT_INTERCOM_POLICY_HASH", "78178a5fd57c353342642968d3a27262ed02cb236927723675d875959413dce3")
+request_id = str(uuid.uuid4())
+request = json.dumps({"type": "health", "requestId": request_id}, separators=(",", ":")).encode()
+
+with socket.socket(socket.AF_UNIX) as client:
+    client.settimeout(2)
+    client.connect(SOCKET_PATH)
+    client.sendall(struct.pack(">I", len(request)) + request)
+    header = client.recv(4)
+    if len(header) != 4:
+        raise SystemExit("remote gateway returned no health frame")
+    length = struct.unpack(">I", header)[0]
+    if length > 1024 * 1024:
+        raise SystemExit("remote gateway health frame is oversized")
+    payload = bytearray()
+    while len(payload) < length:
+        chunk = client.recv(length - len(payload))
+        if not chunk:
+            raise SystemExit("remote gateway health frame was truncated")
+        payload.extend(chunk)
+
+response = json.loads(payload)
+contract = response.get("remoteAccess") or {}
+if not (
+    response.get("type") == "health_ok"
+    and response.get("requestId") == request_id
+    and response.get("protocol") == "pi-intercom"
+    and response.get("version") == 3
+    and contract.get("feature") == "remote-access-v1"
+    and contract.get("policySemanticsVersion") == 1
+    and contract.get("policySemanticsHash") == EXPECTED_HASH
+):
+    raise SystemExit("remote gateway policy contract is absent or incompatible")

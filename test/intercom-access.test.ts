@@ -4,7 +4,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { issueRemoteEnrollmentFile } from "../src/intercom-access.ts";
+import { issueRemoteEnrollmentFile, revokeRemoteSubtree } from "../src/intercom-access.ts";
 
 function frame(message: unknown): Buffer {
   const payload = Buffer.from(JSON.stringify(message));
@@ -37,6 +37,13 @@ async function fakeBroker(socketPath: string, policyHash = "78178a5fd57c35334264
             policySemanticsVersion: 1,
             policySemanticsHash: policyHash,
           },
+        }));
+      } else if (request.action === "revoke_subtree") {
+        socket.end(frame({
+          type: "access_control_result",
+          requestId: request.requestId,
+          action: "revoke_subtree",
+          changedPrincipalIds: [request.principalId, "child-principal"],
         }));
       } else {
         socket.end(frame({
@@ -81,6 +88,25 @@ test("enrollment CLI support writes the one-use secret only to a private file", 
     assert.equal(JSON.stringify(result).includes("one-use-secret"), false);
     assert.equal(broker.requests[1].adminToken, "a".repeat(43));
     assert.equal(broker.requests[1].enrollment.parentSessionId, "local-root");
+  } finally {
+    broker.server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("revocation returns only affected identities and sends no credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-intercom-revoke-cli-"));
+  const agentDir = join(root, "agent");
+  const intercomDir = join(agentDir, "intercom");
+  await mkdir(intercomDir, { recursive: true });
+  await writeFile(join(intercomDir, "broker-admin.json"), JSON.stringify({ version: 1, adminToken: "a".repeat(43) }), { mode: 0o600 });
+  const broker = await fakeBroker(join(intercomDir, "broker.sock"));
+  try {
+    assert.deepEqual(await revokeRemoteSubtree({ agentDir, principalId: "remote-principal" }), {
+      changedPrincipalIds: ["remote-principal", "child-principal"],
+    });
+    assert.equal(broker.requests[1].action, "revoke_subtree");
+    assert.equal(broker.requests[1].principalId, "remote-principal");
   } finally {
     broker.server.close();
     await rm(root, { recursive: true, force: true });

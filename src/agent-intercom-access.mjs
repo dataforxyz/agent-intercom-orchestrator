@@ -1,12 +1,16 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { issueRemoteEnrollmentFile } from "./intercom-access.ts";
+import { checkRemoteAccessHealth, issueRemoteEnrollmentFile, revokeRemoteSubtree } from "./intercom-access.ts";
 
 function usage() {
-  return "Usage: agent-intercom-access enroll --parent SESSION --name NAME --host HOST --output PATH [--ttl-minutes N] [--expires-at ISO]";
+  return [
+    "Usage:",
+    "  agent-intercom-access enroll --parent SESSION --name NAME --host HOST --output PATH [--ttl-minutes N] [--expires-at ISO]",
+    "  agent-intercom-access revoke --principal SESSION --confirm SESSION",
+    "  agent-intercom-access health",
+  ].join("\n");
 }
 
-function parseArgs(argv) {
-  if (argv[0] !== "enroll") throw new Error(usage());
+function flags(argv) {
   const values = {};
   for (let index = 1; index < argv.length; index += 2) {
     const flag = argv[index];
@@ -14,6 +18,10 @@ function parseArgs(argv) {
     if (!flag?.startsWith("--") || value === undefined) throw new Error(usage());
     values[flag.slice(2)] = value;
   }
+  return values;
+}
+
+function parseEnroll(values) {
   for (const required of ["parent", "name", "host", "output"]) {
     if (!values[required]) throw new Error(`Missing --${required}. ${usage()}`);
   }
@@ -39,8 +47,24 @@ function parseArgs(argv) {
 }
 
 try {
-  const result = await issueRemoteEnrollmentFile(parseArgs(process.argv.slice(2)));
-  process.stdout.write(`${JSON.stringify({ ok: true, credentialPath: result.path, expiresAt: result.expiresAt })}\n`);
+  const argv = process.argv.slice(2);
+  const command = argv[0];
+  const values = flags(argv);
+  if (command === "health") {
+    if (argv.length !== 1) throw new Error(usage());
+    const result = await checkRemoteAccessHealth();
+    process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
+  } else if (command === "enroll") {
+    const result = await issueRemoteEnrollmentFile(parseEnroll(values));
+    process.stdout.write(`${JSON.stringify({ ok: true, credentialPath: result.path, expiresAt: result.expiresAt })}\n`);
+  } else if (command === "revoke") {
+    if (!values.principal) throw new Error(`Missing --principal. ${usage()}`);
+    if (values.confirm !== values.principal) throw new Error("Revocation requires --confirm with the exact principal ID");
+    const result = await revokeRemoteSubtree({ principalId: values.principal });
+    process.stdout.write(`${JSON.stringify({ ok: true, changedPrincipalIds: result.changedPrincipalIds })}\n`);
+  } else {
+    throw new Error(usage());
+  }
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;

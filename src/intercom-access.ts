@@ -22,6 +22,23 @@ export interface IssuedRemoteEnrollmentFile {
   expiresAt: number;
 }
 
+export interface RevokeRemoteSubtreeOptions {
+  principalId: string;
+  agentDir?: string;
+}
+
+export interface RevokedRemoteSubtree {
+  changedPrincipalIds: string[];
+}
+
+export interface RemoteAccessHealth {
+  protocol: string;
+  version: number;
+  feature: "remote-access-v1";
+  policySemanticsVersion: number;
+  policySemanticsHash: string;
+}
+
 function agentDirectory(configured?: string): string {
   const value = configured ?? process.env.PI_CODING_AGENT_DIR;
   if (!value?.trim()) return join(homedir(), ".pi", "agent");
@@ -88,22 +105,17 @@ function requireText(value: string, label: string): string {
   return normalized;
 }
 
-export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOptions): Promise<IssuedRemoteEnrollmentFile> {
-  const agentDir = agentDirectory(options.agentDir);
-  const intercomDir = join(agentDir, "intercom");
-  const socketPath = join(intercomDir, "broker.sock");
-  const adminPath = join(intercomDir, "broker-admin.json");
-  const admin = JSON.parse(readFileSync(adminPath, "utf8")) as Record<string, unknown>;
-  if (admin.version !== 1 || typeof admin.adminToken !== "string" || admin.adminToken.length < 32) {
-    throw new Error("Invalid local Intercom broker admin credential");
-  }
-
+export async function checkRemoteAccessHealth(configuredAgentDir?: string): Promise<RemoteAccessHealth> {
+  const agentDir = agentDirectory(configuredAgentDir);
+  const socketPath = join(agentDir, "intercom", "broker.sock");
   const healthRequestId = randomUUID();
   const health = await exchange(socketPath, { type: "health", requestId: healthRequestId });
   const contract = health?.remoteAccess;
   if (
     health?.type !== "health_ok"
     || health.requestId !== healthRequestId
+    || health.protocol !== "pi-intercom"
+    || health.version !== 3
     || typeof contract !== "object"
     || contract === null
     || contract.feature !== "remote-access-v1"
@@ -112,13 +124,36 @@ export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOp
   ) {
     throw new Error("Local Intercom broker does not provide the required remote-access policy contract");
   }
+  return {
+    protocol: health.protocol,
+    version: health.version,
+    feature: contract.feature,
+    policySemanticsVersion: contract.policySemanticsVersion,
+    policySemanticsHash: contract.policySemanticsHash,
+  };
+}
 
+async function authenticatedAccessContext(configuredAgentDir?: string): Promise<{ socketPath: string; adminToken: string }> {
+  const agentDir = agentDirectory(configuredAgentDir);
+  const intercomDir = join(agentDir, "intercom");
+  const socketPath = join(intercomDir, "broker.sock");
+  await checkRemoteAccessHealth(agentDir);
+  const adminPath = join(intercomDir, "broker-admin.json");
+  const admin = JSON.parse(readFileSync(adminPath, "utf8")) as Record<string, unknown>;
+  if (admin.version !== 1 || typeof admin.adminToken !== "string" || admin.adminToken.length < 32) {
+    throw new Error("Invalid local Intercom broker admin credential");
+  }
+  return { socketPath, adminToken: admin.adminToken };
+}
+
+export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOptions): Promise<IssuedRemoteEnrollmentFile> {
+  const { socketPath, adminToken } = await authenticatedAccessContext(options.agentDir);
   const requestId = randomUUID();
   const parentSessionId = requireText(options.parentSessionId, "parent session ID");
   const response = await exchange(socketPath, {
     type: "access_control",
     requestId,
-    adminToken: admin.adminToken,
+    adminToken,
     action: "issue_enrollment",
     enrollment: {
       name: requireText(options.name, "remote principal name"),
@@ -141,4 +176,27 @@ export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOp
   const outputPath = resolve(options.outputPath);
   writePrivateJson(outputPath, { version: 1, enrollmentToken: response.enrollmentToken });
   return { path: outputPath, expiresAt: response.expiresAt };
+}
+
+export async function revokeRemoteSubtree(options: RevokeRemoteSubtreeOptions): Promise<RevokedRemoteSubtree> {
+  const { socketPath, adminToken } = await authenticatedAccessContext(options.agentDir);
+  const principalId = requireText(options.principalId, "remote principal ID");
+  const requestId = randomUUID();
+  const response = await exchange(socketPath, {
+    type: "access_control",
+    requestId,
+    adminToken,
+    action: "revoke_subtree",
+    principalId,
+  });
+  if (
+    response?.type !== "access_control_result"
+    || response.requestId !== requestId
+    || response.action !== "revoke_subtree"
+    || !Array.isArray(response.changedPrincipalIds)
+    || !response.changedPrincipalIds.every((id: unknown) => typeof id === "string")
+  ) {
+    throw new Error(response?.type === "error" ? `Intercom revocation was denied: ${String(response.code ?? "unknown")}` : "Invalid Intercom revocation response");
+  }
+  return { changedPrincipalIds: response.changedPrincipalIds };
 }
