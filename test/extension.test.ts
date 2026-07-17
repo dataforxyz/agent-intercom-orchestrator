@@ -266,10 +266,16 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
     assert.match(result.content[0].text, /session=ses_immediate_state/);
     assert.match(result.content[0].text, /permission=builder-restricted/);
     assert.ok(systemdArgs.includes("--property=PrivateUsers=self"));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--property=TemporaryFileSystem=/run/user/") && arg.endsWith(":rw")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--property=InaccessiblePaths=") && arg.includes("worker-runtime")));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--property=InaccessiblePaths=") && arg.includes("/hypr")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--property=BindPaths=") && arg.includes("agent-intercom-worker")));
     assert.ok(systemdArgs.includes('--property=ReadOnlyPaths="-/tmp/.git"'));
     assert.ok(systemdArgs.includes("--setenv=GIT_TERMINAL_PROMPT=0"));
+    assert.ok(systemdArgs.includes("--setenv=HYPRLAND_INSTANCE_SIGNATURE="));
+    assert.ok(systemdArgs.includes("--setenv=ALACRITTY_SOCKET="));
+    assert.ok(systemdArgs.includes("--setenv=WAYLAND_DISPLAY="));
+    assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=XDG_RUNTIME_DIR=") && arg.includes("agent-intercom-worker")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=PATH=") && arg.includes("guard-bin")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GIT=")));
     assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GH=")));

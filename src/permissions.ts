@@ -72,6 +72,11 @@ const SENSITIVE_HOME_PATHS = [
   "~/.bunfig.toml",
   "~/.config/bun",
   "~/.pypirc",
+  "~/.Xauthority",
+  "~/.ICEauthority",
+  "~/.config/pulse",
+  "~/.pulse",
+  "~/.esd_auth",
 ];
 
 const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
@@ -244,6 +249,47 @@ const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   BUN_AUTH_TOKEN: "",
   AZURE_CLIENT_SECRET: "",
   DBUS_SESSION_BUS_ADDRESS: "",
+  HYPRLAND_INSTANCE_SIGNATURE: "",
+  HYPRLAND_CMD: "",
+  WAYLAND_DISPLAY: "",
+  WAYLAND_SOCKET: "",
+  DISPLAY: "",
+  XAUTHORITY: "",
+  ICEAUTHORITY: "",
+  SESSION_MANAGER: "",
+  SWAYSOCK: "",
+  I3SOCK: "",
+  NIRI_SOCKET: "",
+  RIVER_SOCKET: "",
+  WAYFIRE_SOCKET: "",
+  MIR_SOCKET: "",
+  BSPWM_SOCKET: "",
+  HERBSTLUFTWM_SOCKET: "",
+  AWESOME_SOCKET: "",
+  ALACRITTY_SOCKET: "",
+  ALACRITTY_WINDOW_ID: "",
+  KITTY_LISTEN_ON: "",
+  KITTY_PID: "",
+  KITTY_WINDOW_ID: "",
+  WEZTERM_UNIX_SOCKET: "",
+  WEZTERM_PANE: "",
+  GHOSTTY_SOCKET: "",
+  TMUX: "",
+  TMUX_PANE: "",
+  ZELLIJ: "",
+  ZELLIJ_SESSION_NAME: "",
+  PIPEWIRE_REMOTE: "",
+  PIPEWIRE_RUNTIME_DIR: "",
+  PULSE_SERVER: "",
+  PULSE_COOKIE: "",
+  PULSE_RUNTIME_PATH: "",
+  AT_SPI_BUS_ADDRESS: "",
+  IBUS_ADDRESS: "",
+  FCITX_DBUS_ADDRESS: "",
+  NOTIFY_SOCKET: "",
+  XDG_SESSION_ID: "",
+  XDG_SESSION_PATH: "",
+  XDG_SEAT_PATH: "",
 };
 
 export const DEFAULT_PERMISSION_PROFILES: Record<string, PermissionProfile> = {
@@ -403,6 +449,15 @@ export function privilegedRuntimePaths(uid = process.getuid?.()): string[] {
   return [...STATIC_PRIVILEGED_RUNTIME_PATHS, ...userRuntimePaths];
 }
 
+export function legacySessionIpcPaths(homeDir = homedir()): string[] {
+  return [
+    "/tmp/hypr",
+    "/tmp/hyprland",
+    resolve(homeDir, ".cache", "hypr"),
+    resolve(homeDir, ".cache", "hyprland"),
+  ];
+}
+
 export function buildPermissionUnitProperties(
   profile: PermissionProfile,
   cwd: string,
@@ -433,11 +488,13 @@ export function buildPermissionUnitProperties(
   if (profile.hardened) {
     const workerUid = process.getuid?.();
     const runtimeDir = Number.isInteger(workerUid) ? `/run/user/${workerUid}` : process.env.XDG_RUNTIME_DIR;
+    if (runtimeDir) properties.push(`TemporaryFileSystem=${runtimeDir}:rw`);
     const controlPaths = [
       ...(runtimeDir ? [`${runtimeDir}/bus`, `${runtimeDir}/systemd`] : []),
       "/run/dbus/system_bus_socket",
       ...privilegedRuntimePaths(workerUid),
       ...credentialAgentPaths(workerUid),
+      ...legacySessionIpcPaths(),
     ];
     for (const path of [...new Set(controlPaths)]) {
       properties.push(`InaccessiblePaths=${quoteSystemdPath(`-${path}`)}`);

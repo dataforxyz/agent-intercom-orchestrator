@@ -13,6 +13,7 @@
 - Add packaged cross-harness `git`, `gh`, GitLab `glab`, and Forgejo `tea` guards plus a Pi `tool_call` policy hook so read-only Git profiles allow explicitly recognized inspection while blocking repository and hosting-service mutations.
 - Harden Git, GitHub, and Forgejo guards against host-qualified targets, command-level credential overrides, browser/debug leakage, untrusted executables, and Node preload injection; add an npm registry guard and help/version-only cloud-control guards.
 - Mask SSH/GPG/password-manager agent sockets, project and home package-registry credentials, and expanded Google Cloud, Cloudflare, and Cloud Foundry configuration for restricted workers.
+- Isolate restricted workers from host desktop/session IPC, including Hyprland, Wayland, compositor, terminal, audio, accessibility, launcher, and speech sockets, while preserving a private XDG runtime and Intercom broker mount.
 - Report permission profiles and managed-user-namespace helper readiness through `agent_fleet` discovery and doctor output.
 - Propagate `fresh: true` to harness launchers so Codex workers discard persisted bridge thread state instead of reusing the prior rollout under a new systemd run.
 

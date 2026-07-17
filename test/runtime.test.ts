@@ -65,6 +65,7 @@ test("worker runtime pre-creates isolated Codex state and seeds config without e
     assert.deepEqual(runtime.readOnlyPaths, []);
     assert.ok(runtime.inaccessiblePaths.includes(dirname(runtime.root)));
     assert.ok(runtime.bindPaths.includes(`${runtime.root}:${runtime.workerRoot}`));
+    assert.equal(runtime.environment.XDG_RUNTIME_DIR, runtime.workerRoot);
     assert.equal(runtime.environment.AGENT_INTERCOM_BROKER_SOURCE, join(agentDir, "intercom", "broker.sock"));
     assert.ok(runtime.extraArgs.includes(`mcp_servers.codex-intercom.env.PI_CODING_AGENT_DIR=${JSON.stringify(runtime.environment.PI_CODING_AGENT_DIR)}`));
     assert.ok(runtime.extraArgs.includes(join(runtime.workerRoot, "coi-state.json")));
@@ -92,6 +93,7 @@ test("worker runtime creates absent Claude and OpenCode homes before launch", as
     await assert.rejects(access(join(persistentAlias, ".git-credentials")));
     assert.ok(claude.extraArgs.includes("--dangerously-skip-permissions"));
     const opencode = await prepareWorkerRuntime("opencode", "opencode-first-run", agentDir, { homeDir: home, runtimeDir: join(home, "run") });
+    assert.equal(opencode.environment.XDG_RUNTIME_DIR, opencode.workerRoot);
     assert.equal(opencode.environment.XDG_DATA_HOME, join(opencode.workerRoot, "home", ".local", "share"));
     await writeFile(join(opencode.root, "home", ".local", "share", "opencode", "runtime-proof"), "ok\n");
     await assert.rejects(access(join(opencode.root, "home", ".config", "opencode", "plugins")));

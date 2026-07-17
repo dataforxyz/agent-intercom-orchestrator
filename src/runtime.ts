@@ -102,6 +102,7 @@ export async function prepareWorkerRuntime(
     XDG_DATA_HOME: join(home, ".local", "share"),
     XDG_STATE_HOME: join(home, ".local", "state"),
     XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_RUNTIME_DIR: workerRoot,
     PI_CODING_AGENT_DIR: privateAgentDir,
     AGENT_INTERCOM_BROKER_SOURCE: join(agentDir, "intercom", "broker.sock"),
     AGENT_INTERCOM_MASK_PATHS: JSON.stringify([join(agentDir, "intercom"), legacyWorkerRoot]),

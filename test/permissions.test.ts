@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ import {
   isReadOnlyGlabInvocation,
   isReadOnlyNpmInvocation,
   isReadOnlyTeaInvocation,
+  legacySessionIpcPaths,
   privilegedRuntimePaths,
 } from "../src/permissions.ts";
 
@@ -43,10 +45,14 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(reviewerProperties.includes("NoNewPrivileges=yes"));
   assert.ok(reviewerProperties.includes("ProtectSystem=strict"));
   assert.ok(reviewerProperties.includes("ProtectHome=read-only"));
+  const currentUid = process.getuid?.();
+  if (Number.isInteger(currentUid)) assert.ok(reviewerProperties.includes(`TemporaryFileSystem=/run/user/${currentUid}:rw`));
   assert.ok(reviewerProperties.includes('ReadOnlyPaths="/repo with spaces"'));
   assert.ok(reviewerProperties.some((property) => property.includes("/.ssh")));
   assert.ok(reviewerProperties.some((property) => property.includes("/.config/tea")));
   assert.ok(reviewerProperties.some((property) => property.includes("/.config/glab-cli")));
+  assert.ok(reviewerProperties.some((property) => property.includes("/.Xauthority")));
+  assert.ok(reviewerProperties.some((property) => property.includes("/.config/pulse")));
   assert.ok(reviewerProperties.some((property) => property.includes("/bus")));
   assert.ok(reviewerProperties.some((property) => property.includes("/systemd")));
   assert.ok(reviewerProperties.some((property) => property.includes("system_bus_socket")));
@@ -57,7 +63,6 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/buildkit/buildkitd.sock"'));
   assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/crio/crio.sock"'));
   assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/libvirt"'));
-  const currentUid = process.getuid?.();
   if (Number.isInteger(currentUid)) {
     assert.ok(reviewerProperties.includes(`InaccessiblePaths="-/run/user/${currentUid}/docker.sock"`));
     assert.ok(reviewerProperties.includes(`InaccessiblePaths="-/run/user/${currentUid}/podman"`));
@@ -140,12 +145,21 @@ test("privileged runtime socket masks are optional and use the launched worker u
   const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
   assert.ok(reviewer);
   const properties = buildPermissionUnitProperties(reviewer, "/repo");
-  for (const path of [...privilegedRuntimePaths(process.getuid?.()), ...credentialAgentPaths(process.getuid?.())]) {
+  for (const path of [...privilegedRuntimePaths(process.getuid?.()), ...credentialAgentPaths(process.getuid?.()), ...legacySessionIpcPaths()]) {
     assert.ok(properties.includes(`InaccessiblePaths=${JSON.stringify(`-${path}`)}`), `missing optional mask for ${path}`);
   }
   for (const name of [".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", "bunfig.toml", ".netrc"]) {
     assert.ok(properties.includes(`InaccessiblePaths=${JSON.stringify(`-/repo/${name}`)}`));
   }
+});
+
+test("legacy Hyprland IPC paths remain explicitly masked", () => {
+  assert.deepEqual(legacySessionIpcPaths("/home/example"), [
+    "/tmp/hypr",
+    "/tmp/hyprland",
+    "/home/example/.cache/hypr",
+    "/home/example/.cache/hyprland",
+  ]);
 });
 
 test("restricted permission environment disables common Git credential paths", () => {
@@ -188,6 +202,15 @@ test("restricted permission environment disables common Git credential paths", (
   assert.equal(environment.NPM_TOKEN, "");
   assert.equal(environment.NODE_AUTH_TOKEN, "");
   assert.equal(environment.NPM_CONFIG_USERCONFIG, "/dev/null");
+  for (const name of [
+    "HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "XAUTHORITY",
+    "SWAYSOCK", "I3SOCK", "NIRI_SOCKET", "ALACRITTY_SOCKET", "KITTY_LISTEN_ON",
+    "WEZTERM_UNIX_SOCKET", "GHOSTTY_SOCKET", "TMUX", "ZELLIJ", "PIPEWIRE_REMOTE",
+    "PIPEWIRE_RUNTIME_DIR", "PULSE_SERVER", "PULSE_COOKIE", "AT_SPI_BUS_ADDRESS",
+    "IBUS_ADDRESS", "FCITX_DBUS_ADDRESS", "NOTIFY_SOCKET", "XDG_SESSION_PATH",
+  ]) {
+    assert.equal(environment[name], "", `session target ${name} was not scrubbed`);
+  }
 });
 
 test("read-only Git policy allows inspection and blocks mutations or remote writes", () => {
@@ -807,6 +830,165 @@ test("hardened systemd profile blocks host SSH and GPG agent sockets", (t) => {
   const deniedProbe = "import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close(); sys.exit(1)\nexcept OSError:\n sys.exit(0)";
   const result = spawnSync("systemd-run", ["--user", "--wait", "--pipe", ...properties.map((property) => `--property=${property}`), "python3", "-c", deniedProbe, socket], { encoding: "utf8", timeout: 15_000 });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
+test("hardened systemd profile uses a private runtime and preserves only the assigned worker bind", async (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const uid = process.getuid?.();
+  if (!Number.isInteger(uid)) {
+    t.skip("numeric uid unavailable");
+    return;
+  }
+  const runtime = `/run/user/${uid}`;
+  const root = mkdtempSync(join(homedir(), ".agent-intercom-session-runtime-"));
+  const privateRuntime = join(root, "private-runtime");
+  const targetRuntime = join(runtime, "agent-intercom-worker");
+  const hostMarker = join(runtime, `agent-intercom-host-marker-${process.pid}`);
+  const lateSocket = join(runtime, `agent-intercom-late-socket-${process.pid}.sock`);
+  const ready = join(root, "ready");
+  const go = join(root, "go");
+  const server = createServer();
+  const unit = `agent-intercom-session-runtime-test-${process.pid}.service`;
+  try {
+    mkdirSync(privateRuntime);
+    writeFileSync(join(privateRuntime, "assigned"), "private\n");
+    writeFileSync(hostMarker, "host\n");
+    const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+    assert.ok(builder);
+    const properties = buildPermissionUnitProperties(builder, root, [], [], [], [], [`${privateRuntime}:${targetRuntime}`]);
+    assert.ok(properties.includes(`TemporaryFileSystem=${runtime}:rw`));
+    const script = [
+      `! test -e ${JSON.stringify(hostMarker)}`,
+      `test \"$(cat ${JSON.stringify(join(targetRuntime, "assigned"))})\" = private`,
+      `touch ${JSON.stringify(ready)}`,
+      `while ! test -e ${JSON.stringify(go)}; do sleep 0.05; done`,
+      `! test -e ${JSON.stringify(lateSocket)}`,
+      `printf 'worker\\n' > ${JSON.stringify(join(targetRuntime, "written"))}`,
+    ].join(" && ");
+    const child = spawn("systemd-run", [
+      "--user", "--wait", "--pipe", `--unit=${unit.slice(0, -8)}`,
+      ...properties.map((property) => `--property=${property}`),
+      "/bin/sh", "-c", script,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(ready) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    if (!existsSync(ready)) {
+      child.kill("SIGKILL");
+      assert.fail(`private runtime unit did not become ready: ${stderr}`);
+    }
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(lateSocket, resolve);
+    });
+    writeFileSync(go, "go\n");
+    const status = await Promise.race([
+      new Promise<number | null>((resolve) => child.once("close", resolve)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("private runtime unit timed out")), 15_000)),
+    ]);
+    assert.equal(status, 0, `${stdout}${stderr}`);
+    assert.equal(readFileSync(join(privateRuntime, "written"), "utf8"), "worker\n");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
+    spawnSync("systemctl", ["--user", "stop", unit], { stdio: "ignore", timeout: 5_000 });
+    spawnSync("systemctl", ["--user", "reset-failed", unit], { stdio: "ignore", timeout: 5_000 });
+    rmSync(hostMarker, { force: true });
+    rmSync(lateSocket, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("hardened systemd profile blocks host Hyprland control IPC", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const uid = process.getuid?.();
+  const signature = process.env.HYPRLAND_INSTANCE_SIGNATURE;
+  const hyprctl = spawnSync("sh", ["-c", "command -v hyprctl"], { encoding: "utf8" }).stdout.trim();
+  if (!Number.isInteger(uid) || !signature || !hyprctl) {
+    t.skip("active host Hyprland session is unavailable");
+    return;
+  }
+  const runtime = `/run/user/${uid}`;
+  const socket = join(runtime, "hypr", signature, ".socket.sock");
+  if (!existsSync(socket)) {
+    t.skip("host Hyprland command socket is absent");
+    return;
+  }
+  const connectProbe = "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()";
+  const hostSocket = spawnSync("python3", ["-c", connectProbe, socket], { stdio: "ignore", timeout: 5_000 });
+  const hostQuery = spawnSync(hyprctl, ["-j", "activeworkspace"], { stdio: "ignore", timeout: 5_000, env: { ...process.env, XDG_RUNTIME_DIR: runtime, HYPRLAND_INSTANCE_SIGNATURE: signature } });
+  if (hostSocket.status !== 0 || hostQuery.status !== 0) {
+    t.skip("host Hyprland IPC is not connectable for a non-vacuous proof");
+    return;
+  }
+
+  const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+  assert.ok(builder);
+  const propertyArgs = buildPermissionUnitProperties(builder, process.cwd()).map((property) => `--property=${property}`);
+  const deniedProbe = "import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close(); sys.exit(3)\nexcept OSError as error:\n print(error.errno); sys.exit(0)";
+  const deniedSocket = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", ...propertyArgs,
+    "python3", "-c", deniedProbe, socket,
+  ], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(deniedSocket.status, 0, `hardened Hyprland socket probe failed: ${deniedSocket.stderr}`);
+
+  const deniedQuery = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", ...propertyArgs,
+    `--setenv=XDG_RUNTIME_DIR=${runtime}`,
+    `--setenv=HYPRLAND_INSTANCE_SIGNATURE=${signature}`,
+    hyprctl, "-j", "activeworkspace",
+  ], { stdio: "ignore", timeout: 15_000 });
+  assert.notEqual(deniedQuery.status, 0, "hardened unit unexpectedly queried host Hyprland state");
+});
+
+test("hardened systemd profile blocks host Alacritty control IPC", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const uid = process.getuid?.();
+  const alacritty = spawnSync("sh", ["-c", "command -v alacritty"], { encoding: "utf8" }).stdout.trim();
+  if (!Number.isInteger(uid) || !alacritty) {
+    t.skip("Alacritty or numeric uid is unavailable");
+    return;
+  }
+  const runtime = `/run/user/${uid}`;
+  const candidates = [
+    process.env.ALACRITTY_SOCKET,
+    ...readdirSync(runtime).filter((name) => /^Alacritty-.*\.sock$/i.test(name)).map((name) => join(runtime, name)),
+  ].filter((path): path is string => Boolean(path && path.startsWith(`${runtime}/`) && existsSync(path)));
+  const socket = [...new Set(candidates)].find((path) => spawnSync(alacritty, ["msg", "--socket", path, "get-config"], { stdio: "ignore", timeout: 3_000 }).status === 0);
+  if (!socket) {
+    t.skip("no host Alacritty IPC socket answered a non-mutating get-config query");
+    return;
+  }
+
+  const connectProbe = "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()";
+  assert.equal(spawnSync("python3", ["-c", connectProbe, socket], { stdio: "ignore", timeout: 5_000 }).status, 0, "host Alacritty AF_UNIX proof failed");
+  const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+  assert.ok(builder);
+  const propertyArgs = buildPermissionUnitProperties(builder, process.cwd()).map((property) => `--property=${property}`);
+  const deniedProbe = "import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close(); sys.exit(3)\nexcept OSError as error:\n print(error.errno); sys.exit(0)";
+  const deniedSocket = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", ...propertyArgs,
+    "python3", "-c", deniedProbe, socket,
+  ], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(deniedSocket.status, 0, `hardened Alacritty socket probe failed: ${deniedSocket.stderr}`);
+
+  const deniedQuery = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", ...propertyArgs,
+    `--setenv=ALACRITTY_SOCKET=${socket}`,
+    alacritty, "msg", "--socket", socket, "get-config",
+  ], { stdio: "ignore", timeout: 15_000 });
+  assert.notEqual(deniedQuery.status, 0, "hardened unit unexpectedly queried host Alacritty config");
 });
 
 test("hardened systemd profile makes host Google Cloud credentials inaccessible", (t) => {
