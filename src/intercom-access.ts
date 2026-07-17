@@ -37,6 +37,16 @@ export interface IssuedRemoteEnrollmentFile {
   expiresAt: number;
 }
 
+export interface AdoptRemoteSubtreeOptions {
+  principalId: string;
+  newParentSessionId: string;
+  agentDir?: string;
+}
+
+export interface AdoptedRemoteSubtree {
+  principals: Array<Record<string, unknown>>;
+}
+
 export interface RevokeRemoteSubtreeOptions {
   principalId: string;
   agentDir?: string;
@@ -44,6 +54,16 @@ export interface RevokeRemoteSubtreeOptions {
 
 export interface RevokedRemoteSubtree {
   changedPrincipalIds: string[];
+}
+
+export interface InspectRemoteTreeOptions {
+  principalId?: string;
+  credentialPath?: string;
+  agentDir?: string;
+}
+
+export interface RemoteTreeInspection {
+  principals: Array<Record<string, unknown>>;
 }
 
 export interface RemoteAccessHealth {
@@ -241,6 +261,72 @@ export async function issueDelegatedEnrollmentFile(options: IssueDelegatedEnroll
   const outputPath = resolve(options.outputPath);
   writePrivateJson(outputPath, { version: 1, enrollmentToken: response.enrollmentToken });
   return { path: outputPath, expiresAt: response.expiresAt };
+}
+
+export async function inspectRemoteTree(options: InspectRemoteTreeOptions = {}): Promise<RemoteTreeInspection> {
+  const agentDir = agentDirectory(options.agentDir);
+  await checkRemoteAccessHealth(agentDir);
+  const socketPath = join(agentDir, "intercom", "broker.sock");
+  const requestId = randomUUID();
+  let request: Record<string, unknown>;
+  if (options.credentialPath) {
+    const credential = JSON.parse(readFileSync(resolve(options.credentialPath), "utf8")) as Record<string, unknown>;
+    if (
+      credential.version !== 1
+      || typeof credential.sessionCredential !== "string"
+      || typeof credential.sessionId !== "string"
+      || typeof credential.generation !== "number"
+      || !Number.isSafeInteger(credential.generation)
+    ) throw new Error("Invalid Intercom session credential");
+    request = {
+      type: "access_control",
+      requestId,
+      action: "inspect_tree",
+      access: {
+        sessionCredential: credential.sessionCredential,
+        sessionId: credential.sessionId,
+        generation: credential.generation,
+      },
+      ...(options.principalId ? { principalId: options.principalId } : {}),
+    };
+  } else {
+    if (!options.principalId) throw new Error("Local tree inspection requires a principal ID");
+    const admin = JSON.parse(readFileSync(join(agentDir, "intercom", "broker-admin.json"), "utf8")) as Record<string, unknown>;
+    if (admin.version !== 1 || typeof admin.adminToken !== "string") throw new Error("Invalid local Intercom broker admin credential");
+    request = { type: "access_control", requestId, action: "inspect_tree", adminToken: admin.adminToken, principalId: options.principalId };
+  }
+  const response = await exchange(socketPath, request);
+  if (
+    response?.type !== "access_control_result"
+    || response.requestId !== requestId
+    || response.action !== "inspect_tree"
+    || !Array.isArray(response.principals)
+  ) {
+    throw new Error(response?.type === "error" ? `Intercom tree inspection was denied: ${String(response.code ?? "unknown")}` : "Invalid Intercom tree inspection response");
+  }
+  return { principals: response.principals };
+}
+
+export async function adoptRemoteSubtree(options: AdoptRemoteSubtreeOptions): Promise<AdoptedRemoteSubtree> {
+  const { socketPath, adminToken } = await authenticatedAccessContext(options.agentDir);
+  const requestId = randomUUID();
+  const response = await exchange(socketPath, {
+    type: "access_control",
+    requestId,
+    adminToken,
+    action: "adopt_subtree",
+    principalId: requireText(options.principalId, "adopted principal ID"),
+    newParentSessionId: requireText(options.newParentSessionId, "new parent session ID"),
+  });
+  if (
+    response?.type !== "access_control_result"
+    || response.requestId !== requestId
+    || response.action !== "adopt_subtree"
+    || !Array.isArray(response.principals)
+  ) {
+    throw new Error(response?.type === "error" ? `Intercom adoption was denied: ${String(response.code ?? "unknown")}` : "Invalid Intercom adoption response");
+  }
+  return { principals: response.principals };
 }
 
 export async function revokeRemoteSubtree(options: RevokeRemoteSubtreeOptions): Promise<RevokedRemoteSubtree> {

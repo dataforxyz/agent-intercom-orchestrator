@@ -4,7 +4,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { issueDelegatedEnrollmentFile, issueRemoteEnrollmentFile, revokeRemoteSubtree } from "../src/intercom-access.ts";
+import { adoptRemoteSubtree, inspectRemoteTree, issueDelegatedEnrollmentFile, issueRemoteEnrollmentFile, revokeRemoteSubtree } from "../src/intercom-access.ts";
 
 function frame(message: unknown): Buffer {
   const payload = Buffer.from(JSON.stringify(message));
@@ -46,6 +46,20 @@ async function fakeBroker(socketPath: string, policyHash = "f3b00e503631bc91123a
           enrollmentToken: "delegated-one-use-secret",
           expiresAt: 2_000_000_000_000,
           parentSessionId: request.access.sessionId,
+        }));
+      } else if (request.action === "inspect_tree") {
+        socket.end(frame({
+          type: "access_control_result",
+          requestId: request.requestId,
+          action: "inspect_tree",
+          principals: [{ id: request.principalId || request.access.sessionId, name: "remote", connected: true }],
+        }));
+      } else if (request.action === "adopt_subtree") {
+        socket.end(frame({
+          type: "access_control_result",
+          requestId: request.requestId,
+          action: "adopt_subtree",
+          principals: [{ id: request.principalId, parentSessionId: request.newParentSessionId, generation: 2, connected: false }],
         }));
       } else if (request.action === "revoke_subtree") {
         socket.end(frame({
@@ -127,6 +141,42 @@ test("delegated enrollment authenticates with a private parent credential and wr
     assert.equal(broker.requests[1].access.sessionCredential, "parent-secret");
     assert.equal(broker.requests[1].enrollment.canDelegate, true);
     assert.equal(broker.requests[1].enrollment.maxDepth, 3);
+  } finally {
+    broker.server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tree inspection returns metadata without exposing parent credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-intercom-inspect-cli-"));
+  const agentDir = join(root, "agent");
+  const intercomDir = join(agentDir, "intercom");
+  const credentialPath = join(root, "parent.json");
+  await mkdir(intercomDir, { recursive: true });
+  await writeFile(credentialPath, JSON.stringify({ version: 1, sessionCredential: "parent-secret", sessionId: "parent-id", generation: 1 }), { mode: 0o600 });
+  const broker = await fakeBroker(join(intercomDir, "broker.sock"));
+  try {
+    const result = await inspectRemoteTree({ agentDir, credentialPath });
+    assert.deepEqual(result.principals, [{ id: "parent-id", name: "remote", connected: true }]);
+    assert.equal(JSON.stringify(result).includes("parent-secret"), false);
+  } finally {
+    broker.server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adoption returns fenced metadata without credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-intercom-adopt-cli-"));
+  const agentDir = join(root, "agent");
+  const intercomDir = join(agentDir, "intercom");
+  await mkdir(intercomDir, { recursive: true });
+  await writeFile(join(intercomDir, "broker-admin.json"), JSON.stringify({ version: 1, adminToken: "a".repeat(43) }), { mode: 0o600 });
+  const broker = await fakeBroker(join(intercomDir, "broker.sock"));
+  try {
+    assert.deepEqual(await adoptRemoteSubtree({ agentDir, principalId: "child", newParentSessionId: "new-parent" }), {
+      principals: [{ id: "child", parentSessionId: "new-parent", generation: 2, connected: false }],
+    });
+    assert.equal(broker.requests[1].action, "adopt_subtree");
   } finally {
     broker.server.close();
     await rm(root, { recursive: true, force: true });

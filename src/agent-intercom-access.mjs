@@ -1,11 +1,13 @@
 #!/usr/bin/env -S node --experimental-strip-types
-import { checkRemoteAccessHealth, issueDelegatedEnrollmentFile, issueRemoteEnrollmentFile, revokeRemoteSubtree } from "./intercom-access.ts";
+import { adoptRemoteSubtree, checkRemoteAccessHealth, inspectRemoteTree, issueDelegatedEnrollmentFile, issueRemoteEnrollmentFile, revokeRemoteSubtree } from "./intercom-access.ts";
 
 function usage() {
   return [
     "Usage:",
     "  agent-intercom-access enroll --parent SESSION --name NAME --host HOST --output PATH [capability options]",
     "  agent-intercom-access delegate --credential PATH --name NAME --output PATH [capability options]",
+    "  agent-intercom-access inspect [--principal SESSION] [--credential PATH]",
+    "  agent-intercom-access adopt --principal SESSION --new-parent SESSION --confirm SESSION",
     "  agent-intercom-access revoke --principal SESSION --confirm SESSION",
     "  agent-intercom-access health",
     "Capability options: --ttl-minutes N --expires-at ISO --can-delegate true|false --max-depth N --max-children N --confirm-delegation NAME",
@@ -87,6 +89,17 @@ try {
       ...capabilityOptions(values),
     });
     process.stdout.write(`${JSON.stringify({ ok: true, credentialPath: result.path, expiresAt: result.expiresAt })}\n`);
+  } else if (command === "inspect") {
+    const result = await inspectRemoteTree({
+      ...(values.principal ? { principalId: values.principal } : {}),
+      ...(values.credential ? { credentialPath: values.credential } : {}),
+    });
+    process.stdout.write(`${JSON.stringify({ ok: true, principals: result.principals })}\n`);
+  } else if (command === "adopt") {
+    if (!values.principal || !values["new-parent"]) throw new Error(`Adoption requires --principal and --new-parent. ${usage()}`);
+    if (values.confirm !== values.principal) throw new Error("Adoption requires --confirm with the exact adopted principal ID");
+    const result = await adoptRemoteSubtree({ principalId: values.principal, newParentSessionId: values["new-parent"] });
+    process.stdout.write(`${JSON.stringify({ ok: true, principals: result.principals })}\n`);
   } else if (command === "revoke") {
     if (!values.principal) throw new Error(`Missing --principal. ${usage()}`);
     if (values.confirm !== values.principal) throw new Error("Revocation requires --confirm with the exact principal ID");

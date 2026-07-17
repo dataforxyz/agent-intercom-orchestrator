@@ -57,6 +57,35 @@ agent-intercom-access delegate \
 
 Pending child enrollments count against the parent's child limit, preventing parallel one-use tokens from bypassing the quota.
 
+## Inspect the ownership tree
+
+Inspection returns metadata only; it grants no messaging edge. A remote principal can inspect itself or a descendant subtree, never an ancestor, sibling, cousin, or unrelated tree:
+
+```bash
+agent-intercom-access inspect --credential /private/path/manager-credential.json
+```
+
+A local administrator may choose a subtree root explicitly:
+
+```bash
+agent-intercom-access inspect --principal BROKER_ASSIGNED_SESSION_ID
+```
+
+Inspection output excludes credential hashes and plaintext credentials. It includes assigned identity, parent/root/host, generation, policy, delegation limits, state, expiry, and current connection status.
+
+## Adopt a subtree
+
+Adoption is a local administrative operation and requires exact confirmation:
+
+```bash
+agent-intercom-access adopt \
+  --principal SUBTREE_ROOT_ID \
+  --new-parent NEW_PARENT_ID \
+  --confirm SUBTREE_ROOT_ID
+```
+
+The broker atomically rewrites the subtree parent/root, increments every affected generation, cancels pending delivery and ask/reply edges crossing the old boundary, removes old delegated enrollment tokens, disconnects the subtree, and returns metadata containing the new generations. Existing reconnect secrets remain private, but their credential files must be updated to the returned generation before reconnect.
+
 ## Revoke
 
 Revocation requires an exact confirmation value and recursively fences the selected principal:
