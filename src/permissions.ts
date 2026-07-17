@@ -119,6 +119,99 @@ function quoteSystemdPath(path: string): string {
   return JSON.stringify(path);
 }
 
+// PrivateUsers=self preserves the worker uid but maps unrelated host uids/gids,
+// including privileged supplementary groups, to nobody. That can accidentally
+// make group-owned daemon sockets appear owned by the worker's mapped nobody
+// group, so restricted units must hide control endpoints explicitly.
+const STATIC_PRIVILEGED_RUNTIME_PATHS = [
+  "/run/docker.sock",
+  "/var/run/docker.sock",
+  "/run/containerd",
+  "/var/run/containerd",
+  "/run/containerd/containerd.sock",
+  "/var/run/containerd/containerd.sock",
+  "/run/k3s/containerd",
+  "/run/rke2/containerd",
+  "/run/k0s/containerd.sock",
+  "/var/snap/microk8s/common/run/containerd.sock",
+  "/run/cri-dockerd.sock",
+  "/var/run/cri-dockerd.sock",
+  "/run/podman",
+  "/var/run/podman",
+  "/run/podman/podman.sock",
+  "/var/run/podman/podman.sock",
+  "/run/buildkit",
+  "/var/run/buildkit",
+  "/run/buildkit/buildkitd.sock",
+  "/var/run/buildkit/buildkitd.sock",
+  "/run/crio",
+  "/var/run/crio",
+  "/run/crio/crio.sock",
+  "/var/run/crio/crio.sock",
+  "/run/lxd",
+  "/var/run/lxd",
+  "/var/lib/lxd/unix.socket",
+  "/var/snap/lxd/common/lxd/unix.socket",
+  "/var/snap/lxd/common/lxd/unix.socket.user",
+  "/run/incus",
+  "/var/run/incus",
+  "/var/lib/incus/unix.socket",
+  "/var/lib/incus/unix.socket.user",
+  "/run/lxc",
+  "/var/run/lxc",
+  "/run/lxcfs.sock",
+  "/run/libvirt",
+  "/var/run/libvirt",
+  "/run/qemu",
+  "/run/firecracker",
+  "/run/systemd/private",
+  "/run/systemd/coredump",
+  "/run/systemd/ask-password",
+  "/run/systemd/ask-password-block",
+  "/run/systemd/io.systemd.AskPassword",
+  "/run/systemd/io.systemd.BootControl",
+  "/run/systemd/io.systemd.Credentials",
+  "/run/systemd/io.systemd.FactoryReset",
+  "/run/systemd/io.systemd.Hostname",
+  "/run/systemd/io.systemd.Import",
+  "/run/systemd/io.systemd.JournalAccess",
+  "/run/systemd/io.systemd.Login",
+  "/run/systemd/io.systemd.ManagedOOM",
+  "/run/systemd/io.systemd.Manager",
+  "/run/systemd/io.systemd.MuteConsole",
+  "/run/systemd/io.systemd.PCRExtend",
+  "/run/systemd/io.systemd.PCRLock",
+  "/run/systemd/io.systemd.Repart",
+  "/run/systemd/io.systemd.Shutdown",
+  "/run/systemd/io.systemd.StorageProvider",
+  "/run/systemd/io.systemd.sysext",
+  "/run/systemd/machine",
+  "/run/systemd/netif/io.systemd.Network",
+  "/run/systemd/report",
+  "/run/systemd/resolve.hook",
+  "/run/systemd/shutdown",
+  "/run/udev/control",
+  "/run/udev/io.systemd.Udev",
+  "/run/polkit",
+  "/run/tailscale/tailscaled.sock",
+];
+
+export function privilegedRuntimePaths(uid = process.getuid?.()): string[] {
+  const workerUid = Number.isInteger(uid) && Number(uid) >= 0 ? Number(uid) : undefined;
+  const userRuntimePaths = workerUid === undefined ? [] : [
+    `/run/user/${workerUid}/docker.sock`,
+    `/run/user/${workerUid}/docker`,
+    `/run/user/${workerUid}/podman`,
+    `/run/user/${workerUid}/buildkit`,
+    `/run/user/${workerUid}/containerd`,
+    `/run/user/${workerUid}/containerd-rootless`,
+    `/run/user/${workerUid}/lxd`,
+    `/run/user/${workerUid}/incus`,
+    `/run/user/${workerUid}/libvirt`,
+  ];
+  return [...STATIC_PRIVILEGED_RUNTIME_PATHS, ...userRuntimePaths];
+}
+
 export function buildPermissionUnitProperties(
   profile: PermissionProfile,
   cwd: string,
@@ -147,8 +240,14 @@ export function buildPermissionUnitProperties(
     );
   }
   if (profile.hardened) {
-    const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ""}`;
-    for (const path of [`${runtimeDir}/bus`, `${runtimeDir}/systemd`, "/run/dbus/system_bus_socket"]) {
+    const workerUid = process.getuid?.();
+    const runtimeDir = Number.isInteger(workerUid) ? `/run/user/${workerUid}` : process.env.XDG_RUNTIME_DIR;
+    const controlPaths = [
+      ...(runtimeDir ? [`${runtimeDir}/bus`, `${runtimeDir}/systemd`] : []),
+      "/run/dbus/system_bus_socket",
+      ...privilegedRuntimePaths(workerUid),
+    ];
+    for (const path of [...new Set(controlPaths)]) {
       properties.push(`InaccessiblePaths=${quoteSystemdPath(`-${path}`)}`);
     }
   }

@@ -13,6 +13,7 @@ import {
   buildPermissionEnvironment,
   buildPermissionUnitProperties,
   isReadOnlyTeaInvocation,
+  privilegedRuntimePaths,
 } from "../src/permissions.ts";
 
 test("built-in roles choose conservative permission profiles", () => {
@@ -43,6 +44,19 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(reviewerProperties.some((property) => property.includes("/bus")));
   assert.ok(reviewerProperties.some((property) => property.includes("/systemd")));
   assert.ok(reviewerProperties.some((property) => property.includes("system_bus_socket")));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/docker.sock"'));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/var/run/docker.sock"'));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/containerd/containerd.sock"'));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/podman/podman.sock"'));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/buildkit/buildkitd.sock"'));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/crio/crio.sock"'));
+  assert.ok(reviewerProperties.includes('InaccessiblePaths="-/run/libvirt"'));
+  const currentUid = process.getuid?.();
+  if (Number.isInteger(currentUid)) {
+    assert.ok(reviewerProperties.includes(`InaccessiblePaths="-/run/user/${currentUid}/docker.sock"`));
+    assert.ok(reviewerProperties.includes(`InaccessiblePaths="-/run/user/${currentUid}/podman"`));
+    assert.ok(reviewerProperties.includes(`InaccessiblePaths="-/run/user/${currentUid}/libvirt"`));
+  }
 
   const builderProperties = buildPermissionUnitProperties(builder, "/repo", ["/repo/.git", "/shared/.git/worktrees/repo", "/shared/.git"], ["/home/example/.local/state/worker"], ["/home/example/.pi/agent/settings.json"]);
   assert.ok(builderProperties.includes('ReadWritePaths="/repo"'));
@@ -51,6 +65,51 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(builderProperties.includes('ReadOnlyPaths="-/shared/.git/worktrees/repo"'));
   assert.ok(builderProperties.includes('ReadOnlyPaths="-/shared/.git"'));
   assert.equal(builderProperties.some((property) => property === 'ReadOnlyPaths="/repo"'), false);
+});
+
+test("privileged runtime socket masks are optional and use the launched worker uid", () => {
+  const paths = privilegedRuntimePaths(4242);
+  assert.ok(paths.includes("/run/docker.sock"));
+  assert.ok(paths.includes("/var/run/docker.sock"));
+  assert.ok(paths.includes("/run/containerd/containerd.sock"));
+  assert.ok(paths.includes("/run/podman/podman.sock"));
+  assert.ok(paths.includes("/run/buildkit/buildkitd.sock"));
+  assert.ok(paths.includes("/var/snap/lxd/common/lxd/unix.socket"));
+  assert.ok(paths.includes("/var/lib/incus/unix.socket"));
+  assert.ok(paths.includes("/run/crio/crio.sock"));
+  assert.ok(paths.includes("/run/libvirt"));
+  for (const path of [
+    "/run/systemd/private",
+    "/run/systemd/io.systemd.Login",
+    "/run/systemd/io.systemd.Shutdown",
+    "/run/systemd/io.systemd.FactoryReset",
+    "/run/systemd/io.systemd.Hostname",
+    "/run/systemd/io.systemd.sysext",
+    "/run/systemd/io.systemd.BootControl",
+    "/run/systemd/io.systemd.Repart",
+    "/run/systemd/io.systemd.PCRLock",
+    "/run/systemd/io.systemd.PCRExtend",
+    "/run/systemd/io.systemd.MuteConsole",
+    "/run/systemd/io.systemd.ManagedOOM",
+    "/run/systemd/io.systemd.JournalAccess",
+    "/run/udev/control",
+    "/run/polkit",
+    "/run/tailscale/tailscaled.sock",
+  ]) {
+    assert.ok(paths.includes(path), `missing host-control mask for ${path}`);
+  }
+  assert.ok(paths.includes("/run/user/4242/docker.sock"));
+  assert.ok(paths.includes("/run/user/4242/podman"));
+  assert.ok(paths.includes("/run/user/4242/buildkit"));
+  assert.ok(paths.includes("/run/user/4242/libvirt"));
+  assert.equal(paths.filter((path) => path.startsWith("/run/user/")).every((path) => path.startsWith("/run/user/4242/")), true);
+
+  const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
+  assert.ok(reviewer);
+  const properties = buildPermissionUnitProperties(reviewer, "/repo");
+  for (const path of privilegedRuntimePaths(process.getuid?.())) {
+    assert.ok(properties.includes(`InaccessiblePaths=${JSON.stringify(`-${path}`)}`), `missing optional mask for ${path}`);
+  }
 });
 
 test("restricted permission environment disables common Git credential paths", () => {
@@ -237,6 +296,103 @@ test("hardened systemd profile makes host Tea configuration inaccessible", (t) =
     "/bin/sh", "-c", `! test -r ${JSON.stringify(teaConfig)} && ! cat ${JSON.stringify(teaConfig)} >/dev/null 2>&1`,
   ], { encoding: "utf8", timeout: 15_000 });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
+test("hardened systemd profile blocks the host Docker control socket without contacting the daemon", (t) => {
+  const dockerSocket = "/run/docker.sock";
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  if (!existsSync(dockerSocket)) {
+    t.skip("host Docker socket is absent");
+    return;
+  }
+  const dockerPath = spawnSync("sh", ["-c", "command -v docker"], { encoding: "utf8" }).stdout.trim();
+  if (!dockerPath) {
+    t.skip("Docker CLI is absent");
+    return;
+  }
+  const hostProof = spawnSync(dockerPath, ["version", "--format", "{{.Server.Version}}"], {
+    encoding: "utf8",
+    env: { ...process.env, DOCKER_HOST: `unix://${dockerSocket}` },
+    timeout: 10_000,
+  });
+  if (hostProof.status !== 0) {
+    t.skip(`host Docker daemon is not reachable for a non-vacuous proof: ${hostProof.stderr.trim()}`);
+    return;
+  }
+
+  const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+  assert.ok(builder);
+  const properties = buildPermissionUnitProperties(builder, process.cwd());
+  const propertyArgs = properties.map((property) => `--property=${property}`);
+
+  const socketProbe = String.raw`
+    const net = require("node:net");
+    const socket = net.createConnection({ path: ${JSON.stringify(dockerSocket)} });
+    const timer = setTimeout(() => { socket.destroy(); process.exit(2); }, 2000);
+    socket.once("connect", () => { clearTimeout(timer); socket.destroy(); process.exit(3); });
+    socket.once("error", (error) => { clearTimeout(timer); console.log(error.code || error.message); process.exit(0); });
+  `;
+  const openResult = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", ...propertyArgs,
+    process.execPath, "-e", socketProbe,
+  ], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(openResult.status, 0, `${openResult.stdout}${openResult.stderr}`);
+  assert.match(openResult.stdout, /EACCES|ENOENT|EPERM|ENOTDIR/);
+
+  const dockerResult = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe", ...propertyArgs,
+    `--setenv=DOCKER_HOST=unix://${dockerSocket}`,
+    dockerPath, "version", "--format", "{{.Server.Version}}",
+  ], { encoding: "utf8", timeout: 15_000 });
+  assert.notEqual(dockerResult.status, 0, `${dockerResult.stdout}${dockerResult.stderr}`);
+  assert.match(`${dockerResult.stdout}\n${dockerResult.stderr}`, /permission denied|cannot connect|failed to connect|no such file|operation not permitted/i);
+});
+
+test("hardened systemd profile blocks direct host login and shutdown Varlink sockets", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const varlinkctl = spawnSync("sh", ["-c", "command -v varlinkctl"], { encoding: "utf8" }).stdout.trim();
+  if (!varlinkctl) {
+    t.skip("varlinkctl is absent");
+    return;
+  }
+  const endpoints = [
+    "/run/systemd/io.systemd.Login",
+    "/run/systemd/io.systemd.Shutdown",
+  ].filter((path) => existsSync(path));
+  if (!endpoints.length) {
+    t.skip("host login/shutdown Varlink sockets are absent");
+    return;
+  }
+  for (const endpoint of endpoints) {
+    const hostInfo = spawnSync(varlinkctl, ["info", `unix:${endpoint}`], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(hostInfo.status, 0, `host Varlink proof failed for ${endpoint}: ${hostInfo.stdout}${hostInfo.stderr}`);
+    assert.match(hostInfo.stdout, /io\.systemd\.(?:Login|Shutdown)/);
+  }
+
+  const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+  assert.ok(builder);
+  const propertyArgs = buildPermissionUnitProperties(builder, process.cwd()).map((property) => `--property=${property}`);
+  for (const endpoint of endpoints) {
+    const socketProbe = String.raw`
+      const net = require("node:net");
+      const socket = net.createConnection({ path: ${JSON.stringify(endpoint)} });
+      const timer = setTimeout(() => { socket.destroy(); process.exit(2); }, 2000);
+      socket.once("connect", () => { clearTimeout(timer); socket.destroy(); process.exit(3); });
+      socket.once("error", (error) => { clearTimeout(timer); console.log(error.code || error.message); process.exit(0); });
+    `;
+    const blocked = spawnSync("systemd-run", [
+      "--user", "--wait", "--pipe", ...propertyArgs,
+      process.execPath, "-e", socketProbe,
+    ], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(blocked.status, 0, `hardened unit socket probe failed for ${endpoint}: ${blocked.stdout}${blocked.stderr}`);
+    assert.match(blocked.stdout, /EACCES|EPERM|ENOENT|ENOTDIR/);
+  }
 });
 
 test("linked-worktree .git pointer and resolved metadata are immutable in a real hardened unit", (t) => {
