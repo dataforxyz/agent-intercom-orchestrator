@@ -219,7 +219,7 @@ export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOp
 export async function issueDelegatedEnrollmentFile(options: IssueDelegatedEnrollmentOptions): Promise<IssuedRemoteEnrollmentFile> {
   const agentDir = agentDirectory(options.agentDir);
   await checkRemoteAccessHealth(agentDir);
-  const socketPath = join(agentDir, "intercom", "broker.sock");
+  const socketPath = join(agentDir, "intercom", "remote-gateway.sock");
   const credential = JSON.parse(readFileSync(resolve(options.credentialPath), "utf8")) as Record<string, unknown>;
   if (
     credential.version !== 1
@@ -266,10 +266,11 @@ export async function issueDelegatedEnrollmentFile(options: IssueDelegatedEnroll
 export async function inspectRemoteTree(options: InspectRemoteTreeOptions = {}): Promise<RemoteTreeInspection> {
   const agentDir = agentDirectory(options.agentDir);
   await checkRemoteAccessHealth(agentDir);
-  const socketPath = join(agentDir, "intercom", "broker.sock");
+  let socketPath = join(agentDir, "intercom", "broker.sock");
   const requestId = randomUUID();
   let request: Record<string, unknown>;
   if (options.credentialPath) {
+    socketPath = join(agentDir, "intercom", "remote-gateway.sock");
     const credential = JSON.parse(readFileSync(resolve(options.credentialPath), "utf8")) as Record<string, unknown>;
     if (
       credential.version !== 1

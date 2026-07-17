@@ -125,7 +125,8 @@ test("delegated enrollment authenticates with a private parent credential and wr
   const childCredential = join(root, "child.json");
   await mkdir(intercomDir, { recursive: true });
   await writeFile(parentCredential, JSON.stringify({ version: 1, sessionCredential: "parent-secret", sessionId: "parent-id", generation: 2 }), { mode: 0o600 });
-  const broker = await fakeBroker(join(intercomDir, "broker.sock"));
+  const localBroker = await fakeBroker(join(intercomDir, "broker.sock"));
+  const remoteGateway = await fakeBroker(join(intercomDir, "remote-gateway.sock"));
   try {
     const result = await issueDelegatedEnrollmentFile({
       agentDir,
@@ -138,11 +139,13 @@ test("delegated enrollment authenticates with a private parent credential and wr
     });
     assert.equal(JSON.stringify(result).includes("delegated-one-use-secret"), false);
     assert.deepEqual(JSON.parse(await readFile(childCredential, "utf8")), { version: 1, enrollmentToken: "delegated-one-use-secret" });
-    assert.equal(broker.requests[1].access.sessionCredential, "parent-secret");
-    assert.equal(broker.requests[1].enrollment.canDelegate, true);
-    assert.equal(broker.requests[1].enrollment.maxDepth, 3);
+    assert.equal(localBroker.requests[0].type, "health");
+    assert.equal(remoteGateway.requests[0].access.sessionCredential, "parent-secret");
+    assert.equal(remoteGateway.requests[0].enrollment.canDelegate, true);
+    assert.equal(remoteGateway.requests[0].enrollment.maxDepth, 3);
   } finally {
-    broker.server.close();
+    localBroker.server.close();
+    remoteGateway.server.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -154,13 +157,17 @@ test("tree inspection returns metadata without exposing parent credentials", asy
   const credentialPath = join(root, "parent.json");
   await mkdir(intercomDir, { recursive: true });
   await writeFile(credentialPath, JSON.stringify({ version: 1, sessionCredential: "parent-secret", sessionId: "parent-id", generation: 1 }), { mode: 0o600 });
-  const broker = await fakeBroker(join(intercomDir, "broker.sock"));
+  const localBroker = await fakeBroker(join(intercomDir, "broker.sock"));
+  const remoteGateway = await fakeBroker(join(intercomDir, "remote-gateway.sock"));
   try {
     const result = await inspectRemoteTree({ agentDir, credentialPath });
     assert.deepEqual(result.principals, [{ id: "parent-id", name: "remote", connected: true }]);
     assert.equal(JSON.stringify(result).includes("parent-secret"), false);
+    assert.equal(localBroker.requests[0].type, "health");
+    assert.equal(remoteGateway.requests[0].action, "inspect_tree");
   } finally {
-    broker.server.close();
+    localBroker.server.close();
+    remoteGateway.server.close();
     await rm(root, { recursive: true, force: true });
   }
 });
