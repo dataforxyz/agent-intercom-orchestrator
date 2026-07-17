@@ -566,9 +566,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (permissionProfile.hardened) {
       const version = await systemdVersion(runner);
       if (version !== undefined && version < 257) throw new Error(`Permission profile ${permissionProfileName} requires systemd 257 or newer for PrivatePIDs (found ${version})`);
-      try {
-        await access("/usr/bin/bwrap");
-      } catch {
+      const bubblewrap = await runner.exec("/usr/bin/test", ["-x", "/usr/bin/bwrap"], { timeout: 5_000 });
+      if (bubblewrap.code !== 0) {
         throw new Error(`Permission profile ${permissionProfileName} requires bubblewrap at /usr/bin/bwrap to isolate shared harness state`);
       }
     }
