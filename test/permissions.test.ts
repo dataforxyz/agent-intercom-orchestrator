@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import {
   blockedToolReason,
   buildPermissionEnvironment,
   buildPermissionUnitProperties,
+  isReadOnlyGlabInvocation,
   isReadOnlyTeaInvocation,
   privilegedRuntimePaths,
 } from "../src/permissions.ts";
@@ -41,6 +42,7 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(reviewerProperties.includes('ReadOnlyPaths="/repo with spaces"'));
   assert.ok(reviewerProperties.some((property) => property.includes("/.ssh")));
   assert.ok(reviewerProperties.some((property) => property.includes("/.config/tea")));
+  assert.ok(reviewerProperties.some((property) => property.includes("/.config/glab-cli")));
   assert.ok(reviewerProperties.some((property) => property.includes("/bus")));
   assert.ok(reviewerProperties.some((property) => property.includes("/systemd")));
   assert.ok(reviewerProperties.some((property) => property.includes("system_bus_socket")));
@@ -65,6 +67,33 @@ test("permission profiles compile to Pi tool allowlists and systemd properties",
   assert.ok(builderProperties.includes('ReadOnlyPaths="-/shared/.git/worktrees/repo"'));
   assert.ok(builderProperties.includes('ReadOnlyPaths="-/shared/.git"'));
   assert.equal(builderProperties.some((property) => property === 'ReadOnlyPaths="/repo"'), false);
+});
+
+test("glab project-local config masks apply only to real Git metadata directories", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-intercom-glab-metadata-"));
+  try {
+    const standardRepo = join(root, "standard");
+    const standardGit = join(standardRepo, ".git");
+    mkdirSync(standardGit, { recursive: true });
+    const builder = DEFAULT_CONFIG.permissionProfiles["builder-restricted"];
+    assert.ok(builder);
+    const standardProperties = buildPermissionUnitProperties(builder, standardRepo, [standardGit]);
+    assert.ok(standardProperties.includes(`InaccessiblePaths=${JSON.stringify(`-${join(standardGit, "glab-cli")}`)}`));
+
+    const linkedRepo = join(root, "linked");
+    const linkedPointer = join(linkedRepo, ".git");
+    const linkedMetadata = join(root, "common", "worktrees", "linked");
+    const commonMetadata = join(root, "common");
+    mkdirSync(linkedRepo, { recursive: true });
+    mkdirSync(linkedMetadata, { recursive: true });
+    writeFileSync(linkedPointer, `gitdir: ${linkedMetadata}\n`);
+    const linkedProperties = buildPermissionUnitProperties(builder, linkedRepo, [linkedPointer, linkedMetadata, commonMetadata]);
+    assert.equal(linkedProperties.some((property) => property.includes(`${linkedPointer}/glab-cli`)), false);
+    assert.ok(linkedProperties.includes(`InaccessiblePaths=${JSON.stringify(`-${join(linkedMetadata, "glab-cli")}`)}`));
+    assert.ok(linkedProperties.includes(`InaccessiblePaths=${JSON.stringify(`-${join(commonMetadata, "glab-cli")}`)}`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("privileged runtime socket masks are optional and use the launched worker uid", () => {
@@ -122,6 +151,20 @@ test("restricted permission environment disables common Git credential paths", (
   assert.equal(environment.GIT_OPTIONAL_LOCKS, "0");
   assert.equal(environment.SSH_AUTH_SOCK, "");
   assert.equal(environment.GH_TOKEN, "");
+  assert.equal(environment.GLAB_TOKEN, "");
+  assert.equal(environment.GLAB_CONFIG_DIR, "");
+  assert.equal(environment.GLAB_CONFIG_FILE, "");
+  assert.equal(environment.GLAB_HOST, "");
+  assert.equal(environment.GITLAB_TOKEN_FILE, "");
+  assert.equal(environment.GITLAB_ACCESS_TOKEN, "");
+  assert.equal(environment.GITLAB_PRIVATE_TOKEN, "");
+  assert.equal(environment.GITLAB_OAUTH_TOKEN, "");
+  assert.equal(environment.GITLAB_API_URL, "");
+  assert.equal(environment.GITLAB_GRAPHQL_URL, "");
+  assert.equal(environment.GITLAB_CLIENT_KEY, "");
+  assert.equal(environment.CI_JOB_TOKEN, "");
+  assert.equal(environment.CI_JOB_TOKEN_FILE, "");
+  assert.equal(environment.CI_REGISTRY_PASSWORD, "");
   assert.equal(environment.TEA_TOKEN, "");
   assert.equal(environment.TEA_TRACE, "");
   assert.equal(environment.GITEA_TOKEN, "");
@@ -142,6 +185,10 @@ test("read-only Git policy allows inspection and blocks mutations or remote writ
   assert.equal(blockedToolReason("bash", { command: "/usr/bin/tea api --method GET /user" }, "read-write", "read-only"), undefined);
   assert.match(blockedToolReason("bash", { command: "/usr/bin/tea issues create --title nope" }, "read-write", "read-only") ?? "", /Forgejo write/);
   assert.match(blockedToolReason("bash", { command: "tea api /repos/o/r/issues -X POST -f title=nope" }, "read-write", "read-only") ?? "", /Forgejo write/);
+  assert.equal(blockedToolReason("bash", { command: "glab issue list --repo owner/repo" }, "read-write", "read-only"), undefined);
+  assert.equal(blockedToolReason("bash", { command: "/usr/bin/glab mr diff 42" }, "read-write", "read-only"), undefined);
+  assert.match(blockedToolReason("bash", { command: "/usr/bin/glab issue create --title nope" }, "read-write", "read-only") ?? "", /GitLab write/);
+  assert.match(blockedToolReason("bash", { command: "glab api /projects/1 -X POST -F name=nope" }, "read-write", "read-only") ?? "", /GitLab write/);
   assert.match(blockedToolReason("edit", { path: "src/a.ts" }, "read-only", "read-only") ?? "", /read-only workspace/);
   assert.equal(blockedToolReason("bash", { command: "git push origin main" }, "read-write", "full"), undefined);
 });
@@ -270,11 +317,263 @@ test("cross-harness Tea guard allows inspection and cannot be disabled by worker
   }
 });
 
+test("glab policy is a strict inspection allowlist", () => {
+  for (const args of [
+    ["--version"],
+    ["issue", "list"],
+    ["issue", "show", "42"],
+    ["-R", "owner/repo", "issue", "ls"],
+    ["issue", "-R", "owner/repo", "view", "42"],
+    ["-g", "owner/nested-group", "repo", "list"],
+    ["mr", "approvers", "42"],
+    ["mr", "diff", "42"],
+    ["mr", "issues", "42"],
+    ["mr", "ls"],
+    ["mr", "show", "42"],
+    ["repo", "contributors"],
+    ["repo", "list"],
+    ["repo", "search", "guard"],
+    ["repo", "view", "owner/repo"],
+    ["release", "ls"],
+    ["release", "view", "v1.0.0"],
+    ["pipeline", "list"],
+    ["ci", "get", "--pipeline-id", "42"],
+    ["ci", "status"],
+    ["ci", "trace", "123"],
+    ["ci", "config", "compile", ".gitlab-ci.yml"],
+    ["api", "/version"],
+    ["api", "/projects", "--method", "GET", "--paginate", "--output", "ndjson"],
+    ["api", "-XHEAD", "/version", "--include", "--silent"],
+  ]) assert.equal(isReadOnlyGlabInvocation(args), true, args.join(" "));
+
+  for (const args of [
+    ["auth", "login"],
+    ["config", "set", "host", "evil.invalid"],
+    ["alias", "set", "pwn", "api"],
+    ["issue", "create", "--title", "nope"],
+    ["-R", "https://evil.invalid/group/project", "issue", "list"],
+    ["--repo=git@evil.invalid:group/project", "issue", "list"],
+    ["issue", "view", "https://evil.invalid/group/project/-/issues/1"],
+    ["repo", "view", "evil.invalid:443/group/project"],
+    ["-g", "https://evil.invalid/group", "repo", "list"],
+    ["issue", "view", "42\nhttps://evil.invalid"],
+    ["-R", "owner/repo", "issue", "create", "--title", "nope"],
+    ["issue", "--repo", "owner/repo", "create", "--title", "nope"],
+    ["issue", "update", "42"],
+    ["issue", "note", "42"],
+    ["mr", "approve", "42"],
+    ["mr", "create"],
+    ["mr", "merge", "42"],
+    ["mr", "rebase", "42"],
+    ["repo", "clone", "owner/repo"],
+    ["repo", "create", "nope"],
+    ["repo", "fork", "owner/repo"],
+    ["repo", "delete", "owner/repo"],
+    ["release", "create", "v1"],
+    ["release", "download", "v1"],
+    ["release", "upload", "v1", "file"],
+    ["ci", "run"],
+    ["ci", "retry", "42"],
+    ["ci", "trigger", "42"],
+    ["ci", "view"],
+    ["job", "artifact", "main", "build"],
+    ["runner", "list"],
+    ["token", "list"],
+    ["issue", "view", "42", "--web"],
+    ["mr", "view", "42", "-w"],
+    ["repo", "view", "owner/repo", "--web=true"],
+    ["ci", "get", "--with-variables"],
+    ["issue", "--unknown", "list"],
+    ["ci", "config", "--unknown", "compile"],
+    ["unknown", "list"],
+    ["api", "/projects", "-X", "POST"],
+    ["api", "/projects", "--method=PATCH"],
+    ["api", "/projects", "-XDELETE"],
+    ["api", "/projects", "--field", "name=nope"],
+    ["api", "/projects", "-Fname=nope"],
+    ["api", "/projects", "--raw-field=x=y"],
+    ["api", "/projects", "--form", "file=@secret"],
+    ["api", "/projects", "--input", "body.json"],
+    ["api", "/projects", "--header", "X-HTTP-Method-Override: DELETE"],
+    ["api", "/projects", "-HAuthorization: secret"],
+    ["api", "/projects", "--hostname", "evil.invalid"],
+    ["api", "https://evil.invalid/api/v4/projects"],
+    ["api", "graphql"],
+    ["api", "/graphql?query=query%20%7BcurrentUser%7Bname%7D%7D"],
+    ["api", "/graphql?query=mutation%20%7Bnoop%7D"],
+    ["api", "/graph%71l?query=query"],
+    ["api", "/projects/group%2Frepo"],
+    ["api", "/projects?_method=DELETE"],
+    ["api", "/projects?%5Fmethod=DELETE"],
+    ["api", "/projects", "/users"],
+    ["api", "/projects", "--output", "yaml"],
+    ["api", "/projects", "-X", "GET", "--method", "HEAD"],
+    ["-R", "owner/repo", "api", "/projects"],
+  ]) assert.equal(isReadOnlyGlabInvocation(args), false, args.join(" "));
+});
+
+test("cross-harness glab guard allows inspection and rejects policy or executable overrides", (t) => {
+  const realGlab = "/usr/bin/glab";
+  if (!existsSync(realGlab)) {
+    t.skip("real glab executable is absent");
+    return;
+  }
+  const guard = fileURLToPath(new URL("../src/guard-bin/glab", import.meta.url));
+  const isolatedConfig = mkdtempSync(join(tmpdir(), "agent-intercom-glab-config-"));
+  const environment = {
+    ...process.env,
+    XDG_CONFIG_HOME: isolatedConfig,
+    GLAB_CONFIG_DIR: "",
+    AGENT_INTERCOM_REAL_GLAB: realGlab,
+    AGENT_INTERCOM_GIT_POLICY: "full",
+    AGENT_INTERCOM_PERMISSION_PROFILE: "trusted",
+  };
+  const temporaryConfigDirs = () => readdirSync("/tmp").filter((entry) => entry.startsWith("agent-intercom-glab.")).sort();
+  const beforeTemporaryConfigs = temporaryConfigDirs();
+  try {
+    for (const args of [
+      ["--version"],
+      ["issue", "list", "--help"],
+      ["-R", "owner/repo", "mr", "diff", "--help"],
+      ["repo", "view", "--help"],
+      ["release", "ls", "--help"],
+      ["pipeline", "list", "--help"],
+      ["api", "--help"],
+    ]) {
+      const allowed = spawnSync(guard, args, { env: environment, encoding: "utf8" });
+      assert.equal(allowed.status, 0, `${args.join(" ")}: ${allowed.stdout}${allowed.stderr}`);
+    }
+    for (const args of [
+      ["issue", "create", "--title", "nope"],
+      ["-R", "https://evil.invalid/group/project", "issue", "list"],
+      ["--repo=git@evil.invalid:group/project", "issue", "list"],
+      ["issue", "view", "https://evil.invalid/group/project/-/issues/1"],
+      ["repo", "view", "evil.invalid:443/group/project"],
+      ["-g", "https://evil.invalid/group", "repo", "list"],
+      ["-R", "owner/repo", "issue", "create", "--title", "nope"],
+      ["issue", "--repo", "owner/repo", "create", "--title", "nope"],
+      ["mr", "merge", "42"],
+      ["repo", "delete", "owner/repo"],
+      ["release", "create", "v1"],
+      ["ci", "run"],
+      ["issue", "view", "42", "--web"],
+      ["ci", "get", "--with-variables"],
+      ["ci", "config", "--unknown", "compile"],
+      ["api", "/projects", "-XPOST"],
+      ["api", "graphql", "-XGET"],
+      ["api", "/projects", "-H", "X-HTTP-Method-Override: DELETE"],
+      ["-R", "owner/repo", "api", "/projects"],
+    ]) {
+      const blocked = spawnSync(guard, args, { env: environment, encoding: "utf8" });
+      assert.equal(blocked.status, 126, `${args.join(" ")}: ${blocked.stdout}${blocked.stderr}`);
+      assert.match(blocked.stderr, /blocked by Agent Intercom/);
+    }
+
+    const marker = join(isolatedConfig, "environment-bypass-marker");
+    const shellOverride = spawnSync(guard, ["-c", `touch ${marker}`, "-h"], {
+      env: { ...environment, AGENT_INTERCOM_REAL_GLAB: "/bin/sh" },
+      encoding: "utf8",
+    });
+    assert.equal(shellOverride.status, 127);
+    assert.equal(existsSync(marker), false);
+
+    const writableBin = join(isolatedConfig, "bin");
+    const writableGlab = join(writableBin, "glab");
+    mkdirSync(writableBin);
+    writeFileSync(writableGlab, `#!/bin/sh\ntouch ${marker}\n`);
+    chmodSync(writableGlab, 0o555);
+    const writableOverride = spawnSync(guard, ["--version"], {
+      env: { ...environment, AGENT_INTERCOM_REAL_GLAB: writableGlab },
+      encoding: "utf8",
+    });
+    assert.equal(writableOverride.status, 127);
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(temporaryConfigDirs(), beforeTemporaryConfigs);
+  } finally {
+    rmSync(isolatedConfig, { recursive: true, force: true });
+  }
+});
+
+test("glab guard strips command-level credentials and host overrides before execution", (t) => {
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), "agent-intercom-glab-env-proof-"));
+  const fakeGlab = join(root, "glab");
+  const guard = fileURLToPath(new URL("../src/guard-bin/glab", import.meta.url));
+  try {
+    writeFileSync(fakeGlab, `#!/bin/sh\nprintf 'GLAB_TOKEN=%s\\nGITLAB_TOKEN=%s\\nCI_JOB_TOKEN=%s\\nGLAB_CONFIG_DIR=%s\\nGLAB_HOST=%s\\nGLAB_DEBUG_HTTP_SET=%s\\nGLAB_ENABLE_CI_AUTOLOGIN_SET=%s\\nGLAB_IS_OAUTH2_SET=%s\\nGITLAB_CI_SET=%s\\nGITLAB_SKIP_TLS_VERIFY_SET=%s\\n' "$GLAB_TOKEN" "$GITLAB_TOKEN" "$CI_JOB_TOKEN" "$GLAB_CONFIG_DIR" "$GLAB_HOST" "\${GLAB_DEBUG_HTTP+x}" "\${GLAB_ENABLE_CI_AUTOLOGIN+x}" "\${GLAB_IS_OAUTH2+x}" "\${GITLAB_CI+x}" "\${GITLAB_SKIP_TLS_VERIFY+x}"\n`);
+    chmodSync(fakeGlab, 0o555);
+    const result = spawnSync("systemd-run", [
+      "--user", "--wait", "--pipe",
+      "--property=ProtectSystem=strict",
+      "--property=PrivateTmp=yes",
+      `--property=BindReadOnlyPaths=${fakeGlab}:/usr/bin/glab`,
+      "/usr/bin/env",
+      "AGENT_INTERCOM_REAL_GLAB=/usr/bin/glab",
+      "GLAB_TOKEN=GLAB_SENTINEL_TOKEN",
+      "GITLAB_TOKEN=GITLAB_SENTINEL_TOKEN",
+      "CI_JOB_TOKEN=GITLAB_SENTINEL_TOKEN",
+      "GLAB_HOST=evil.invalid",
+      "GLAB_DEBUG_HTTP=not-a-boolean",
+      "GLAB_ENABLE_CI_AUTOLOGIN=not-a-boolean",
+      "GLAB_IS_OAUTH2=not-a-boolean",
+      "GITLAB_CI=not-a-boolean",
+      "GITLAB_SKIP_TLS_VERIFY=not-a-boolean",
+      guard, "--version",
+    ], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /GLAB_SENTINEL_TOKEN|evil\.invalid/);
+    assert.match(result.stdout, /^GLAB_TOKEN=$/m);
+    assert.match(result.stdout, /^GITLAB_TOKEN=$/m);
+    assert.match(result.stdout, /^CI_JOB_TOKEN=$/m);
+    assert.match(result.stdout, /^GLAB_HOST=$/m);
+    assert.match(result.stdout, /^GLAB_DEBUG_HTTP_SET=$/m);
+    assert.match(result.stdout, /^GLAB_ENABLE_CI_AUTOLOGIN_SET=$/m);
+    assert.match(result.stdout, /^GLAB_IS_OAUTH2_SET=$/m);
+    assert.match(result.stdout, /^GITLAB_CI_SET=$/m);
+    assert.match(result.stdout, /^GITLAB_SKIP_TLS_VERIFY_SET=$/m);
+    assert.match(result.stdout, /^GLAB_CONFIG_DIR=\/tmp\/agent-intercom-glab\.[A-Za-z0-9]+$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("glab guard is executable and explicitly included in package files", () => {
+  const guard = fileURLToPath(new URL("../src/guard-bin/glab", import.meta.url));
+  assert.notEqual(statSync(guard).mode & 0o111, 0);
+  const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+  assert.ok(packageJson.files.includes("src/guard-bin/glab"));
+});
+
 test("Tea guard is executable and explicitly included in package files", () => {
   const guard = fileURLToPath(new URL("../src/guard-bin/tea", import.meta.url));
   assert.notEqual(statSync(guard).mode & 0o111, 0);
   const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
   assert.ok(packageJson.files.includes("src/guard-bin/tea"));
+});
+
+test("hardened systemd profile makes host glab configuration inaccessible", (t) => {
+  const glabConfig = join(homedir(), ".config", "glab-cli", "config.yml");
+  if (!supportsHardenedUserUnits()) {
+    t.skip("systemd 257+ hardened user namespaces are unavailable");
+    return;
+  }
+  if (!existsSync(glabConfig)) {
+    t.skip("host glab configuration is absent");
+    return;
+  }
+  assert.equal(spawnSync("/bin/sh", ["-c", `test -r ${JSON.stringify(glabConfig)}`]).status, 0, "host glab config proof must be non-vacuous");
+  const reviewer = DEFAULT_CONFIG.permissionProfiles["review-readonly"];
+  assert.ok(reviewer);
+  const properties = buildPermissionUnitProperties(reviewer, process.cwd());
+  const result = spawnSync("systemd-run", [
+    "--user", "--wait", "--pipe",
+    ...properties.map((property) => `--property=${property}`),
+    "/bin/sh", "-c", `! test -r ${JSON.stringify(glabConfig)} && ! cat ${JSON.stringify(glabConfig)} >/dev/null 2>&1`,
+  ], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
 test("hardened systemd profile makes host Tea configuration inaccessible", (t) => {

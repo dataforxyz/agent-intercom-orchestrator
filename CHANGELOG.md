@@ -10,7 +10,7 @@
 - Apply rootless systemd hardening, a read-only host filesystem with explicit assigned-workspace and per-worker harness-state write allowances, read-only Git metadata mounts, user/system D-Bus masking, PID isolation, common credential path masking, and an allowlisted launch environment to restricted workers across all harnesses.
 - Mask rootful and rootless host container/VM daemon sockets and host-mutating systemd Varlink, udev, polkit, and Tailscale endpoints for restricted workers, preventing `PrivateUsers=self` supplementary-group remapping from preserving accidental host control access.
 - Add private per-worker homes and harness configuration, clean-host state bootstrapping, and a supervised short-path Intercom broker proxy so restricted workers retain communication without sharing writable harness state.
-- Add packaged cross-harness `git`, `gh`, and Forgejo `tea` guards plus a Pi `tool_call` policy hook so read-only Git profiles allow explicitly recognized inspection while blocking repository and hosting-service mutations.
+- Add packaged cross-harness `git`, `gh`, GitLab `glab`, and Forgejo `tea` guards plus a Pi `tool_call` policy hook so read-only Git profiles allow explicitly recognized inspection while blocking repository and hosting-service mutations.
 - Report permission profiles and managed-user-namespace helper readiness through `agent_fleet` discovery and doctor output.
 - Propagate `fresh: true` to harness launchers so Codex workers discard persisted bridge thread state instead of reusing the prior rollout under a new systemd run.
 

@@ -1,0 +1,214 @@
+#!/bin/sh
+set -f
+
+is_read_only_api() {
+  method=GET
+  method_seen=0
+  endpoint=
+  endpoint_count=0
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      --) return 1 ;;
+      --field|-F|--form|--raw-field|-f|--input|--header|-H|--hostname) return 1 ;;
+      --field=*|--form=*|--raw-field=*|--input=*|--header=*|--hostname=*|-F?*|-f?*|-H?*) return 1 ;;
+      --method|-X)
+        [ "$method_seen" -eq 0 ] && [ "$#" -gt 0 ] || return 1
+        method_seen=1
+        method=$1
+        shift
+        ;;
+      --method=*)
+        [ "$method_seen" -eq 0 ] || return 1
+        method_seen=1
+        method=${arg#--method=}
+        ;;
+      -X?*)
+        [ "$method_seen" -eq 0 ] || return 1
+        method_seen=1
+        method=${arg#-X}
+        method=${method#=}
+        ;;
+      --output)
+        [ "$#" -gt 0 ] || return 1
+        case "$1" in json|ndjson) ;; *) return 1 ;; esac
+        shift
+        ;;
+      --output=*)
+        case "${arg#--output=}" in json|ndjson) ;; *) return 1 ;; esac
+        ;;
+      --include|-i|--paginate|--silent) ;;
+      -*) return 1 ;;
+      *)
+        endpoint_count=$((endpoint_count + 1))
+        endpoint=$arg
+        ;;
+    esac
+  done
+  [ "$endpoint_count" -eq 1 ] || return 1
+  case "$method" in GET|get|HEAD|head) ;; *) return 1 ;; esac
+  case "$endpoint" in *://*|//*|*\\*|*%*) return 1 ;; esac
+  lower_endpoint=$(printf '%s' "$endpoint" | /usr/bin/tr '[:upper:]' '[:lower:]')
+  case "/$lower_endpoint" in */graphql|*/graphql\?*|*/graphql/*) return 1 ;; esac
+  case "$lower_endpoint" in *\?method=*|*\&method=*|*\?_method=*|*\&_method=*|*\?http_method_override=*|*\&http_method_override=*|*%5fmethod=*) return 1 ;; esac
+  return 0
+}
+
+is_namespace_path() {
+  value=$1
+  require_slash=$2
+  [ -n "$value" ] || return 1
+  case "$value" in
+    /*|*/|*//*|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
+  if [ "$require_slash" -eq 1 ]; then
+    case "$value" in */*) ;; *) return 1 ;; esac
+  fi
+  old_ifs=$IFS
+  IFS=/
+  set -- $value
+  IFS=$old_ifs
+  for segment do
+    case "$segment" in ""|.|..) return 1 ;; esac
+  done
+  return 0
+}
+
+has_unsafe_external_target() {
+  for value do
+    sanitized=$(printf '%s' "$value" | /usr/bin/tr -d '\001-\037\177')
+    [ "$sanitized" = "$value" ] || return 0
+    case "$value" in *://*|//*|*\\*|*@*|*:*|*%*) return 0 ;; esac
+  done
+  return 1
+}
+
+is_read_only() {
+  [ "$#" -gt 0 ] || return 0
+  forbidden_option=0
+  for arg do
+    case "$arg" in
+      --help|-h) return 0 ;;
+      --web|--web=*|-w|-w?*|--with-variables|--with-variables=*) forbidden_option=1 ;;
+    esac
+  done
+  [ "$forbidden_option" -eq 0 ] || return 1
+  if [ "$#" -eq 1 ]; then
+    case "$1" in --version|-v|version) return 0 ;; esac
+  fi
+  case "$1" in help) return 0 ;; api) shift; is_read_only_api "$@"; return $? ;; esac
+  has_unsafe_external_target "$@" && return 1
+
+  command=
+  subcommand=
+  third=
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      --) return 1 ;;
+      -R|--repo)
+        [ "$#" -gt 0 ] || return 1
+        is_namespace_path "$1" 1 || return 1
+        shift
+        ;;
+      -g|--group)
+        [ "$#" -gt 0 ] || return 1
+        is_namespace_path "$1" 0 || return 1
+        shift
+        ;;
+      --repo=?*) is_namespace_path "${arg#--repo=}" 1 || return 1 ;;
+      --group=?*) is_namespace_path "${arg#--group=}" 0 || return 1 ;;
+      -R?*) value=${arg#-R}; value=${value#=}; is_namespace_path "$value" 1 || return 1 ;;
+      -g?*) value=${arg#-g}; value=${value#=}; is_namespace_path "$value" 0 || return 1 ;;
+      -*)
+        [ -n "$command" ] && [ -n "$subcommand" ] || return 1
+        if { [ "$command" = ci ] || [ "$command" = pipeline ]; } && [ "$subcommand" = config ] && [ -z "$third" ]; then return 1; fi
+        ;;
+      *)
+        if [ -z "$command" ]; then command=$arg
+        elif [ -z "$subcommand" ]; then subcommand=$arg
+        elif [ -z "$third" ]; then third=$arg
+        fi
+        ;;
+    esac
+  done
+
+  [ -n "$command" ] && [ -n "$subcommand" ] || return 1
+  [ "$command" != api ] || return 1
+  case "$command" in pipeline) command=ci ;; esac
+
+  case "$command:$subcommand" in
+    issue:list|issue:ls|issue:view|issue:show) ;;
+    mr:approvers|mr:diff|mr:issues|mr:list|mr:ls|mr:view|mr:show) ;;
+    repo:contributors|repo:list|repo:ls|repo:search|repo:view) ;;
+    release:list|release:ls|release:view) ;;
+    ci:get|ci:list|ci:status|ci:trace) ;;
+    ci:config) [ "$third" = compile ] || return 1 ;;
+    *) return 1 ;;
+  esac
+
+  return 0
+}
+
+if ! is_read_only "$@"; then
+  printf '%s\n' "glab ${1:-write} ${2:-} ${3:-} blocked by Agent Intercom read-only remote policy" >&2
+  exit 126
+fi
+
+real_glab=${AGENT_INTERCOM_REAL_GLAB:-/usr/bin/glab}
+case "$real_glab" in /*) ;; *) printf '%s\n' "Refusing untrusted real glab path $real_glab: path is not absolute" >&2; exit 127 ;; esac
+resolved=$(/usr/bin/readlink -f -- "$real_glab" 2>/dev/null) || resolved=
+case "$resolved" in */glab) ;; *) printf '%s\n' "Refusing untrusted real glab path $real_glab: resolved executable is not named glab" >&2; exit 127 ;; esac
+[ -x "$resolved" ] || { printf '%s\n' "Refusing untrusted real glab path $real_glab: executable is unavailable" >&2; exit 127; }
+current=$resolved
+while [ "$current" != / ]; do
+  if [ -w "$current" ]; then
+    printf '%s\n' "Refusing untrusted real glab path $real_glab: path is worker-writable: $current" >&2
+    exit 127
+  fi
+  current=${current%/*}
+  [ -n "$current" ] || current=/
+done
+if [ -w / ]; then
+  printf '%s\n' "Refusing untrusted real glab path $real_glab: filesystem root is worker-writable" >&2
+  exit 127
+fi
+
+# Do not let a worker-selected pager execute after an allowed inspection, and
+# keep HTTP debug output from exposing authorization headers.
+umask 077
+private_config_dir=$(/usr/bin/mktemp -d /tmp/agent-intercom-glab.XXXXXX) || {
+  printf '%s\n' "Could not create private temporary glab configuration" >&2
+  exit 127
+}
+cleanup() {
+  /usr/bin/rm -rf -- "$private_config_dir"
+}
+trap cleanup EXIT HUP INT TERM
+if ! printf 'hosts: {}\n' > "$private_config_dir/config.yml"; then
+  printf '%s\n' "Could not initialize private temporary glab configuration" >&2
+  exit 127
+fi
+/usr/bin/chmod 600 "$private_config_dir/config.yml" || exit 127
+
+unset GLAB_CONFIG GLAB_CONFIG_FILE GLAB_HOST DEBUG GLAB_DEBUG GLAB_DEBUG_HTTP GLAB_ENABLE_CI_AUTOLOGIN GLAB_IS_OAUTH2
+unset GITLAB_CI GITLAB_HOST GITLAB_URL GITLAB_URI GITLAB_API_HOST GITLAB_API_URL GITLAB_GRAPHQL_URL GITLAB_TOKEN_FILE
+unset GITLAB_CA_CERT GITLAB_TLS_CA_FILE GITLAB_CLIENT_CERT GITLAB_CLIENT_KEY GITLAB_SKIP_TLS_VERIFY
+unset GLAB_TOKEN GITLAB_TOKEN GITLAB_ACCESS_TOKEN GITLAB_PRIVATE_TOKEN GITLAB_OAUTH_TOKEN GITLAB_JOB_TOKEN GITLAB_CLIENT_SECRET
+unset OAUTH_TOKEN PRIVATE_TOKEN JOB_TOKEN CI_JOB_TOKEN CI_JOB_TOKEN_FILE CI_BUILD_TOKEN CI_JOB_JWT CI_JOB_JWT_V2
+unset CI_DEPLOY_PASSWORD CI_REGISTRY_PASSWORD CI_REPOSITORY_URL
+
+GLAB_CONFIG_DIR=$private_config_dir
+GLAB_PAGER=cat
+PAGER=cat
+GLAB_EDITOR=/bin/false
+GLAB_BROWSER=/bin/false
+BROWSER=/bin/false
+GLAB_CHECK_UPDATE=false
+GLAB_SEND_TELEMETRY=false
+export GLAB_CONFIG_DIR GLAB_PAGER PAGER GLAB_EDITOR GLAB_BROWSER BROWSER GLAB_CHECK_UPDATE GLAB_SEND_TELEMETRY
+
+"$resolved" "$@"
+exit $?

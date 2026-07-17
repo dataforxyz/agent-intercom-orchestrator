@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -33,6 +34,10 @@ const SENSITIVE_HOME_PATHS = [
   "~/.azure",
   "~/.config/gcloud",
   "~/.config/gh",
+  "~/.config/glab-cli",
+  "~/.config/glab",
+  "~/.glab-cli",
+  "~/.glab",
   "~/.config/tea",
   "~/.config/gitea",
   "~/.config/forgejo",
@@ -52,7 +57,59 @@ const SCRUBBED_CREDENTIAL_ENV: Record<string, string> = {
   GIT_CONFIG_SYSTEM: "/dev/null",
   GH_TOKEN: "",
   GITHUB_TOKEN: "",
+  GLAB_TOKEN: "",
+  GLAB_CONFIG: "",
+  GLAB_CONFIG_DIR: "",
+  GLAB_CONFIG_FILE: "",
+  GLAB_HOST: "",
+  GLAB_DEBUG: "",
+  GLAB_DEBUG_HTTP: "",
+  GLAB_ENABLE_CI_AUTOLOGIN: "",
+  GLAB_IS_OAUTH2: "",
+  GLAB_NO_PROMPT: "1",
+  GLAB_CHECK_UPDATE: "false",
+  GLAB_SEND_TELEMETRY: "false",
   GITLAB_TOKEN: "",
+  GITLAB_TOKEN_FILE: "",
+  GITLAB_ACCESS_TOKEN: "",
+  GITLAB_PRIVATE_TOKEN: "",
+  GITLAB_OAUTH_TOKEN: "",
+  GITLAB_JOB_TOKEN: "",
+  GITLAB_CLIENT_SECRET: "",
+  GITLAB_CLIENT_ID: "",
+  GITLAB_CI: "",
+  GITLAB_API_HOST: "",
+  GITLAB_API_URL: "",
+  GITLAB_GRAPHQL_URL: "",
+  GITLAB_HOST: "",
+  GITLAB_URL: "",
+  GITLAB_URI: "",
+  GITLAB_REPO: "",
+  GITLAB_HEAD_REPO: "",
+  GITLAB_CA_CERT: "",
+  GITLAB_TLS_CA_FILE: "",
+  GITLAB_CLIENT_CERT: "",
+  GITLAB_CLIENT_KEY: "",
+  GITLAB_SKIP_TLS_VERIFY: "",
+  OAUTH_TOKEN: "",
+  PRIVATE_TOKEN: "",
+  JOB_TOKEN: "",
+  CI_JOB_TOKEN: "",
+  CI_JOB_TOKEN_FILE: "",
+  CI_BUILD_TOKEN: "",
+  CI_JOB_JWT: "",
+  CI_JOB_JWT_V2: "",
+  CI_PROJECT_PATH: "",
+  CI_DEPLOY_PASSWORD: "",
+  CI_REGISTRY_PASSWORD: "",
+  CI_REPOSITORY_URL: "",
+  CI_SERVER_URL: "",
+  CI_SERVER_HOST: "",
+  CI_SERVER_FQDN: "",
+  CI_SERVER_PROTOCOL: "",
+  CI_SERVER_TLS_CA_FILE: "",
+  CI_SERVER_TLS_CERT_FILE: "",
+  CI_SERVER_TLS_KEY_FILE: "",
   TEA_CONFIG: "",
   TEA_CONFIG_FILE: "",
   TEA_TOKEN: "",
@@ -117,6 +174,14 @@ function expandHome(path: string): string {
 
 function quoteSystemdPath(path: string): string {
   return JSON.stringify(path);
+}
+
+function existingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // PrivateUsers=self preserves the worker uid but maps unrelated host uids/gids,
@@ -272,6 +337,7 @@ export function buildPermissionUnitProperties(
     const metadataPaths = gitMetadataPaths.length ? gitMetadataPaths : [resolve(cwd, ".git")];
     for (const path of [...new Set(metadataPaths.map((item) => resolve(item)))]) {
       properties.push(`ReadOnlyPaths=${quoteSystemdPath(`-${path}`)}`);
+      if (existingDirectory(path)) properties.push(`InaccessiblePaths=${quoteSystemdPath(`-${resolve(path, "glab-cli")}`)}`);
     }
   }
   for (const path of profile.inaccessiblePaths ?? []) {
@@ -420,6 +486,146 @@ export function isReadOnlyTeaInvocation(args: string[]): boolean {
   return true;
 }
 
+interface NormalizedGlabArgs {
+  args: string[];
+  targetFlagSeen: boolean;
+}
+
+function isSafeGlabNamespacePath(value: string, requireSlash: boolean): boolean {
+  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(value)) return false;
+  const segments = value.split("/");
+  if (segments.some((segment) => segment === "." || segment === "..")) return false;
+  return !requireSlash || segments.length > 1;
+}
+
+function hasUnsafeGlabExternalTarget(args: string[]): boolean {
+  return args.some((arg) => /[\u0000-\u001f\u007f]/.test(arg)
+    || arg.includes("://")
+    || arg.startsWith("//")
+    || arg.includes("\\")
+    || arg.includes("@")
+    || arg.includes(":")
+    || arg.includes("%"));
+}
+
+function normalizeGlabTargetArgs(args: string[]): NormalizedGlabArgs | undefined {
+  const normalized: string[] = [];
+  let targetFlagSeen = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") return undefined;
+    if (arg === "-R" || arg === "--repo") {
+      if (index + 1 >= args.length || !isSafeGlabNamespacePath(args[index + 1], true)) return undefined;
+      targetFlagSeen = true;
+      index += 1;
+      continue;
+    }
+    if (arg === "-g" || arg === "--group") {
+      if (index + 1 >= args.length || !isSafeGlabNamespacePath(args[index + 1], false)) return undefined;
+      targetFlagSeen = true;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--repo=")) {
+      if (!isSafeGlabNamespacePath(arg.slice("--repo=".length), true)) return undefined;
+      targetFlagSeen = true;
+      continue;
+    }
+    if (arg.startsWith("--group=")) {
+      if (!isSafeGlabNamespacePath(arg.slice("--group=".length), false)) return undefined;
+      targetFlagSeen = true;
+      continue;
+    }
+    if (/^-R.+/.test(arg)) {
+      if (!isSafeGlabNamespacePath(arg.slice(2).replace(/^=/, ""), true)) return undefined;
+      targetFlagSeen = true;
+      continue;
+    }
+    if (/^-g.+/.test(arg)) {
+      if (!isSafeGlabNamespacePath(arg.slice(2).replace(/^=/, ""), false)) return undefined;
+      targetFlagSeen = true;
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return { args: normalized, targetFlagSeen };
+}
+
+function readOnlyGlabApiArgs(args: string[]): boolean {
+  let method = "GET";
+  let methodSeen = false;
+  let endpoint: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") return false;
+    if (["--field", "-F", "--form", "--raw-field", "-f", "--input", "--header", "-H", "--hostname"].includes(arg)) return false;
+    if (/^(?:--field|--form|--raw-field|--input|--header|--hostname)=/.test(arg) || /^-(?:F|f|H).+/.test(arg)) return false;
+    if (arg === "--method" || arg === "-X") {
+      if (methodSeen || index + 1 >= args.length) return false;
+      methodSeen = true;
+      method = args[++index].toUpperCase();
+      continue;
+    }
+    if (arg.startsWith("--method=")) {
+      if (methodSeen) return false;
+      methodSeen = true;
+      method = arg.slice("--method=".length).toUpperCase();
+      continue;
+    }
+    if (/^-X(?:=)?.+/.test(arg)) {
+      if (methodSeen) return false;
+      methodSeen = true;
+      method = arg.slice(2).replace(/^=/, "").toUpperCase();
+      continue;
+    }
+    if (arg === "--output") {
+      if (index + 1 >= args.length || !["json", "ndjson"].includes(args[++index])) return false;
+      continue;
+    }
+    if (arg.startsWith("--output=")) {
+      if (!["json", "ndjson"].includes(arg.slice("--output=".length))) return false;
+      continue;
+    }
+    if (["--include", "-i", "--paginate", "--silent"].includes(arg)) continue;
+    if (arg.startsWith("-")) return false;
+    if (endpoint !== undefined) return false;
+    endpoint = arg;
+  }
+  if (!endpoint || !["GET", "HEAD"].includes(method)) return false;
+  if (endpoint.includes("://") || endpoint.startsWith("//") || endpoint.includes("\\") || endpoint.includes("%")) return false;
+  const lowerEndpoint = endpoint.toLowerCase();
+  if (/(^|\/)graphql(?:[/?]|$)/.test(lowerEndpoint)) return false;
+  if (/[?&](?:_?method|http_method_override)=/i.test(lowerEndpoint) || /%5fmethod=/i.test(lowerEndpoint)) return false;
+  return true;
+}
+
+export function isReadOnlyGlabInvocation(args: string[]): boolean {
+  if (args.length === 0) return true;
+  if (args.some((arg) => arg === "--help" || arg === "-h")) return true;
+  if (args.length === 1 && ["--version", "-v", "version"].includes(args[0])) return true;
+  if (args[0] === "help") return true;
+  if (args.some((arg) => arg === "--web" || arg.startsWith("--web=") || arg === "-w" || /^-w.+/.test(arg) || arg === "--with-variables" || arg.startsWith("--with-variables="))) return false;
+  if (args[0] === "api") return readOnlyGlabApiArgs(args.slice(1));
+  if (hasUnsafeGlabExternalTarget(args)) return false;
+
+  const normalized = normalizeGlabTargetArgs(args);
+  if (!normalized || normalized.args.length < 2) return false;
+  let command = normalized.args[0];
+  const subcommand = normalized.args[1];
+  if (command === "api") return false;
+  if (command === "pipeline") command = "ci";
+
+  const safeSubcommands: Record<string, Set<string>> = {
+    issue: new Set(["list", "ls", "view", "show"]),
+    mr: new Set(["approvers", "diff", "issues", "list", "ls", "view", "show"]),
+    repo: new Set(["contributors", "list", "ls", "search", "view"]),
+    release: new Set(["list", "ls", "view"]),
+    ci: new Set(["get", "list", "status", "trace"]),
+  };
+  if (command === "ci" && subcommand === "config") return normalized.args[2] === "compile";
+  return safeSubcommands[command]?.has(subcommand) ?? false;
+}
+
 function shellWords(input: string): string[] {
   return [...input.matchAll(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/g)].map((match) => match[0].replace(/^(?:"|')|(?:"|')$/g, ""));
 }
@@ -444,6 +650,12 @@ function gitInvocationReason(command: string): string | undefined {
   for (const match of teaInvocations) {
     if (!isReadOnlyTeaInvocation(shellWords((match[1] ?? "").trim()))) {
       return "Forgejo write operation is blocked by the read-only Git policy";
+    }
+  }
+  const glabInvocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?glab(?:\s+([^\n;&|)]*))?/gi);
+  for (const match of glabInvocations) {
+    if (!isReadOnlyGlabInvocation(shellWords((match[1] ?? "").trim()))) {
+      return "GitLab write operation is blocked by the read-only Git policy";
     }
   }
   return undefined;

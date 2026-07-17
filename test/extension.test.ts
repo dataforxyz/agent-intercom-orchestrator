@@ -275,6 +275,9 @@ test("persistent OpenCode spawn persists resumable state before returning ready"
     if (spawnSync("sh", ["-c", "command -v tea >/dev/null"]).status === 0) {
       assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_TEA=")));
     }
+    if (spawnSync("sh", ["-c", "command -v glab >/dev/null"]).status === 0) {
+      assert.ok(systemdArgs.some((arg) => arg.startsWith("--setenv=AGENT_INTERCOM_REAL_GLAB=")));
+    }
     assert.ok(systemdArgs.some((arg) => arg.includes("clean-env-launcher.mjs")));
     const state = JSON.parse(await readFile(join(orchestratorDir, "worker-runtime", "state-race", "state-race.state.json"), "utf8"));
     assert.equal(state.workerId, "state-race");
