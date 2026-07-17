@@ -8,7 +8,7 @@ import sys
 import uuid
 
 SOCKET_PATH = os.environ.get("AGENT_INTERCOM_REMOTE_SOCKET", os.path.expanduser("~/.pi/bridge-agent/intercom/broker.sock"))
-EXPECTED_HASH = os.environ.get("AGENT_INTERCOM_POLICY_HASH", "78178a5fd57c353342642968d3a27262ed02cb236927723675d875959413dce3")
+EXPECTED_HASH = os.environ.get("AGENT_INTERCOM_POLICY_HASH", "f3b00e503631bc91123aedfbcf1df72cc9913e1893c09728b2c598f3dcdfdfe0")
 request_id = str(uuid.uuid4())
 request = json.dumps({"type": "health", "requestId": request_id}, separators=(",", ":")).encode()
 
@@ -37,7 +37,7 @@ if not (
     and response.get("protocol") == "pi-intercom"
     and response.get("version") == 3
     and contract.get("feature") == "remote-access-v1"
-    and contract.get("policySemanticsVersion") == 1
+    and contract.get("policySemanticsVersion") == 2
     and contract.get("policySemanticsHash") == EXPECTED_HASH
 ):
     raise SystemExit("remote gateway policy contract is absent or incompatible")

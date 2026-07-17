@@ -4,7 +4,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { issueRemoteEnrollmentFile, revokeRemoteSubtree } from "../src/intercom-access.ts";
+import { issueDelegatedEnrollmentFile, issueRemoteEnrollmentFile, revokeRemoteSubtree } from "../src/intercom-access.ts";
 
 function frame(message: unknown): Buffer {
   const payload = Buffer.from(JSON.stringify(message));
@@ -14,7 +14,7 @@ function frame(message: unknown): Buffer {
   return output;
 }
 
-async function fakeBroker(socketPath: string, policyHash = "78178a5fd57c353342642968d3a27262ed02cb236927723675d875959413dce3") {
+async function fakeBroker(socketPath: string, policyHash = "f3b00e503631bc91123aedfbcf1df72cc9913e1893c09728b2c598f3dcdfdfe0") {
   await mkdir(dirname(socketPath), { recursive: true });
   const requests: any[] = [];
   const server = net.createServer((socket) => {
@@ -34,9 +34,18 @@ async function fakeBroker(socketPath: string, policyHash = "78178a5fd57c35334264
           version: 3,
           remoteAccess: {
             feature: "remote-access-v1",
-            policySemanticsVersion: 1,
+            policySemanticsVersion: 2,
             policySemanticsHash: policyHash,
           },
+        }));
+      } else if (request.action === "issue_child_enrollment") {
+        socket.end(frame({
+          type: "access_control_result",
+          requestId: request.requestId,
+          action: "issue_child_enrollment",
+          enrollmentToken: "delegated-one-use-secret",
+          expiresAt: 2_000_000_000_000,
+          parentSessionId: request.access.sessionId,
         }));
       } else if (request.action === "revoke_subtree") {
         socket.end(frame({
@@ -88,6 +97,36 @@ test("enrollment CLI support writes the one-use secret only to a private file", 
     assert.equal(JSON.stringify(result).includes("one-use-secret"), false);
     assert.equal(broker.requests[1].adminToken, "a".repeat(43));
     assert.equal(broker.requests[1].enrollment.parentSessionId, "local-root");
+  } finally {
+    broker.server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("delegated enrollment authenticates with a private parent credential and writes only the child token", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-intercom-delegate-cli-"));
+  const agentDir = join(root, "agent");
+  const intercomDir = join(agentDir, "intercom");
+  const parentCredential = join(root, "parent.json");
+  const childCredential = join(root, "child.json");
+  await mkdir(intercomDir, { recursive: true });
+  await writeFile(parentCredential, JSON.stringify({ version: 1, sessionCredential: "parent-secret", sessionId: "parent-id", generation: 2 }), { mode: 0o600 });
+  const broker = await fakeBroker(join(intercomDir, "broker.sock"));
+  try {
+    const result = await issueDelegatedEnrollmentFile({
+      agentDir,
+      credentialPath: parentCredential,
+      name: "ika/lead",
+      outputPath: childCredential,
+      canDelegate: true,
+      maxDepth: 3,
+      maxChildren: 2,
+    });
+    assert.equal(JSON.stringify(result).includes("delegated-one-use-secret"), false);
+    assert.deepEqual(JSON.parse(await readFile(childCredential, "utf8")), { version: 1, enrollmentToken: "delegated-one-use-secret" });
+    assert.equal(broker.requests[1].access.sessionCredential, "parent-secret");
+    assert.equal(broker.requests[1].enrollment.canDelegate, true);
+    assert.equal(broker.requests[1].enrollment.maxDepth, 3);
   } finally {
     broker.server.close();
     await rm(root, { recursive: true, force: true });

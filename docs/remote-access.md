@@ -15,7 +15,7 @@ Never forward `broker.sock`. Possession of the remote socket alone does not perm
 agent-intercom-access health
 ```
 
-The command succeeds only when protocol v3, `remote-access-v1`, policy semantic version `1`, and the pinned golden-vector hash all match. Tunnel supervisors must stop forwarding and must not restart a remote manager when this check fails.
+The command succeeds only when protocol v3, `remote-access-v1`, policy semantic version `2`, and the pinned golden-vector hash all match. Tunnel supervisors must stop forwarding and must not restart a remote manager when this check fails.
 
 ## Issue a one-use enrollment
 
@@ -27,7 +27,11 @@ agent-intercom-access enroll \
   --name remote-host/manager \
   --host remote-host \
   --output ~/.local/state/agent-intercom/remote-manager-credential.json \
-  --ttl-minutes 10
+  --ttl-minutes 10 \
+  --can-delegate true \
+  --max-depth 3 \
+  --max-children 4 \
+  --confirm-delegation remote-host/manager
 ```
 
 Transfer that file through the protected deployment channel and set this in the remote manager service:
@@ -37,6 +41,21 @@ AGENT_INTERCOM_ACCESS_CREDENTIAL_PATH=/private/path/credential.json
 ```
 
 On first connection, the client atomically replaces the enrollment token with its broker-assigned session ID, generation, and reconnect credential. Credentials must never be copied into prompts, Intercom messages, transcripts, command arguments, issue comments, or logs.
+
+Delegation privilege is optional and requires exact human confirmation. The broker fixes the child's parent/root/host/depth and refuses requested limits wider than the parent. On the remote host, an enrolled manager can write a narrower child token without exposing either credential:
+
+```bash
+agent-intercom-access delegate \
+  --credential /private/path/manager-credential.json \
+  --name remote-host/lead \
+  --output /private/path/lead-enrollment.json \
+  --can-delegate true \
+  --max-depth 3 \
+  --max-children 2 \
+  --confirm-delegation remote-host/lead
+```
+
+Pending child enrollments count against the parent's child limit, preventing parallel one-use tokens from bypassing the quota.
 
 ## Revoke
 
@@ -66,9 +85,10 @@ Install `examples/check-remote-gateway.py` on the remote host and configure `exa
 2. Start the authenticated tunnel without a manager.
 3. Verify remote health and prove an unenrolled process cannot register or list sessions.
 4. Enroll one disposable manager directly under the local root.
-5. Verify it sees only itself and its direct parent.
-6. Test reconnect after a tunnel outage.
-7. Revoke it and prove pending delivery, replay, and reconnect all fail.
-8. Only then enroll the production remote manager.
+5. Verify it sees only its ancestor chain and that unrelated local sessions remain hidden.
+6. Delegate a lead and worker; verify ancestors communicate symmetrically while siblings and cousins remain hidden.
+7. Test reconnect after a tunnel outage.
+8. Revoke the manager and prove the full subtree, pending delivery, replay, and reconnect all fail.
+9. Only then enroll the production remote manager.
 
 Rollback is fail-closed: stop the authenticated tunnel and remote manager. Do not restore raw `broker.sock` forwarding. Restore the previous adapter build only after remote services are stopped; an old broker intentionally provides no `remote-gateway.sock`.

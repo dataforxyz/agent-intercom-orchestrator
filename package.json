@@ -57,7 +57,7 @@
     "typebox": "*"
   },
   "dependencies": {
-    "@dataforxyz/agent-intercom-core": "git+https://github.com/dataforxyz/agent-intercom-core.git#4470fa077c58d9592c5775b85d88406857ed7a8d"
+    "@dataforxyz/agent-intercom-core": "git+https://github.com/dataforxyz/agent-intercom-core.git#cb5d2212912db0cd8abbb16ab08e4b539424a05d"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "*",

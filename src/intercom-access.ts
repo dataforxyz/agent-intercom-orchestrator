@@ -15,6 +15,21 @@ export interface IssueRemoteEnrollmentOptions {
   agentDir?: string;
   ttlMs?: number;
   expiresAt?: number;
+  canDelegate?: boolean;
+  maxDepth?: number;
+  maxChildren?: number;
+}
+
+export interface IssueDelegatedEnrollmentOptions {
+  credentialPath: string;
+  name: string;
+  outputPath: string;
+  agentDir?: string;
+  ttlMs?: number;
+  expiresAt?: number;
+  canDelegate?: boolean;
+  maxDepth?: number;
+  maxChildren?: number;
 }
 
 export interface IssuedRemoteEnrollmentFile {
@@ -162,6 +177,9 @@ export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOp
       remoteHostId: requireText(options.remoteHostId, "remote host ID"),
       ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
       ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
+      ...(options.canDelegate !== undefined ? { canDelegate: options.canDelegate } : {}),
+      ...(options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {}),
+      ...(options.maxChildren !== undefined ? { maxChildren: options.maxChildren } : {}),
     },
   });
   if (
@@ -172,6 +190,53 @@ export async function issueRemoteEnrollmentFile(options: IssueRemoteEnrollmentOp
     || typeof response.expiresAt !== "number"
   ) {
     throw new Error(response?.type === "error" ? `Intercom enrollment was denied: ${String(response.code ?? "unknown")}` : "Invalid Intercom enrollment response");
+  }
+  const outputPath = resolve(options.outputPath);
+  writePrivateJson(outputPath, { version: 1, enrollmentToken: response.enrollmentToken });
+  return { path: outputPath, expiresAt: response.expiresAt };
+}
+
+export async function issueDelegatedEnrollmentFile(options: IssueDelegatedEnrollmentOptions): Promise<IssuedRemoteEnrollmentFile> {
+  const agentDir = agentDirectory(options.agentDir);
+  await checkRemoteAccessHealth(agentDir);
+  const socketPath = join(agentDir, "intercom", "broker.sock");
+  const credential = JSON.parse(readFileSync(resolve(options.credentialPath), "utf8")) as Record<string, unknown>;
+  if (
+    credential.version !== 1
+    || typeof credential.sessionCredential !== "string"
+    || typeof credential.sessionId !== "string"
+    || typeof credential.generation !== "number"
+    || !Number.isSafeInteger(credential.generation)
+  ) {
+    throw new Error("Invalid parent Intercom session credential");
+  }
+  const requestId = randomUUID();
+  const response = await exchange(socketPath, {
+    type: "access_control",
+    requestId,
+    action: "issue_child_enrollment",
+    access: {
+      sessionCredential: credential.sessionCredential,
+      sessionId: credential.sessionId,
+      generation: credential.generation,
+    },
+    enrollment: {
+      name: requireText(options.name, "child principal name"),
+      ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}),
+      ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
+      ...(options.canDelegate !== undefined ? { canDelegate: options.canDelegate } : {}),
+      ...(options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {}),
+      ...(options.maxChildren !== undefined ? { maxChildren: options.maxChildren } : {}),
+    },
+  });
+  if (
+    response?.type !== "access_control_result"
+    || response.requestId !== requestId
+    || response.action !== "issue_child_enrollment"
+    || typeof response.enrollmentToken !== "string"
+    || typeof response.expiresAt !== "number"
+  ) {
+    throw new Error(response?.type === "error" ? `Intercom child enrollment was denied: ${String(response.code ?? "unknown")}` : "Invalid Intercom child enrollment response");
   }
   const outputPath = resolve(options.outputPath);
   writePrivateJson(outputPath, { version: 1, enrollmentToken: response.enrollmentToken });
