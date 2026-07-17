@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export function systemdUserManagerAvailable(): boolean {
   return process.platform === "linux" && spawnSync("systemctl", ["--user", "show-environment"], { stdio: "ignore" }).status === 0;
@@ -13,12 +16,25 @@ export function systemdVersion(): number | undefined {
 
 export function supportsUserMountNamespaces(): boolean {
   if (!systemdUserManagerAvailable()) return false;
-  const probe = spawnSync("systemd-run", [
-    "--user", "--wait", "--pipe", "--quiet",
-    "--property=ProtectSystem=strict",
-    "/bin/true",
-  ], { encoding: "utf8", timeout: 10_000 });
-  return probe.status === 0;
+  const base = join(homedir(), ".cache", "agent-intercom-orchestrator-tests");
+  mkdirSync(base, { recursive: true });
+  const root = mkdtempSync(join(base, "systemd-probe-"));
+  const source = join(root, "source");
+  const target = join(root, "target");
+  mkdirSync(source);
+  mkdirSync(target);
+  try {
+    const probe = spawnSync("systemd-run", [
+      "--user", "--wait", "--pipe", "--quiet",
+      "--property=ProtectSystem=strict",
+      `--property=InaccessiblePaths=${root}`,
+      `--property=BindPaths=${source}:${target}`,
+      "/bin/true",
+    ], { encoding: "utf8", timeout: 10_000 });
+    return probe.status === 0;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 export function supportsHardenedUserUnits(): boolean {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -144,7 +145,11 @@ test("systemd exposes only the assigned worker state through the fixed private m
   }
 });
 
-test("sandbox supervisor proxies a private short broker socket and hides shared Intercom state", async () => {
+test("sandbox supervisor proxies a private short broker socket and hides shared Intercom state", async (t) => {
+  if (!existsSync("/usr/bin/bwrap")) {
+    t.skip("bubblewrap is unavailable");
+    return;
+  }
   const root = await mkdtemp(join(tmpdir(), "aio-proxy-"));
   const sharedIntercom = join(root, "shared-intercom");
   await mkdir(sharedIntercom, { recursive: true });
