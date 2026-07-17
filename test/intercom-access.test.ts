@@ -209,6 +209,12 @@ test("revocation returns only affected identities and sends no credentials", asy
   }
 });
 
+test("remote health probe defaults to the non-authoritative gateway socket", async () => {
+  const source = await readFile(new URL("../examples/check-remote-gateway.py", import.meta.url), "utf8");
+  assert.match(source, /bridge-agent\/intercom\/remote-gateway\.sock/);
+  assert.doesNotMatch(source, /bridge-agent\/intercom\/broker\.sock/);
+});
+
 test("enrollment fails closed when the broker policy hash differs", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-intercom-access-cli-"));
   const agentDir = join(root, "agent");

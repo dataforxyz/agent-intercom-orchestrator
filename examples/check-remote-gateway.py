@@ -7,7 +7,7 @@ import struct
 import sys
 import uuid
 
-SOCKET_PATH = os.environ.get("AGENT_INTERCOM_REMOTE_SOCKET", os.path.expanduser("~/.pi/bridge-agent/intercom/broker.sock"))
+SOCKET_PATH = os.environ.get("AGENT_INTERCOM_REMOTE_SOCKET", os.path.expanduser("~/.pi/bridge-agent/intercom/remote-gateway.sock"))
 EXPECTED_HASH = os.environ.get("AGENT_INTERCOM_POLICY_HASH", "f3b00e503631bc91123aedfbcf1df72cc9913e1893c09728b2c598f3dcdfdfe0")
 request_id = str(uuid.uuid4())
 request = json.dumps({"type": "health", "requestId": request_id}, separators=(",", ":")).encode()
