@@ -5,7 +5,8 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "bin": {
-    "agent-intercom-fleet": "src/agent-fleet-cli.mjs"
+    "agent-intercom-fleet": "src/agent-fleet-cli.mjs",
+    "agent-intercom-access": "src/agent-intercom-access.mjs"
   },
   "repository": {
     "type": "git",
@@ -54,6 +55,9 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "dependencies": {
+    "@dataforxyz/agent-intercom-core": "git+https://github.com/dataforxyz/agent-intercom-core.git#4470fa077c58d9592c5775b85d88406857ed7a8d"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "*",
