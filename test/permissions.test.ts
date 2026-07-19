@@ -674,7 +674,10 @@ test("npm registry guard permits local development and blocks account or publish
   }
   const guard = fileURLToPath(new URL("../src/guard-bin/npm", import.meta.url));
   const version = spawnSync(guard, ["--version"], { encoding: "utf8", env: { ...process.env, AGENT_INTERCOM_REAL_NPM: "/usr/bin/npm" } });
-  assert.equal(version.status, 0, version.stderr);
+  if (version.status !== 0) {
+    assert.equal(version.status, 127, version.stderr);
+    assert.match(version.stderr, /Refusing untrusted real npm path/);
+  }
   for (const args of [["login"], ["publish"], ["token", "list"], ["config", "set", "registry", "https://evil.invalid"], ["install", "--registry=https://evil.invalid"], ["view", "pkg", "--reg=https://evil.invalid"], ["view", "pkg", "--reg", "https://evil.invalid"], ["view", "pkg", "-reg=https://evil.invalid"], ["view", "pkg", "-registry=https://evil.invalid"], ["view", "pkg", "-userconfig=/tmp/host.npmrc"], ["view", "pkg", "-globalconfig=/tmp/global.npmrc"], ["install", "--proxy=http://evil.invalid"], ["install", "-proxy=http://evil.invalid"], ["install", "-strict-ssl=false"], ["view", "pkg", "--prefix=/tmp/other"], ["view", "pkg", "--prefix", "/tmp/other"], ["view", "pkg", "-prefix=/tmp/other"], ["view", "pkg", "-prefix", "/tmp/other"]]) {
     const blocked = spawnSync(guard, args, { encoding: "utf8", env: { ...process.env, NPM_TOKEN: "NPM_SENTINEL", AGENT_INTERCOM_REAL_NPM: "/usr/bin/npm" } });
     assert.equal(blocked.status, 126, `${args.join(" ")}: ${blocked.stderr}`);

@@ -20,6 +20,66 @@ export function leaseExpiry(config: OrchestratorConfig, now = Date.now()): numbe
   return now + config.leaseMinutes * 60_000;
 }
 
+export function workerIdleDeadline(config: OrchestratorConfig, lastWorkerActivityAt: number): number {
+  return lastWorkerActivityAt + config.idleTimeoutMinutes * 60_000;
+}
+
+export function boundedLeaseExpiry(config: OrchestratorConfig, lastWorkerActivityAt: number, now = Date.now()): number {
+  return Math.min(leaseExpiry(config, now), workerIdleDeadline(config, lastWorkerActivityAt));
+}
+
+export function initializeWorkerLifecycle(worker: WorkerRecord, config: OrchestratorConfig, now = Date.now()): boolean {
+  if (!worker.owned || !isLiveState(worker.state)) return false;
+  let changed = false;
+  if (!Number.isFinite(worker.lastWorkerActivityAt)) {
+    // Existing records receive a complete idle window when lifecycle enforcement
+    // first sees them instead of being expired immediately during migration.
+    worker.lastWorkerActivityAt = now;
+    changed = true;
+  }
+  const idleDeadlineAt = workerIdleDeadline(config, worker.lastWorkerActivityAt!);
+  if (worker.idleDeadlineAt !== idleDeadlineAt) {
+    worker.idleDeadlineAt = idleDeadlineAt;
+    changed = true;
+  }
+  const checkpointDeadlineAt = idleDeadlineAt + config.cleanupGraceMinutes * 60_000;
+  if (worker.checkpointDeadlineAt !== checkpointDeadlineAt) {
+    worker.checkpointDeadlineAt = checkpointDeadlineAt;
+    changed = true;
+  }
+  const leaseDeadline = boundedLeaseExpiry(config, worker.lastWorkerActivityAt!, now);
+  if (worker.leaseExpiresAt > idleDeadlineAt || worker.leaseExpiresAt < now) {
+    worker.leaseExpiresAt = leaseDeadline;
+    changed = true;
+  }
+  if (changed) worker.updatedAt = now;
+  return changed;
+}
+
+export function recordWorkerActivity(worker: WorkerRecord, config: OrchestratorConfig, now = Date.now()): void {
+  worker.lastWorkerActivityAt = now;
+  worker.idleDeadlineAt = workerIdleDeadline(config, now);
+  worker.checkpointDeadlineAt = worker.idleDeadlineAt + config.cleanupGraceMinutes * 60_000;
+  worker.leaseExpiresAt = boundedLeaseExpiry(config, now, now);
+  worker.checkpointRequestedAt = undefined;
+  worker.checkpointLastAttemptAt = undefined;
+  worker.checkpointAttemptCount = undefined;
+  worker.updatedAt = now;
+}
+
+export function checkpointWarningAt(worker: WorkerRecord, config: OrchestratorConfig): number | undefined {
+  if (!worker.idleDeadlineAt) return undefined;
+  return worker.idleDeadlineAt - config.checkpointWarningMinutes * 60_000;
+}
+
+export function cleanupSnapshotStillEligible(worker: WorkerRecord, expectedCheckpointDeadlineAt: number, now = Date.now()): boolean {
+  return worker.owned
+    && isLiveState(worker.state)
+    && worker.state !== "stopping"
+    && worker.checkpointDeadlineAt === expectedCheckpointDeadlineAt
+    && worker.checkpointDeadlineAt <= now;
+}
+
 export function validateWorkerId(value: string): string {
   const id = value.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{1,79}$/.test(id)) {
@@ -189,7 +249,10 @@ export function createSystemdRecord(input: {
     unit: input.unit,
     createdAt: now,
     updatedAt: now,
-    leaseExpiresAt: leaseExpiry(input.config, now),
+    leaseExpiresAt: boundedLeaseExpiry(input.config, now, now),
+    lastWorkerActivityAt: now,
+    idleDeadlineAt: workerIdleDeadline(input.config, now),
+    checkpointDeadlineAt: workerIdleDeadline(input.config, now) + input.config.cleanupGraceMinutes * 60_000,
   };
 }
 
@@ -199,6 +262,8 @@ export function isLiveState(state: WorkerState): boolean {
 
 export function cleanupReason(worker: WorkerRecord, now = Date.now()): string | undefined {
   if (!worker.owned || !isLiveState(worker.state)) return undefined;
-  if (worker.leaseExpiresAt <= now) return `lease expired ${Math.ceil((now - worker.leaseExpiresAt) / 1000)}s ago`;
+  if (worker.checkpointDeadlineAt !== undefined && worker.checkpointDeadlineAt <= now) {
+    return `idle checkpoint grace expired ${Math.ceil((now - worker.checkpointDeadlineAt) / 1000)}s ago`;
+  }
   return undefined;
 }

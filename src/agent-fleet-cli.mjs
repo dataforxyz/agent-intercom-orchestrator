@@ -40,6 +40,12 @@ try {
   const managerSessionId = typeof request.managerSessionId === "string" && request.managerSessionId.trim()
     ? request.managerSessionId.trim()
     : `agent-fleet-cli-${process.pid}`;
+  if (request.params.action === "renew" || request.params.action === "adopt" || request.params.action === "_heartbeat") {
+    process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP = "1";
+  }
+  if (request.params.action === "_heartbeat") {
+    process.env.AGENT_INTERCOM_DISABLE_CLEANUP_TIMER = "1";
+  }
   const cwd = typeof request.cwd === "string" && request.cwd.trim() ? request.cwd : process.cwd();
   const lifecycle = new Map();
   const tools = new Map();

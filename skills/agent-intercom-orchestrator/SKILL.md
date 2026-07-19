@@ -141,7 +141,7 @@ agent_fleet({ action: "adopt", id: "codex-build-api" }) // after an intentional 
 agent_fleet({ action: "stop", id: "codex-build-api" })
 agent_fleet({ action: "cleanup", execute: false })
 agent_fleet({ action: "cleanup", execute: true })
-agent_fleet({ action: "forget", id: "codex-build-api" })
+agent_fleet({ action: "forget", id: "codex-build-api", acknowledge: true })
 ```
 
 ## Pi commands
@@ -152,14 +152,15 @@ agent_fleet({ action: "forget", id: "codex-build-api" })
 - `/agents-models [pi|codex|claude|opencode]` — browse available models
 - `/agents-cleanup [execute]` — preview or execute expired-lease cleanup
 
-Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unless `PI_CODING_AGENT_DIR` changes the Pi agent directory.
+Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unless `PI_CODING_AGENT_DIR` changes the Pi agent directory. By default, manager-received worker Intercom traffic or explicit `renew` extends a lease, but never beyond 60 minutes since the last worker activity. The manager begins checkpoint requests 10 minutes before that idle deadline and retries every 5 minutes while available; cleanup waits another 15 minutes, then stops the exact owned cgroup. A persistent systemd user timer checks every 15 minutes even when no manager is running. `stop` is always allowed; `forget` requires a stopped record and explicit manager `acknowledge: true`.
 
 ## Current limitations
 
 - Pi, Codex, and Claude registration is not automatically awaited. Use the `intercomTarget` returned by spawn directly with `intercom_send`; if the first send reports that it is not connected yet, wait briefly and retry. Use `intercom_list` only as a readiness diagnostic or to discover peers not managed by this fleet session.
 - A newly started manager must explicitly `adopt` live workers created by an older manager session before it can stop or renew them. Expired leases remain eligible for orchestrator-wide garbage collection.
 - `opencode-peer` owns a headless OpenCode server and initialized session for wakeable follow-up turns, and retries early server bind/startup exits on a fresh port. `opencode-run` remains available for cheaper one-shot assignments.
-- Automatic lease renewal reconciles the systemd unit first, so missing, exited, and failed services are not kept alive by manager activity. A process that remains active but is application-level hung still requires status/log inspection and an explicit stop.
+- Manager heartbeat alone does not renew workers. Only manager-received worker Intercom traffic or explicit `renew` resets the idle budget; broker acknowledgements, process existence, and manager messages to the worker do not count. A hung or silent worker therefore reaches checkpoint, grace, and exact-unit cleanup automatically.
+- Pi managers record worker activity through the Intercom extension event bridge. The opt-in OpenCode manager renews the exact worker when its runtime receives that worker's message and runs the same internal lifecycle heartbeat for checkpoint warnings.
 - Model enumeration is authoritative for Pi and OpenCode. Codex and Claude discovery uses models exposed by the manager Pi plus configured defaults because their top-level CLIs do not provide an equivalent complete list.
 - Permission profiles are guardrails for ordinary coding-agent mistakes, not a hostile-code container. Restricted workers retain writable private temp and isolated per-worker harness state, a restricted builder can still damage files inside its assigned workspace, and direct absolute invocation of host binaries can bypass the PATH-level `git`/`gh`/`glab`/`tea`/`npm` and cloud-control guards. Systemd's read-only host/Git mounts, private worker runtime, hidden hosting/package/cloud configuration, scrubbed inherited credentials, masked SSH/GPG/password-manager agents, masked compositor/terminal/audio/accessibility session IPC, and explicit host container/VM daemon and host-mutating systemd/polkit socket masks are defense in depth—not a claim that hostile code cannot supply another credential, use raw network egress, or reach a separately network-exposed daemon API. Provider authentication intentionally copied into a private harness home is necessarily readable by that worker, while unrelated manager environment variables and host credential paths are excluded.
 - Playwright, browsers, MCP servers, and ordinary descendants are contained and verified through the worker cgroup. Detached systemd services, containers, remote browsers, and cloud jobs require explicit manager ownership and recorded resource IDs.

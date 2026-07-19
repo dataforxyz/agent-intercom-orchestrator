@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Replace manager-heartbeat lease extension with activity-gated renewal: only manager-received worker Intercom traffic or explicit `renew` extends a worker, and renewal is capped at the configured idle deadline.
+- Request and retry checkpoints before idle expiry, preserve a grace/adoption window, and install a persistent systemd user timer that stops only exact expired owned cgroups even when no manager is running.
+- Preserve stopped worker records with stop/dirty-state evidence and require explicit manager `acknowledge: true` before `forget` removes a record.
 - Guide managers to use `intercom_send` for assignments and progress/status checkpoints, reserving `intercom_ask` for blocking decisions.
 - Require managers to create sandboxed builder worktrees before spawn and pass the worktree as `cwd`.
 - Reserve worker IDs atomically before launch, patch stop/renew/adopt/forget state inside the store lock, and reclaim dead-process locks without stale-snapshot resurrection or orphaned duplicate units.
@@ -13,6 +16,7 @@
 - Add packaged cross-harness `git`, `gh`, GitLab `glab`, and Forgejo `tea` guards plus a Pi `tool_call` policy hook so read-only Git profiles allow explicitly recognized inspection while blocking repository and hosting-service mutations.
 - Harden Git, GitHub, and Forgejo guards against host-qualified targets, command-level credential overrides, browser/debug leakage, untrusted executables, and Node preload injection; add an npm registry guard and help/version-only cloud-control guards.
 - Mask SSH/GPG/password-manager agent sockets, project and home package-registry credentials, and expanded Google Cloud, Cloudflare, and Cloud Foundry configuration for restricted workers.
+- Resolve Node from the controlled worker PATH in Node-backed guard launchers instead of assuming `/usr/bin/node`, preserving policy behavior on hosted and non-FHS installations.
 - Isolate restricted workers from host desktop/session IPC, including Hyprland, Wayland, compositor, terminal, audio, accessibility, launcher, and speech sockets, while preserving a private XDG runtime and Intercom broker mount.
 - Report permission profiles and managed-user-namespace helper readiness through `agent_fleet` discovery and doctor output.
 - Propagate `fresh: true` to harness launchers so Codex workers discard persisted bridge thread state instead of reusing the prior rollout under a new systemd run.

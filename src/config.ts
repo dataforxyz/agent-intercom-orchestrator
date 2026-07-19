@@ -121,6 +121,12 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
   heartbeatSeconds: 60,
   maxRuntime: "2h",
   stopTimeoutSeconds: 5,
+  idleTimeoutMinutes: 60,
+  checkpointWarningMinutes: 10,
+  checkpointRetryMinutes: 5,
+  cleanupGraceMinutes: 15,
+  cleanupTimerMinutes: 15,
+  cleanupTimerEnabled: true,
   cleanupExpiredOnStart: true,
   cleanupOnShutdown: true,
 };
@@ -254,6 +260,11 @@ export function mergeConfig(value: unknown): OrchestratorConfig {
       if (role) roles[name] = { ...(roles[name] ?? {}), ...role };
     }
   }
+  const idleTimeoutMinutes = positiveNumber(value.idleTimeoutMinutes, DEFAULT_CONFIG.idleTimeoutMinutes);
+  const checkpointWarningMinutes = Math.min(
+    positiveNumber(value.checkpointWarningMinutes, DEFAULT_CONFIG.checkpointWarningMinutes),
+    idleTimeoutMinutes,
+  );
   return {
     defaultHarness: isHarness(value.defaultHarness) ? value.defaultHarness : DEFAULT_CONFIG.defaultHarness,
     defaultProfiles: mergeHarnessStrings(value.defaultProfiles, DEFAULT_CONFIG.defaultProfiles),
@@ -266,6 +277,13 @@ export function mergeConfig(value: unknown): OrchestratorConfig {
     heartbeatSeconds: positiveNumber(value.heartbeatSeconds, DEFAULT_CONFIG.heartbeatSeconds),
     maxRuntime: typeof value.maxRuntime === "string" && value.maxRuntime.trim() ? value.maxRuntime : DEFAULT_CONFIG.maxRuntime,
     stopTimeoutSeconds: positiveNumber(value.stopTimeoutSeconds, DEFAULT_CONFIG.stopTimeoutSeconds),
+    idleTimeoutMinutes,
+    checkpointWarningMinutes,
+    checkpointRetryMinutes: positiveNumber(value.checkpointRetryMinutes, DEFAULT_CONFIG.checkpointRetryMinutes),
+    cleanupGraceMinutes: positiveNumber(value.cleanupGraceMinutes, DEFAULT_CONFIG.cleanupGraceMinutes),
+    cleanupTimerMinutes: positiveNumber(value.cleanupTimerMinutes, DEFAULT_CONFIG.cleanupTimerMinutes),
+    cleanupTimerEnabled:
+      typeof value.cleanupTimerEnabled === "boolean" ? value.cleanupTimerEnabled : DEFAULT_CONFIG.cleanupTimerEnabled,
     cleanupExpiredOnStart:
       typeof value.cleanupExpiredOnStart === "boolean" ? value.cleanupExpiredOnStart : DEFAULT_CONFIG.cleanupExpiredOnStart,
     cleanupOnShutdown:
@@ -338,6 +356,12 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
     heartbeatSeconds: config.heartbeatSeconds,
     maxRuntime: config.maxRuntime,
     stopTimeoutSeconds: config.stopTimeoutSeconds,
+    idleTimeoutMinutes: config.idleTimeoutMinutes,
+    checkpointWarningMinutes: config.checkpointWarningMinutes,
+    checkpointRetryMinutes: config.checkpointRetryMinutes,
+    cleanupGraceMinutes: config.cleanupGraceMinutes,
+    cleanupTimerMinutes: config.cleanupTimerMinutes,
+    cleanupTimerEnabled: config.cleanupTimerEnabled,
     cleanupExpiredOnStart: config.cleanupExpiredOnStart,
     cleanupOnShutdown: config.cleanupOnShutdown,
   });
