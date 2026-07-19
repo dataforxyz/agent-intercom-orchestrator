@@ -86,6 +86,9 @@ test("stop patches the current worker record without clobbering concurrent metad
       registerTool(tool: any) { tools.set(tool.name, tool); },
       registerCommand() {},
       async exec(command: string, args: string[]) {
+        if (command.endsWith("/git") && args.includes("status")) {
+          return { ...commandResult(), stdout: " M file.ts\n" };
+        }
         if (command === "systemctl" && args[1] === "stop") {
           stopStarted();
           await stopBlocked;
@@ -113,7 +116,65 @@ test("stop patches the current worker record without clobbering concurrent metad
 
     const saved = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(saved.workers[0].state, "stopped");
+    assert.equal(saved.workers[0].stopReason, "manager-requested");
+    assert.equal(saved.workers[0].dirtyAtStop, true);
+    assert.equal(saved.workers[0].dirtyStatusAtStop, "M file.ts");
     assert.equal(saved.workers[0].backendDetails.marker, "preserve-me");
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("manager-received worker Intercom metadata renews only the matching owned worker", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-activity-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    const before = Date.now() - 30 * 60_000;
+    await writeFile(join(orchestratorDir, "workers.json"), JSON.stringify({ version: 1, workers: [{
+      id: "activity-worker", runId: "run-activity", harness: "pi", role: "advisor", task: "review", cwd: "/tmp",
+      state: "running", unit: "agent-intercom-worker-activity-worker.service", owned: true, managerSessionId: "manager-a",
+      intercomTarget: "activity-worker", createdAt: before, updatedAt: before, lastWorkerActivityAt: before,
+      idleDeadlineAt: before + 60 * 60_000, checkpointDeadlineAt: before + 75 * 60_000, leaseExpiresAt: before + 30 * 60_000,
+    }] }));
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const bus = new Map<string, (payload: unknown) => void>();
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: {
+        on(name: string, handler: (payload: unknown) => void) { bus.set(name, handler); return () => bus.delete(name); },
+        emit(name: string, payload: unknown) { bus.get(name)?.(payload); },
+      },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      async exec(command: string, args: string[]) {
+        if (command === "systemctl" && args.includes("show")) {
+          return { ...commandResult(), stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\n" };
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: "/tmp", mode: "rpc", hasUI: false,
+      sessionManager: { getSessionId: () => "manager-a", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?activity=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+    pi.events.emit("agent-intercom:inbound-message", { from: { id: "activity-worker", name: "activity-worker" }, message: { id: "progress-1" } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const saved = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    assert.ok(saved.workers[0].lastWorkerActivityAt > before);
+    assert.equal(saved.workers[0].checkpointRequestedAt, undefined);
+    assert.ok(saved.workers[0].leaseExpiresAt > before + 30 * 60_000);
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -382,6 +443,52 @@ test("agent_fleet list and unqualified status default to the current manager's w
   }
 });
 
+test("forget requires explicit manager acknowledgment after a worker is stopped", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-forget-ack-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    await writeFile(join(orchestratorDir, "workers.json"), JSON.stringify({ version: 1, workers: [{
+      id: "stopped-worker", runId: "run-stopped", harness: "pi", role: "advisor", task: "review", cwd: "/tmp",
+      state: "stopped", unit: "agent-intercom-worker-stopped-worker.service", owned: true, managerSessionId: "manager-a",
+      stopReason: "manager-requested", stoppedAt: Date.now(), createdAt: 1, updatedAt: 1, leaseExpiresAt: 1,
+    }] }));
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      async exec() { return commandResult(); },
+    };
+    const ctx: any = {
+      cwd: "/tmp", mode: "rpc", hasUI: false,
+      sessionManager: { getSessionId: () => "manager-a", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?forget-ack=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+    const fleet = tools.get("agent_fleet");
+    await assert.rejects(
+      fleet.execute("forget-no-ack", { action: "forget", id: "stopped-worker" }, new AbortController().signal, () => {}, ctx),
+      /acknowledge=true/,
+    );
+    await fleet.execute("forget-ack", { action: "forget", id: "stopped-worker", acknowledge: true }, new AbortController().signal, () => {}, ctx);
+    const saved = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    assert.deepEqual(saved.workers, []);
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("extension registers discovery tools and interactive configuration commands", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-extension-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -456,6 +563,7 @@ test("extension registers discovery tools and interactive configuration commands
       () => {},
       ctx,
     );
+    assert.match(doctor.content[0].text, /cleanup timer: enabled=true active=true source-current=false/);
     assert.match(doctor.content[0].text, /OpenCode Intercom plugin: (?:not detected|could not inspect)/);
 
     await commands.get("agents-config").handler("", ctx);

@@ -447,7 +447,9 @@ Stop and renew refuse live workers owned by another manager session until this h
 
 The Pi footer, `/agents`, and `agent_fleet({ action: "list" })` are scoped by `managerSessionId`, following the same parent-session idea used by `pi-subagents`: each manager sees only coworkers it spawned or adopted. Use `/agents all` or `agent_fleet({ action: "list", all: true })` when you intentionally need the global owned-worker inventory.
 
-Leases are the final garbage-collection boundary: startup cleanup and `/agents-cleanup` may stop any orchestrator-owned worker after its lease expires, even when its original manager session is gone. Completed one-shot units are retired automatically after reconciliation so their retained exit status does not accumulate in systemd.
+Leases are activity-bounded rather than manager-heartbeat-bounded. A manager-received worker Intercom message or explicit `renew` extends the lease, capped at the configured idle deadline; process existence, broker acknowledgements, and messages sent by the manager do not count. The manager requests a commit/checkpoint/handoff before the deadline, cleanup preserves a grace period for recovery or adoption, and a persistent systemd user timer stops only the exact expired owned cgroup even when no manager session is running. Startup cleanup and `/agents-cleanup` use the same race-safe deadline check. Completed one-shot units are retired automatically after reconciliation so their retained exit status does not accumulate in systemd.
+
+Stopping preserves the worker record and supported harness session state for resume. `stop` is always available and records best-effort dirty-worktree evidence for writable workers; it never refuses the safety operation because of Git state. `forget` is a distinct terminal action and requires a stopped worker plus explicit manager `acknowledge: true`.
 
 This prevents:
 
@@ -779,7 +781,7 @@ For an orchestrator-owned worker, inspect and stop the exact cgroup:
 ```typescript
 agent_fleet({ action: "status", id: "opencode-visual-review" }) // includes the live cgroup process tree
 agent_fleet({ action: "stop", id: "opencode-visual-review" })
-agent_fleet({ action: "forget", id: "opencode-visual-review" })
+agent_fleet({ action: "forget", id: "opencode-visual-review", acknowledge: true })
 ```
 
 Normal descendants—including Playwright browsers, Chromium renderers, MCP servers, language servers, build watchers, and shell grandchildren—inherit the worker's systemd cgroup. Stop uses `KillMode=control-group`, escalates remaining members with `SIGKILL`, and verifies that the cgroup is empty before declaring success.

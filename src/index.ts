@@ -8,20 +8,25 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
+import { CLEANUP_SERVICE, CLEANUP_TIMER, ensureCleanupTimer } from "./cleanup-timer.ts";
 import { buildPermissionEnvironment, buildPermissionUnitProperties, registerWorkerPermissionPolicy } from "./permissions.ts";
 import { prepareWorkerRuntime, workerRuntimeRoot, workerSocketRuntimeRoot } from "./runtime.ts";
 import { WorkerStore } from "./store.ts";
 import { getUnitStatus, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, stopUnit, systemdAvailable } from "./systemd.ts";
 import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
 import {
+  boundedLeaseExpiry,
   buildWorkerArgs,
   buildWorkerEnvironment,
+  checkpointWarningAt,
   cleanupReason,
+  cleanupSnapshotStillEligible,
   createSystemdRecord,
   HARNESS_EFFORTS,
+  initializeWorkerLifecycle,
   isLiveState,
-  leaseExpiry,
   newRunId,
+  recordWorkerActivity,
   normalizeModelForHarness,
   stateFromUnit,
   validateEffort,
@@ -57,8 +62,11 @@ const OPENCODE_PEER_LAUNCHER = fileURLToPath(new URL("./opencode-peer-launcher.m
 const GIT_GUARD_BIN = fileURLToPath(new URL("./guard-bin", import.meta.url));
 const CLEAN_ENV_LAUNCHER = fileURLToPath(new URL("./clean-env-launcher.mjs", import.meta.url));
 const SANDBOX_SUPERVISOR = fileURLToPath(new URL("./sandbox-supervisor.mjs", import.meta.url));
+const FLEET_CLEANUP_SCRIPT = fileURLToPath(new URL("./agent-fleet-cleanup.mjs", import.meta.url));
 const ORCHESTRATOR_EXTENSION = fileURLToPath(import.meta.url);
 const PACKAGE_ROOT = dirname(dirname(ORCHESTRATOR_EXTENSION));
+const INTERCOM_INBOUND_ACTIVITY_EVENT = "agent-intercom:inbound-message";
+const INTERCOM_LIFECYCLE_SEND_EVENT = "agent-intercom:lifecycle-send";
 
 const AgentFleetParams = Type.Object({
   action: StringEnum(ACTIONS),
@@ -75,11 +83,12 @@ const AgentFleetParams = Type.Object({
   fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
   all: Type.Optional(Type.Boolean({ description: "Include workers owned by other manager sessions for list/status diagnostics" })),
   execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup or updates; false previews them" })),
+  acknowledge: Type.Optional(Type.Boolean({ description: "Manager acknowledgment required before deleting a stopped worker record" })),
   lines: Type.Optional(Type.Number({ description: "Journal lines for logs (1-500)" })),
 });
 
 type FleetParams = {
-  action: typeof ACTIONS[number];
+  action: typeof ACTIONS[number] | "_heartbeat";
   id?: string;
   harness?: Harness;
   role?: string;
@@ -93,6 +102,7 @@ type FleetParams = {
   fresh?: boolean;
   all?: boolean;
   execute?: boolean;
+  acknowledge?: boolean;
   lines?: number;
 };
 
@@ -115,6 +125,25 @@ function textResult(text: string, details?: unknown) {
 
 function managerSessionId(ctx: ExtensionContext): string {
   return ctx.sessionManager.getSessionId() || ctx.sessionManager.getSessionFile() || `process-${process.pid}`;
+}
+
+function parseInboundActivitySender(payload: unknown): { id?: string; name?: string } | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const from = (payload as { from?: unknown }).from;
+  if (!from || typeof from !== "object") return undefined;
+  const id = typeof (from as { id?: unknown }).id === "string" ? (from as { id: string }).id : undefined;
+  const name = typeof (from as { name?: unknown }).name === "string" ? (from as { name: string }).name : undefined;
+  return id || name ? { ...(id ? { id } : {}), ...(name ? { name } : {}) } : undefined;
+}
+
+function checkpointMessage(worker: WorkerRecord, config: OrchestratorConfig): string {
+  return [
+    `Lifecycle checkpoint requested for ${worker.id}.`,
+    `Your idle deadline is ${formatTime(worker.idleDeadlineAt!)}; the exact worker unit may be stopped after a ${config.cleanupGraceMinutes}-minute grace period.`,
+    "Stop beginning new work. Save or commit current changes, report the current commit/worktree status and tests, then send a final handoff to your manager.",
+    "If continued quiet work is intentional, ask the manager to renew the lease explicitly.",
+    "Your worker record and supported harness session state will be retained if the unit is stopped.",
+  ].join("\n");
 }
 
 type OpenCodePeerHealth = {
@@ -210,8 +239,11 @@ function formatWorker(worker: WorkerRecord): string {
   const effort = worker.effort ? ` effort=${worker.effort}` : "";
   const permission = worker.permissionProfile ? ` permission=${worker.permissionProfile}` : "";
   const externalSession = worker.externalSessionId ? ` session=${worker.externalSessionId}` : "";
+  const idle = worker.idleDeadlineAt && isLiveState(worker.state) ? ` idle=${formatTime(worker.idleDeadlineAt)}` : "";
+  const checkpoint = worker.checkpointRequestedAt ? ` checkpoint=${formatTime(worker.checkpointRequestedAt)} attempts=${worker.checkpointAttemptCount ?? 1}` : "";
+  const stopped = worker.stopReason ? ` stop=${worker.stopReason}${worker.dirtyAtStop ? ":dirty" : ""}` : "";
   const error = worker.lastError ? ` error=${worker.lastError}` : "";
-  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${permission}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${error}`;
+  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${permission}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${idle}${checkpoint}${stopped}${error}`;
 }
 
 function formatWorkers(workers: WorkerRecord[]): string {
@@ -242,25 +274,68 @@ export async function removeWorkerRuntimeAndRecord(
   });
 }
 
+export type LeaseHeartbeatResult = {
+  renewed: WorkerRecord[];
+  checkpointRequested: WorkerRecord[];
+};
+
 export function renewObservedWorkerLeases(
   state: WorkerStateFile,
   observedWorkers: WorkerRecord[],
   managerId: string,
   config: OrchestratorConfig,
   now = Date.now(),
-): WorkerRecord[] {
+): LeaseHeartbeatResult {
   const observedLiveRuns = new Set(observedWorkers
-    .filter((worker) => worker.managerSessionId === managerId && worker.owned && isLiveState(worker.state))
+    .filter((worker) => worker.managerSessionId === managerId && worker.owned && isLiveState(worker.state) && worker.state !== "stopping")
     .map((worker) => `${worker.id}\u0000${worker.runId}`));
   const renewed: WorkerRecord[] = [];
+  const checkpointRequested: WorkerRecord[] = [];
   for (const worker of state.workers) {
     if (!observedLiveRuns.has(`${worker.id}\u0000${worker.runId}`)) continue;
-    if (worker.managerSessionId !== managerId || !worker.owned || !isLiveState(worker.state)) continue;
-    worker.leaseExpiresAt = leaseExpiry(config, now);
-    worker.updatedAt = now;
-    renewed.push(structuredClone(worker));
+    if (worker.managerSessionId !== managerId || !worker.owned || !isLiveState(worker.state) || worker.state === "stopping") continue;
+    initializeWorkerLifecycle(worker, config, now);
+    const lastActivity = worker.lastWorkerActivityAt!;
+    const idleDeadline = worker.idleDeadlineAt!;
+    if (now < idleDeadline) {
+      const nextLease = boundedLeaseExpiry(config, lastActivity, now);
+      if (nextLease > worker.leaseExpiresAt) {
+        worker.leaseExpiresAt = nextLease;
+        worker.updatedAt = now;
+        renewed.push(structuredClone(worker));
+      }
+    }
+    const warningAt = checkpointWarningAt(worker, config);
+    const retryAfter = config.checkpointRetryMinutes * 60_000;
+    const checkpointAttemptDue = worker.checkpointLastAttemptAt === undefined || now - worker.checkpointLastAttemptAt >= retryAfter;
+    if (warningAt !== undefined && now >= warningAt && now < worker.checkpointDeadlineAt! && checkpointAttemptDue) {
+      worker.checkpointRequestedAt ??= now;
+      worker.checkpointLastAttemptAt = now;
+      worker.checkpointAttemptCount = (worker.checkpointAttemptCount ?? 0) + 1;
+      worker.updatedAt = now;
+      checkpointRequested.push(structuredClone(worker));
+    }
   }
-  return renewed;
+  return { renewed, checkpointRequested };
+}
+
+export function recordIntercomWorkerActivity(
+  state: WorkerStateFile,
+  managerId: string,
+  sender: { id?: string; name?: string },
+  config: OrchestratorConfig,
+  now = Date.now(),
+): WorkerRecord | undefined {
+  const worker = state.workers.find((candidate) => {
+    if (candidate.managerSessionId !== managerId || !candidate.owned || !isLiveState(candidate.state) || candidate.state === "stopping") return false;
+    const expectedSenderId = candidate.intercomTarget ?? candidate.id;
+    // Broker-assigned/stable sender IDs are authoritative. A display name must
+    // never be able to keep another worker's lease alive.
+    return sender.id === expectedSenderId || (!sender.id && sender.name === expectedSenderId);
+  });
+  if (!worker) return undefined;
+  recordWorkerActivity(worker, config, now);
+  return structuredClone(worker);
 }
 
 function extractWorkers(state: WorkerStateFile, id?: string): WorkerRecord[] {
@@ -326,8 +401,8 @@ function formatConfig(config: OrchestratorConfig, configPath: string): string {
   }
   lines.push(`permissions: ${Object.keys(config.permissionProfiles).sort().join(", ") || "(none)"}`);
   lines.push(`roles: ${Object.keys(config.roles).sort().join(", ") || "(none)"}`);
-  lines.push(`lease=${config.leaseMinutes}m heartbeat=${config.heartbeatSeconds}s max-runtime=${config.maxRuntime}`);
-  lines.push(`cleanup: startup=${config.cleanupExpiredOnStart} shutdown=${config.cleanupOnShutdown}`);
+  lines.push(`lease=${config.leaseMinutes}m idle=${config.idleTimeoutMinutes}m checkpoint-warning=${config.checkpointWarningMinutes}m retry=${config.checkpointRetryMinutes}m grace=${config.cleanupGraceMinutes}m heartbeat=${config.heartbeatSeconds}s max-runtime=${config.maxRuntime}`);
+  lines.push(`cleanup: startup=${config.cleanupExpiredOnStart} shutdown=${config.cleanupOnShutdown} timer=${config.cleanupTimerEnabled ? `${config.cleanupTimerMinutes}m` : "disabled"}`);
   return lines.join("\n");
 }
 
@@ -344,6 +419,15 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   let currentCtx: ExtensionContext | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
   let heartbeatRunning = false;
+  const unsubscribeWorkerActivity = pi.events.on(INTERCOM_INBOUND_ACTIVITY_EVENT, (payload) => {
+    const ctx = currentCtx;
+    const sender = parseInboundActivitySender(payload);
+    if (!ctx || !config || !sender) return;
+    const now = Date.now();
+    void store.mutate((state) => recordIntercomWorkerActivity(state, managerSessionId(ctx), sender, config, now))
+      .then((worker) => { if (worker) return updateStatus(ctx); })
+      .catch(() => undefined);
+  });
   const modelCache = new Map<Harness, { expiresAt: number; models: string[] }>();
   let openCodeModelInfoCache: { expiresAt: number; models: OpenCodeModelInfo[] } | undefined;
 
@@ -396,7 +480,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       for (const observation of observations) {
         const worker = state.workers.find((candidate) => candidate.id === observation.id && candidate.runId === observation.runId && candidate.unit === observation.unit);
         if (!worker) continue;
-        const nextState = stateFromUnit(observation.status, worker.state);
+        const observedState = stateFromUnit(observation.status, worker.state);
+        const nextState = worker.state === "stopping" && observedState === "running" ? "stopping" : observedState;
         if (observation.health?.runId === worker.runId) {
           worker.backendDetails = observation.health;
           if (observation.health.openCodeSessionId) worker.externalSessionId = observation.health.openCodeSessionId;
@@ -420,17 +505,47 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return workers;
   };
 
-  const stopWorker = async (target: WorkerRecord, expectedManagerSessionId?: string): Promise<WorkerRecord> => {
+  const inspectWorkerDirtyState = async (worker: WorkerRecord): Promise<{ dirty?: boolean; status?: string; error?: string }> => {
+    if (worker.permissionProfile && config.permissionProfiles[worker.permissionProfile]?.workspace === "read-only") return {};
+    const git = resolveProfileCommand("git");
+    if (!git) return { error: "git executable unavailable" };
+    const result = await runner.exec(git, ["-C", worker.cwd, "status", "--short"], { timeout: 5000 });
+    if (result.code !== 0) return { error: result.stderr.trim() || `git status exited ${result.code}` };
+    const status = result.stdout.trim();
+    return { dirty: status.length > 0, ...(status ? { status } : {}) };
+  };
+
+  const stopWorker = async (target: WorkerRecord, options: {
+    expectedManagerSessionId?: string;
+    reason?: string;
+    expectedCheckpointDeadlineAt?: number;
+  } = {}): Promise<WorkerRecord> => {
+    const stoppedAt = Date.now();
     const worker = await store.mutate((state) => {
       const current = state.workers.find((candidate) => candidate.id === target.id && candidate.runId === target.runId);
       if (!current) throw new Error(`Worker ${target.id} changed before it could be stopped`);
       if (!current.owned) throw new Error(`Worker ${current.id} is not owned by this orchestrator`);
-      if (expectedManagerSessionId && current.managerSessionId !== expectedManagerSessionId) {
+      if (options.expectedManagerSessionId && current.managerSessionId !== options.expectedManagerSessionId) {
         throw new Error(`Worker ${current.id} belongs to another manager session; adopt it before stopping`);
       }
+      if (options.expectedCheckpointDeadlineAt !== undefined
+        && !cleanupSnapshotStillEligible(current, options.expectedCheckpointDeadlineAt, stoppedAt)) {
+        throw new Error(`Worker ${current.id} lifecycle changed or was renewed before expired cleanup`);
+      }
       current.state = "stopping";
-      current.updatedAt = Date.now();
+      current.stopReason = options.reason ?? "manager-requested";
+      current.updatedAt = stoppedAt;
       return structuredClone(current);
+    });
+
+    const dirty: { dirty?: boolean; status?: string; error?: string } = await inspectWorkerDirtyState(worker)
+      .catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+    await store.mutate((state) => {
+      const current = state.workers.find((candidate) => candidate.id === worker.id && candidate.runId === worker.runId);
+      if (!current) return;
+      if (dirty.dirty !== undefined) current.dirtyAtStop = dirty.dirty;
+      if (dirty.status) current.dirtyStatusAtStop = dirty.status;
+      if (dirty.error) current.dirtyCheckErrorAtStop = dirty.error;
     });
 
     let stopError: unknown;
@@ -444,7 +559,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const current = state.workers.find((candidate) => candidate.id === worker.id && candidate.runId === worker.runId);
       if (!current) throw new Error(`Worker ${worker.id} changed while it was stopping`);
       current.state = stopError ? "failed" : "stopped";
-      current.updatedAt = Date.now();
+      current.stoppedAt = Date.now();
+      current.updatedAt = current.stoppedAt;
       current.lastError = stopError ? (stopError instanceof Error ? stopError.message : String(stopError)) : undefined;
       return structuredClone(current);
     });
@@ -454,12 +570,41 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   };
 
   const cleanupExpired = async (execute: boolean, now = Date.now()) => {
-    const workers = await reconcile();
-    const candidates = workers
+    await reconcile();
+    await store.mutate((state) => {
+      for (const worker of state.workers) initializeWorkerLifecycle(worker, config, now);
+    });
+    const migrated = await store.read();
+    const candidates = migrated.workers
       .map((worker) => ({ worker, reason: cleanupReason(worker, now) }))
       .filter((item): item is { worker: WorkerRecord; reason: string } => Boolean(item.reason));
-    if (execute) for (const { worker } of candidates) await stopWorker(worker);
-    return candidates;
+    if (!execute) return candidates;
+    const stopped: typeof candidates = [];
+    for (const candidate of candidates) {
+      try {
+        await stopWorker(candidate.worker, {
+          reason: "idle-grace-expired",
+          expectedCheckpointDeadlineAt: candidate.worker.checkpointDeadlineAt,
+        });
+        stopped.push(candidate);
+      } catch (error) {
+        if (!/lifecycle changed|renewed before expired cleanup/.test(error instanceof Error ? error.message : String(error))) throw error;
+      }
+    }
+    return stopped;
+  };
+
+  const runLifecycleHeartbeat = async (ctx: ExtensionContext) => {
+    const observedWorkers = await reconcile();
+    const now = Date.now();
+    const result = await store.mutate((state) => renewObservedWorkerLeases(state, observedWorkers, managerSessionId(ctx), config, now));
+    const checkpointRequests = result.checkpointRequested.flatMap((worker) => worker.intercomTarget ? [{
+      workerId: worker.id,
+      runId: worker.runId,
+      target: worker.intercomTarget,
+      message: checkpointMessage(worker, config),
+    }] : []);
+    return { ...result, checkpointRequests };
   };
 
   const enumerateOpenCodeModelInfo = async (): Promise<OpenCodeModelInfo[]> => {
@@ -543,6 +688,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (!profile) throw new Error(`Unknown launch profile: ${profileName}`);
     if (profile.harness !== harness) throw new Error(`Profile ${profileName} launches ${profile.harness}, not ${harness}`);
     if (profile.spawnable === false) throw new Error(profile.description || `Profile ${profileName} is attach-only`);
+    const effectiveMaxRuntime = profile.maxRuntime || config.maxRuntime;
+    if (profile.mode !== "one-shot") {
+      const runtimeSeconds = parseDurationToSeconds(effectiveMaxRuntime);
+      const lifecycleSeconds = (config.idleTimeoutMinutes + config.cleanupGraceMinutes) * 60;
+      if (Number.isFinite(runtimeSeconds) && runtimeSeconds <= lifecycleSeconds) {
+        throw new Error(`Profile ${profileName} maxRuntime ${effectiveMaxRuntime} must exceed the ${config.idleTimeoutMinutes + config.cleanupGraceMinutes}-minute idle plus cleanup-grace window`);
+      }
+    }
     const id = validateWorkerId(params.id || `${harness}-${role}-${newRunId().slice(0, 6)}`);
     const runId = newRunId();
     const unit = makeUnitName(id, runId);
@@ -646,7 +799,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         profile: { ...profile, command: launchCommand, args: undefined },
         args,
         cwd,
-        maxRuntime: profile.maxRuntime || config.maxRuntime,
+        maxRuntime: effectiveMaxRuntime,
         stopTimeoutSeconds: config.stopTimeoutSeconds,
         properties: buildPermissionUnitProperties(
           permissionProfile,
@@ -711,12 +864,18 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       "For sandboxed builder profiles such as codex-safe, create the feature worktree before spawning and pass that worktree as cwd. Do not ask the worker to create a sibling worktree outside its writable cwd.",
       "Use capabilities, profiles, permissions, models, variants, versions, or config before guessing models, permission policy, effort levels, package state, or defaults.",
       "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
+      "Persistent workers expire after an activity-bounded idle budget. Worker messages to the manager or explicit renew extend it; manager heartbeat alone does not. Stop completed workers promptly, retain their record for resume, and use forget with acknowledge=true only after deliberate closure.",
     ],
     parameters: AgentFleetParams,
 
     async execute(_toolCallId, params: FleetParams, signal, onUpdate, ctx) {
       if (!config) await loadConfig();
       if (signal?.aborted) throw new Error("Agent fleet action cancelled");
+
+      if (params.action === "_heartbeat") {
+        const result = await runLifecycleHeartbeat(ctx);
+        return textResult(`Lifecycle heartbeat: renewed=${result.renewed.length} checkpoint=${result.checkpointRequests.length}.`, result);
+      }
 
       if (params.action === "spawn") {
         const preview = resolveSpawn(params, ctx);
@@ -757,8 +916,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (params.action === "stop") {
         if (!params.id) throw new Error("stop requires id");
         const worker = extractWorkers(await store.read(), params.id)[0];
-        const stopped = await stopWorker(worker, managerSessionId(ctx));
-        return textResult(`Stopped ${stopped.id}.`, { worker: stopped });
+        const stopped = await stopWorker(worker, { expectedManagerSessionId: managerSessionId(ctx), reason: "manager-requested" });
+        const dirty = stopped.dirtyAtStop ? ` Worker cwd was dirty when stopped.${stopped.dirtyStatusAtStop ? `\n${stopped.dirtyStatusAtStop}` : ""}` : "";
+        return textResult(`Stopped ${stopped.id}.${dirty}`, { worker: stopped });
       }
 
       if (params.action === "cleanup") {
@@ -832,6 +992,18 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           runner.exec("systemctl", ["is-active", "systemd-nsresourced.socket"], { timeout: 5000 }),
           runner.exec("systemctl", ["is-active", "systemd-mountfsd.socket"], { timeout: 5000 }),
         ]);
+        const cleanupTimerChecks = await Promise.all([
+          runner.exec("systemctl", ["--user", "is-enabled", CLEANUP_TIMER], { timeout: 5000 }),
+          runner.exec("systemctl", ["--user", "is-active", CLEANUP_TIMER], { timeout: 5000 }),
+          runner.exec("systemctl", ["--user", "cat", CLEANUP_SERVICE], { timeout: 5000 }),
+        ]);
+        const cleanupTimerStatus = {
+          enabled: cleanupTimerChecks[0].code === 0,
+          active: cleanupTimerChecks[1].code === 0,
+          sourceCurrent: cleanupTimerChecks[2].code === 0
+            && cleanupTimerChecks[2].stdout.includes(FLEET_CLEANUP_SCRIPT)
+            && cleanupTimerChecks[2].stdout.includes(process.execPath),
+        };
         const managedUserNamespaces = {
           nsresourced: managedHelpers[0].code === 0 ? managedHelpers[0].stdout.trim() || "active" : managedHelpers[0].stdout.trim() || "inactive",
           mountfsd: managedHelpers[1].code === 0 ? managedHelpers[1].stdout.trim() || "active" : managedHelpers[1].stdout.trim() || "inactive",
@@ -841,8 +1013,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         const units = available ? await listWorkerUnits(runner) : [];
         const untrackedUnits = units.filter((unit) => !recordedUnits.has(unit));
         return textResult(
-          [`systemd user manager: ${available ? "available" : "unavailable"} version=${installedSystemdVersion ?? "unknown"} bubblewrap=${bubblewrapAvailable ? "available" : "missing"} hardened-profiles=${hardenedProfilesReady}`, `managed user namespaces: nsresourced=${managedUserNamespaces.nsresourced} mountfsd=${managedUserNamespaces.mountfsd}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `permission profiles: ${Object.keys(config.permissionProfiles).sort().join(", ")}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
-          { systemd: available, systemdVersion: installedSystemdVersion, bubblewrapAvailable, hardenedProfilesReady, managedUserNamespaces, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
+          [`systemd user manager: ${available ? "available" : "unavailable"} version=${installedSystemdVersion ?? "unknown"} bubblewrap=${bubblewrapAvailable ? "available" : "missing"} hardened-profiles=${hardenedProfilesReady}`, `managed user namespaces: nsresourced=${managedUserNamespaces.nsresourced} mountfsd=${managedUserNamespaces.mountfsd}`, `cleanup timer: enabled=${cleanupTimerStatus.enabled} active=${cleanupTimerStatus.active} source-current=${cleanupTimerStatus.sourceCurrent}`, `Pi peer launcher: ${PI_PEER_LAUNCHER}`, `OpenCode peer launcher: ${OPENCODE_PEER_LAUNCHER}`, `OpenCode Intercom plugin: ${opencodeIntercomPlugin}`, `adapter versions: ${adapterDrift.length ? `${adapterDrift.map((adapter) => `${adapter.id}=${adapter.current ?? "missing"}->${adapter.latest ?? "unknown"}`).join(", ")} — run agent_fleet update for commands` : "coordinated"}`, `permission profiles: ${Object.keys(config.permissionProfiles).sort().join(", ")}`, `config: ${configPath}`, `state: ${statePath}`, `untracked worker units: ${untrackedUnits.length ? untrackedUnits.join(", ") : "none"}`, ...profileLines].join("\n"),
+          { systemd: available, systemdVersion: installedSystemdVersion, bubblewrapAvailable, hardenedProfilesReady, managedUserNamespaces, cleanupTimerStatus, piPeerLauncher: PI_PEER_LAUNCHER, opencodePeerLauncher: OPENCODE_PEER_LAUNCHER, opencodeIntercomPlugin, adapters, configPath, statePath, untrackedUnits },
         );
       }
 
@@ -860,10 +1032,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const selected = extractWorkers(state, params.id);
           const renewed: WorkerRecord[] = [];
           for (const worker of selected) {
-            if (!worker.owned || !isLiveState(worker.state)) continue;
+            if (!worker.owned || !isLiveState(worker.state) || worker.state === "stopping") continue;
             if (worker.managerSessionId !== owner) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before renewing`);
-            worker.leaseExpiresAt = leaseExpiry(config, now);
-            worker.updatedAt = now;
+            recordWorkerActivity(worker, config, now);
             renewed.push(structuredClone(worker));
           }
           return renewed;
@@ -880,6 +1051,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           if (isLiveState(current.state)) {
             if (current.managerSessionId !== owner) throw new Error(`Worker ${current.id} belongs to another manager session; adopt it before forgetting`);
             throw new Error(`Refusing to forget live worker ${current.id}; stop it first`);
+          }
+          if (params.acknowledge !== true) {
+            const warnings = [
+              current.dirtyAtStop ? "worker cwd was dirty when stopped" : undefined,
+              current.stopReason?.startsWith("idle-") ? `worker stopped after ${current.stopReason}` : undefined,
+              !current.stopReason ? "worker has no recorded stop reason or accepted handoff" : undefined,
+            ].filter(Boolean).join("; ");
+            throw new Error(`Refusing to forget stopped worker ${current.id} without manager acknowledge=true${warnings ? ` (${warnings})` : ""}`);
           }
           current.state = "stopping";
           current.updatedAt = Date.now();
@@ -921,10 +1100,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const current = state.workers.find((candidate) => candidate.id === observed.id && candidate.runId === observed.runId);
           if (!current) throw new Error(`Worker ${observed.id} changed before it could be adopted`);
           if (!current.owned) throw new Error(`Worker ${current.id} was not created by this orchestrator`);
-          if (!isLiveState(current.state)) throw new Error(`Worker ${current.id} is ${current.state}; only live workers can be adopted`);
+          if (!isLiveState(current.state) || current.state === "stopping") throw new Error(`Worker ${current.id} is ${current.state}; only active live workers can be adopted`);
+          const now = Date.now();
           current.managerSessionId = owner;
-          current.leaseExpiresAt = leaseExpiry(config);
-          current.updatedAt = Date.now();
+          recordWorkerActivity(current, config, now);
           return structuredClone(current);
         });
         await updateStatus(ctx);
@@ -1110,10 +1289,23 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         }
         if (choice === "Lifecycle") {
           const lease = await ctx.ui.input("Lease minutes", String(draft.leaseMinutes));
+          const idleTimeout = await ctx.ui.input("Idle timeout minutes", String(draft.idleTimeoutMinutes));
+          const checkpointWarning = await ctx.ui.input("Checkpoint warning minutes before idle deadline", String(draft.checkpointWarningMinutes));
+          const checkpointRetry = await ctx.ui.input("Checkpoint retry minutes", String(draft.checkpointRetryMinutes));
+          const cleanupGrace = await ctx.ui.input("Cleanup grace minutes after idle deadline", String(draft.cleanupGraceMinutes));
+          const cleanupTimerChoice = await ctx.ui.select("Enable managerless cleanup timer?", preferredFirst(["yes", "no"], draft.cleanupTimerEnabled ? "yes" : "no"));
+          const cleanupTimer = await ctx.ui.input("Managerless cleanup timer minutes", String(draft.cleanupTimerMinutes));
           const heartbeatSeconds = await ctx.ui.input("Heartbeat seconds", String(draft.heartbeatSeconds));
           const maxRuntime = await ctx.ui.input("Maximum runtime (systemd duration)", draft.maxRuntime);
           const cleanupChoice = await ctx.ui.select("Cleanup live owned workers on manager shutdown?", preferredFirst(["yes", "no"], draft.cleanupOnShutdown ? "yes" : "no"));
           if (lease && Number(lease) > 0) draft.leaseMinutes = Number(lease);
+          if (idleTimeout && Number(idleTimeout) > 0) draft.idleTimeoutMinutes = Number(idleTimeout);
+          if (checkpointWarning && Number(checkpointWarning) > 0) draft.checkpointWarningMinutes = Number(checkpointWarning);
+          if (checkpointRetry && Number(checkpointRetry) > 0) draft.checkpointRetryMinutes = Number(checkpointRetry);
+          if (cleanupGrace && Number(cleanupGrace) > 0) draft.cleanupGraceMinutes = Number(cleanupGrace);
+          if (cleanupTimerChoice === "yes") draft.cleanupTimerEnabled = true;
+          if (cleanupTimerChoice === "no") draft.cleanupTimerEnabled = false;
+          if (cleanupTimer && Number(cleanupTimer) > 0) draft.cleanupTimerMinutes = Number(cleanupTimer);
           if (heartbeatSeconds && Number(heartbeatSeconds) > 0) draft.heartbeatSeconds = Number(heartbeatSeconds);
           if (maxRuntime?.trim()) {
             try {
@@ -1182,17 +1374,28 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     await loadConfig();
+    if (process.env.AGENT_INTERCOM_DISABLE_CLEANUP_TIMER !== "1") {
+      void ensureCleanupTimer({ runner, config, cleanupScriptPath: FLEET_CLEANUP_SCRIPT, agentDir }).catch((error) => {
+        console.error(`[agent-intercom-orchestrator] Could not configure cleanup timer: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     await reconcile();
-    if (config.cleanupExpiredOnStart) await cleanupExpired(true);
+    if (config.cleanupExpiredOnStart && process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP !== "1") await cleanupExpired(true);
     clearInterval(heartbeat);
     heartbeatRunning = false;
     heartbeat = setInterval(() => {
       if (heartbeatRunning) return;
       heartbeatRunning = true;
-      void reconcile().then(async (observedWorkers) => {
+      void runLifecycleHeartbeat(ctx).then(async (result) => {
         if (currentCtx !== ctx) return;
-        const now = Date.now();
-        await store.mutate((state) => renewObservedWorkerLeases(state, observedWorkers, managerSessionId(ctx), config, now));
+        for (const request of result.checkpointRequests) {
+          pi.events.emit(INTERCOM_LIFECYCLE_SEND_EVENT, {
+            to: request.target,
+            message: request.message,
+            workerId: request.workerId,
+            runId: request.runId,
+          });
+        }
         await updateStatus(ctx);
       }).catch(() => undefined).finally(() => {
         heartbeatRunning = false;
@@ -1205,6 +1408,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     clearInterval(heartbeat);
     heartbeat = undefined;
     heartbeatRunning = false;
+    unsubscribeWorkerActivity();
     ctx.ui.setStatus(STATUS_KEY, undefined);
     if (config?.cleanupOnShutdown && event.reason !== "reload") {
       const sessionId = managerSessionId(ctx);
@@ -1212,7 +1416,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       for (const worker of state.workers) {
         if (worker.managerSessionId === sessionId && worker.owned && isLiveState(worker.state)) {
           try {
-            await stopWorker(worker);
+            await stopWorker(worker, { reason: "manager-session-shutdown" });
           } catch {
             // Failure is persisted on the worker record and reconciled next startup.
           }

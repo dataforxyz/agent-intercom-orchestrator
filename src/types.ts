@@ -59,6 +59,12 @@ export interface OrchestratorConfig {
   heartbeatSeconds: number;
   maxRuntime: string;
   stopTimeoutSeconds: number;
+  idleTimeoutMinutes: number;
+  checkpointWarningMinutes: number;
+  checkpointRetryMinutes: number;
+  cleanupGraceMinutes: number;
+  cleanupTimerMinutes: number;
+  cleanupTimerEnabled: boolean;
   cleanupExpiredOnStart: boolean;
   cleanupOnShutdown: boolean;
 }
@@ -88,6 +94,17 @@ export interface WorkerRecord {
   createdAt: number;
   updatedAt: number;
   leaseExpiresAt: number;
+  lastWorkerActivityAt?: number;
+  idleDeadlineAt?: number;
+  checkpointRequestedAt?: number;
+  checkpointLastAttemptAt?: number;
+  checkpointAttemptCount?: number;
+  checkpointDeadlineAt?: number;
+  stoppedAt?: number;
+  stopReason?: string;
+  dirtyAtStop?: boolean;
+  dirtyStatusAtStop?: string;
+  dirtyCheckErrorAtStop?: string;
   lastError?: string;
   backendDetails?: unknown;
 }

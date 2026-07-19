@@ -19,9 +19,15 @@
     "opencode": "high"
   },
   "leaseMinutes": 30,
+  "idleTimeoutMinutes": 60,
+  "checkpointWarningMinutes": 10,
+  "checkpointRetryMinutes": 5,
+  "cleanupGraceMinutes": 15,
   "heartbeatSeconds": 60,
   "maxRuntime": "2h",
   "stopTimeoutSeconds": 5,
+  "cleanupTimerEnabled": true,
+  "cleanupTimerMinutes": 15,
   "cleanupExpiredOnStart": true,
   "cleanupOnShutdown": true,
   "profiles": {

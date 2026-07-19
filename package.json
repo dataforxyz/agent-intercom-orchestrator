@@ -6,6 +6,7 @@
   "type": "module",
   "bin": {
     "agent-intercom-fleet": "src/agent-fleet-cli.mjs",
+    "agent-intercom-fleet-cleanup": "src/agent-fleet-cleanup.mjs",
     "agent-intercom-access": "src/agent-intercom-access.mjs"
   },
   "repository": {
@@ -45,7 +46,7 @@
     "LICENSE_TRANSITION.md"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "AGENT_INTERCOM_DISABLE_CLEANUP_TIMER=1 node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {

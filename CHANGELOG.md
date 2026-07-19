@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Replace manager-heartbeat lease extension with activity-gated renewal: only manager-received worker Intercom traffic or explicit `renew` extends a worker, and renewal is capped at the configured idle deadline.
+- Request and retry checkpoints before idle expiry, preserve a grace/adoption window, and install a persistent systemd user timer that stops only exact expired owned cgroups even when no manager is running.
+- Preserve stopped worker records with stop/dirty-state evidence and require explicit manager `acknowledge: true` before `forget` removes a record.
 - Guide managers to use `intercom_send` for assignments and progress/status checkpoints, reserving `intercom_ask` for blocking decisions.
 - Require managers to create sandboxed builder worktrees before spawn and pass the worktree as `cwd`.
 - Reserve worker IDs atomically before launch, patch stop/renew/adopt/forget state inside the store lock, and reclaim dead-process locks without stale-snapshot resurrection or orphaned duplicate units.

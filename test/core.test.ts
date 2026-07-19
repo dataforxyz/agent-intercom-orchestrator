@@ -4,18 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_CONFIG, mergeConfig, readConfig, writeConfig, writeConfigDefaults } from "../src/config.ts";
-import { parseOpenCodeModelsVerbose, parsePiModels, removeWorkerRuntimeAndRecord, renewObservedWorkerLeases, reserveWorkerRecord, workersAttachedToManager } from "../src/index.ts";
+import { parseOpenCodeModelsVerbose, parsePiModels, recordIntercomWorkerActivity, removeWorkerRuntimeAndRecord, renewObservedWorkerLeases, reserveWorkerRecord, workersAttachedToManager } from "../src/index.ts";
 import { workerRuntimeRoot } from "../src/runtime.ts";
 import { WorkerStore } from "../src/store.ts";
 import { launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit } from "../src/systemd.ts";
 import type { WorkerRecord } from "../src/types.ts";
 import {
+  boundedLeaseExpiry,
   buildWorkerArgs,
   buildWorkerEnvironment,
   cleanupReason,
+  cleanupSnapshotStillEligible,
   createSystemdRecord,
+  initializeWorkerLifecycle,
   leaseExpiry,
   normalizeModelForHarness,
+  recordWorkerActivity,
+  workerIdleDeadline,
   stateFromUnit,
   validateEffort,
   validateWorkerId,
@@ -167,28 +172,75 @@ test("Pi agent-info views only include workers attached to that manager session"
   assert.deepEqual(workersAttachedToManager([first, second], "pi-session-a").map((worker) => worker.id), ["first-worker"]);
 });
 
-test("heartbeat lease renewal only applies to workers still live after reconciliation", () => {
+test("heartbeat renewal is activity-gated, capped at the idle deadline, and requests one checkpoint", () => {
+  const createdAt = 1_000;
   const running = createSystemdRecord({
     id: "running-worker", runId: "run-running", harness: "codex", role: "builder", task: "test", cwd: "/tmp",
-    profile: "codex-safe", unit: "running.service", managerSessionId: "session-a", config: DEFAULT_CONFIG, now: 1000,
+    profile: "codex-safe", unit: "running.service", managerSessionId: "session-a", config: DEFAULT_CONFIG, now: createdAt,
   });
   running.state = "running";
-  running.leaseExpiresAt = 2000;
   const failed = createSystemdRecord({
     id: "failed-worker", runId: "run-failed", harness: "codex", role: "builder", task: "test", cwd: "/tmp",
-    profile: "codex-safe", unit: "failed.service", managerSessionId: "session-a", config: DEFAULT_CONFIG, now: 1000,
+    profile: "codex-safe", unit: "failed.service", managerSessionId: "session-a", config: DEFAULT_CONFIG, now: createdAt,
   });
   failed.state = "running";
-  failed.leaseExpiresAt = 2000;
   const observedFailed = { ...failed, state: "failed" as const };
   const state = { version: 1 as const, workers: [running, failed] };
-  const renewed = renewObservedWorkerLeases(state, [structuredClone(running), observedFailed], "session-a", DEFAULT_CONFIG, 3000);
-  assert.deepEqual(renewed.map((worker) => worker.id), ["running-worker"]);
-  assert.equal(running.leaseExpiresAt, leaseExpiry(DEFAULT_CONFIG, 3000));
-  assert.equal(failed.leaseExpiresAt, 2000);
+
+  const activeHeartbeatAt = createdAt + 20 * 60_000;
+  const active = renewObservedWorkerLeases(state, [structuredClone(running), observedFailed], "session-a", DEFAULT_CONFIG, activeHeartbeatAt);
+  assert.deepEqual(active.renewed.map((worker) => worker.id), ["running-worker"]);
+  assert.deepEqual(active.checkpointRequested, []);
+  assert.equal(running.leaseExpiresAt, boundedLeaseExpiry(DEFAULT_CONFIG, createdAt, activeHeartbeatAt));
+  assert.equal(failed.leaseExpiresAt, leaseExpiry(DEFAULT_CONFIG, createdAt));
+
+  const warningAt = workerIdleDeadline(DEFAULT_CONFIG, createdAt) - DEFAULT_CONFIG.checkpointWarningMinutes * 60_000;
+  const warning = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, warningAt);
+  assert.equal(running.leaseExpiresAt, workerIdleDeadline(DEFAULT_CONFIG, createdAt));
+  assert.deepEqual(warning.checkpointRequested.map((worker) => worker.id), ["running-worker"]);
+  const duplicate = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, warningAt + 1_000);
+  assert.deepEqual(duplicate.checkpointRequested, []);
+  const retry = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, warningAt + DEFAULT_CONFIG.checkpointRetryMinutes * 60_000);
+  assert.deepEqual(retry.checkpointRequested.map((worker) => worker.id), ["running-worker"]);
+  assert.equal(running.checkpointAttemptCount, 2);
+  const expired = renewObservedWorkerLeases(state, [structuredClone(running)], "session-a", DEFAULT_CONFIG, workerIdleDeadline(DEFAULT_CONFIG, createdAt) + 1);
+  assert.deepEqual(expired.renewed, []);
 });
 
-test("cleanup only selects owned live workers with expired leases", () => {
+test("manager-received worker Intercom activity resets the idle budget but manager sends cannot", () => {
+  const worker = createSystemdRecord({
+    id: "worker-a", runId: "run-a", harness: "pi", role: "advisor", task: "test", cwd: "/tmp", profile: "pi-peer",
+    unit: "worker-a.service", managerSessionId: "manager-a", config: DEFAULT_CONFIG, now: 1_000,
+  });
+  worker.state = "running";
+  worker.checkpointRequestedAt = 2_000;
+  const state = { version: 1 as const, workers: [worker] };
+  assert.equal(recordIntercomWorkerActivity(state, "manager-a", { id: "other", name: "other" }, DEFAULT_CONFIG, 3_000), undefined);
+  assert.equal(recordIntercomWorkerActivity(state, "manager-a", { id: "spoof", name: "worker-a" }, DEFAULT_CONFIG, 3_500), undefined);
+  const updated = recordIntercomWorkerActivity(state, "manager-a", { id: "worker-a", name: "display-name" }, DEFAULT_CONFIG, 4_000);
+  assert.equal(updated?.lastWorkerActivityAt, 4_000);
+  assert.equal(updated?.idleDeadlineAt, workerIdleDeadline(DEFAULT_CONFIG, 4_000));
+  assert.equal(updated?.checkpointRequestedAt, undefined);
+});
+
+test("legacy live records receive a complete idle window during lifecycle migration", () => {
+  const worker = createSystemdRecord({
+    id: "legacy-worker", runId: "legacy-run", harness: "pi", role: "advisor", task: "test", cwd: "/tmp",
+    profile: "pi-peer", unit: "legacy.service", managerSessionId: "manager", config: DEFAULT_CONFIG, now: 1_000,
+  });
+  worker.state = "running";
+  worker.leaseExpiresAt = 0;
+  delete worker.lastWorkerActivityAt;
+  delete worker.idleDeadlineAt;
+  delete worker.checkpointDeadlineAt;
+  const migratedAt = 50_000;
+  assert.equal(initializeWorkerLifecycle(worker, DEFAULT_CONFIG, migratedAt), true);
+  assert.equal(worker.lastWorkerActivityAt, migratedAt);
+  assert.equal(worker.idleDeadlineAt, workerIdleDeadline(DEFAULT_CONFIG, migratedAt));
+  assert.equal(cleanupReason(worker, migratedAt), undefined);
+});
+
+test("cleanup waits through the checkpoint grace and only selects owned live workers", () => {
   const base: WorkerRecord = createSystemdRecord({
     id: "worker-a",
     runId: "run-a",
@@ -203,15 +255,36 @@ test("cleanup only selects owned live workers with expired leases", () => {
     now: 1000,
   });
   base.state = "running";
-  base.leaseExpiresAt = 2000;
-  assert.match(cleanupReason(base, 3000) ?? "", /lease expired/);
-  assert.equal(cleanupReason({ ...base, owned: false }, 3000), undefined);
-  assert.equal(cleanupReason({ ...base, state: "stopped" }, 3000), undefined);
+  assert.equal(cleanupReason(base, base.idleDeadlineAt!), undefined);
+  assert.equal(cleanupReason(base, base.checkpointDeadlineAt! - 1), undefined);
+  assert.match(cleanupReason(base, base.checkpointDeadlineAt!) ?? "", /checkpoint grace expired/);
+  assert.equal(cleanupReason({ ...base, owned: false }, base.checkpointDeadlineAt!), undefined);
+  assert.equal(cleanupReason({ ...base, state: "stopped" }, base.checkpointDeadlineAt!), undefined);
+});
+
+test("expired cleanup snapshot is fenced by renewal or adoption activity", () => {
+  const worker = createSystemdRecord({
+    id: "race-worker", runId: "race-run", harness: "codex", role: "builder", task: "test", cwd: "/tmp",
+    profile: "codex-safe", unit: "race.service", managerSessionId: "old-manager", config: DEFAULT_CONFIG, now: 1_000,
+  });
+  worker.state = "running";
+  const expectedDeadline = worker.checkpointDeadlineAt!;
+  assert.equal(cleanupSnapshotStillEligible(worker, expectedDeadline, expectedDeadline), true);
+  recordWorkerActivity(worker, DEFAULT_CONFIG, expectedDeadline + 1);
+  worker.managerSessionId = "new-manager";
+  assert.equal(cleanupSnapshotStillEligible(worker, expectedDeadline, expectedDeadline + 2), false);
+  assert.ok(worker.checkpointDeadlineAt! > expectedDeadline);
 });
 
 test("configuration merges profiles, defaults, and role presets without dropping built-ins", () => {
   const config = mergeConfig({
     leaseMinutes: 5,
+    idleTimeoutMinutes: 90,
+    checkpointWarningMinutes: 12,
+    checkpointRetryMinutes: 4,
+    cleanupGraceMinutes: 20,
+    cleanupTimerMinutes: 10,
+    cleanupTimerEnabled: false,
     defaultModels: { pi: "claude/claude-sonnet-5" },
     defaultEfforts: { pi: "max" },
     permissionProfiles: {
@@ -230,6 +303,12 @@ test("configuration merges profiles, defaults, and role presets without dropping
     },
   });
   assert.equal(config.leaseMinutes, 5);
+  assert.equal(config.idleTimeoutMinutes, 90);
+  assert.equal(config.checkpointWarningMinutes, 12);
+  assert.equal(config.checkpointRetryMinutes, 4);
+  assert.equal(config.cleanupGraceMinutes, 20);
+  assert.equal(config.cleanupTimerMinutes, 10);
+  assert.equal(config.cleanupTimerEnabled, false);
   assert.equal(config.defaultModels.pi, "claude/claude-sonnet-5");
   assert.equal(config.defaultEfforts.pi, "max");
   assert.equal(config.roles.auditor.harness, "pi");
