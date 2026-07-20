@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { applyPiPermissionArgs } from "./permissions.ts";
-import type { Effort, Harness, LaunchProfile, OrchestratorConfig, PermissionProfile, UnitStatus, WorkerRecord, WorkerState } from "./types.ts";
+import type { Effort, Harness, LaunchProfile, OrchestratorConfig, PermissionProfile, UnitStatus, WorkerRecord, WorkerState, WorkerStateFile } from "./types.ts";
 
 export const EFFORT_LEVELS: Effort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -258,6 +258,17 @@ export function createSystemdRecord(input: {
 
 export function isLiveState(state: WorkerState): boolean {
   return state === "provisioning" || state === "running" || state === "idle" || state === "needs_attention" || state === "stopping";
+}
+
+export function reserveWorkerRecord(state: WorkerStateFile, worker: WorkerRecord, _now = Date.now()): void {
+  const index = state.workers.findIndex((candidate) => candidate.id === worker.id);
+  const existing = index >= 0 ? state.workers[index] : undefined;
+  if (state.runtimeCleanupClaims?.some((claim) => claim.workerId === worker.id)) {
+    throw new Error(`Worker ${worker.id} runtime cleanup is in progress`);
+  }
+  if (existing && isLiveState(existing.state)) throw new Error(`Worker ${worker.id} is already ${existing.state}`);
+  if (index >= 0) state.workers[index] = worker;
+  else state.workers.push(worker);
 }
 
 export function cleanupReason(worker: WorkerRecord, now = Date.now()): string | undefined {

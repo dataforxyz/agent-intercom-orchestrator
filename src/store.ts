@@ -17,9 +17,13 @@ function isProcessAlive(pid: number): boolean {
 
 function normalizeState(value: unknown): WorkerStateFile {
   if (!value || typeof value !== "object") return structuredClone(EMPTY_STATE);
-  const input = value as { version?: unknown; workers?: unknown };
+  const input = value as { version?: unknown; workers?: unknown; runtimeCleanupClaims?: unknown };
   if (input.version !== 1 || !Array.isArray(input.workers)) return structuredClone(EMPTY_STATE);
-  return { version: 1, workers: input.workers as WorkerRecord[] };
+  return {
+    version: 1,
+    workers: input.workers as WorkerRecord[],
+    ...(Array.isArray(input.runtimeCleanupClaims) ? { runtimeCleanupClaims: input.runtimeCleanupClaims as WorkerStateFile["runtimeCleanupClaims"] } : {}),
+  };
 }
 
 export class WorkerStore {
@@ -100,6 +104,42 @@ export class WorkerStore {
         const value = await fn(state);
         await this.write(state);
         return value;
+      } finally {
+        await release?.();
+      }
+    });
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async mutateConditionally<T>(
+    fn: (state: WorkerStateFile) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
+  ): Promise<T> {
+    const operation = this.queue.catch(() => undefined).then(async () => {
+      let release: (() => Promise<void>) | undefined;
+      try {
+        release = await this.acquireLock();
+        const state = await this.read();
+        const result = await fn(state);
+        if (result.changed) await this.write(state);
+        return result.value;
+      } finally {
+        await release?.();
+      }
+    });
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async transaction<T>(
+    fn: (state: WorkerStateFile, persist: () => Promise<void>) => T | Promise<T>,
+  ): Promise<T> {
+    const operation = this.queue.catch(() => undefined).then(async () => {
+      let release: (() => Promise<void>) | undefined;
+      try {
+        release = await this.acquireLock();
+        const state = await this.read();
+        return await fn(state, () => this.write(state));
       } finally {
         await release?.();
       }

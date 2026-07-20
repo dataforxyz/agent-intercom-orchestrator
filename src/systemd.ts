@@ -152,6 +152,36 @@ export async function readUnitProcessTree(runner: CommandRunner, unit: string): 
   return { tree: result.stdout.trim(), pids: [...new Set(pids)] };
 }
 
+export async function verifyUnitAbsentAndEmpty(
+  runner: CommandRunner,
+  unit: string,
+): Promise<{ absent: boolean; reason?: string }> {
+  const status = await runner.exec(
+    "systemctl",
+    ["--user", "show", unit, "--no-pager", "--property=LoadState,ActiveState,SubState,MainPID"],
+    { timeout: 5000 },
+  );
+  const values = parseSystemctlShow(status.stdout);
+  if (values.LoadState !== "not-found") {
+    if (status.code !== 0) {
+      return { absent: false, reason: `could not verify unit state: ${status.stderr.trim() || `exit ${status.code}`}` };
+    }
+    return { absent: false, reason: `unit is still loaded (${values.ActiveState || "unknown"}/${values.SubState || "unknown"})` };
+  }
+  const processes = await runner.exec("systemd-cgls", ["--user-unit", unit, "--no-pager", "--full"], { timeout: 5000 });
+  if (processes.code === 0) {
+    const pids = [...processes.stdout.matchAll(/[├└]─(\d+)\s/g)]
+      .map((match) => Number(match[1]))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+    return pids.length
+      ? { absent: false, reason: `unit cgroup still owns processes: ${[...new Set(pids)].join(", ")}` }
+      : { absent: true };
+  }
+  const diagnostic = `${processes.stdout}\n${processes.stderr}`;
+  if (/not found|not loaded|no such (?:file|process|unit)|does not exist/i.test(diagnostic)) return { absent: true };
+  return { absent: false, reason: `could not verify unit cgroup absence: ${processes.stderr.trim() || `exit ${processes.code}`}` };
+}
+
 export async function stopUnit(runner: CommandRunner, unit: string): Promise<void> {
   try {
     const result = await runner.exec("systemctl", ["--user", "stop", unit], { timeout: 15000 });
@@ -179,6 +209,23 @@ export async function listWorkerUnits(runner: CommandRunner): Promise<string[]> 
   );
   if (result.code !== 0) return [];
   return result.stdout.split("\n").map((line) => line.trim().split(/\s+/, 1)[0]).filter(Boolean);
+}
+
+export async function listWorkerUnitsForVerification(
+  runner: CommandRunner,
+): Promise<{ verified: boolean; units: string[]; reason?: string }> {
+  const result = await runner.exec(
+    "systemctl",
+    ["--user", "list-units", "agent-intercom-worker-*", "--all", "--no-legend", "--no-pager", "--plain"],
+    { timeout: 10000 },
+  );
+  if (result.code !== 0) {
+    return { verified: false, units: [], reason: result.stderr.trim() || `exit ${result.code}` };
+  }
+  return {
+    verified: true,
+    units: result.stdout.split("\n").map((line) => line.trim().split(/\s+/, 1)[0]).filter(Boolean),
+  };
 }
 
 export async function readUnitLogs(runner: CommandRunner, unit: string, lines = 80): Promise<string> {

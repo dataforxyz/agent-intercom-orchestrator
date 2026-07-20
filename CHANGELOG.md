@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add global worker-runtime retention with 60-minute terminal cache pruning, 7-day terminal runtime/record removal, and 60-minute unregistered-runtime cleanup; cleanup previews distinguish stop/cache/full/orphan actions and estimate bytes.
+- Revalidate record, same-ID systemd units, and cgroup absence through durable phased cleanup claims for terminal and orphan runtimes. Persist exact path mappings before atomic quarantine renames, roll back interrupted moves, resume committed deletion after crashes, retain the same-ID spawn fence through recursive removal, and isolate per-candidate failures while keeping slow work outside the worker-state lock.
 - Replace manager-heartbeat lease extension with activity-gated renewal: only manager-received worker Intercom traffic or explicit `renew` extends a worker, and renewal is capped at the configured idle deadline.
 - Request and retry checkpoints before idle expiry, preserve a grace/adoption window, and install a persistent systemd user timer that stops only exact expired owned cgroups even when no manager is running.
 - Preserve stopped worker records with stop/dirty-state evidence and require explicit manager `acknowledge: true` before `forget` removes a record.

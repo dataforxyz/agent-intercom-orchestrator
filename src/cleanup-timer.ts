@@ -34,7 +34,7 @@ export function cleanupUnitContents(input: {
   ];
   const service = [
     "[Unit]",
-    "Description=Stop expired Agent Intercom worker cgroups",
+    "Description=Apply Agent Intercom worker lifecycle and runtime retention",
     "After=default.target",
     "",
     "[Service]",
@@ -47,7 +47,7 @@ export function cleanupUnitContents(input: {
   ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n");
   const timer = [
     "[Unit]",
-    "Description=Periodically clean expired Agent Intercom workers",
+    "Description=Periodically apply Agent Intercom worker retention",
     "",
     "[Timer]",
     "OnBootSec=5min",
