@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -12,8 +12,23 @@ import { CLEANUP_SERVICE, CLEANUP_TIMER, ensureCleanupTimer } from "./cleanup-ti
 import { buildPermissionEnvironment, buildPermissionUnitProperties, registerWorkerPermissionPolicy } from "./permissions.ts";
 import { prepareWorkerRuntime, workerRuntimeRoot, workerSocketRuntimeRoot } from "./runtime.ts";
 import { WorkerStore } from "./store.ts";
-import { getUnitStatus, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, stopUnit, systemdAvailable } from "./systemd.ts";
+import { getUnitStatus, launchUnit, listWorkerUnits, listWorkerUnitsForVerification, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, sanitizeUnitPart, stopUnit, systemdAvailable } from "./systemd.ts";
 import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
+import {
+  type CleanupActionDetail,
+  deleteOrphanRuntimeSafely,
+  deleteTerminalRuntimeSafely,
+  existingTerminalCachePaths,
+  executeCleanupCandidatesIsolated,
+  formatCleanupActions,
+  fullRuntimePaths,
+  inspectPath,
+  inspectFullRuntime,
+  inspectTerminalCaches,
+  listRuntimeRoots,
+  recoverStaleRuntimeCleanupClaims,
+  terminalWorkerAt,
+} from "./runtime-retention.ts";
 import {
   boundedLeaseExpiry,
   buildWorkerArgs,
@@ -27,11 +42,13 @@ import {
   isLiveState,
   newRunId,
   recordWorkerActivity,
+  reserveWorkerRecord,
   normalizeModelForHarness,
   stateFromUnit,
   validateEffort,
   validateWorkerId,
 } from "./workers.ts";
+export { reserveWorkerRecord } from "./workers.ts";
 import { detectHarnessVersions, formatAdapterVersions, formatHarnessVersions, formatUpdatePlan, inspectAdapterFamily } from "./updates.ts";
 
 const ACTIONS = [
@@ -119,8 +136,25 @@ type ResolvedSpawn = {
   instructions?: string;
 };
 
+type CleanupCandidate = CleanupActionDetail & {
+  worker?: WorkerRecord;
+  terminalAt?: number;
+  path?: string;
+};
+
 function textResult(text: string, details?: unknown) {
   return { content: [{ type: "text" as const, text }], details };
+}
+
+function cleanupActionDetails(candidates: CleanupCandidate[]): CleanupActionDetail[] {
+  return candidates.map(({ action, workerId, runId, reason, estimatedBytes, paths }) => ({
+    action,
+    workerId,
+    ...(runId ? { runId } : {}),
+    reason,
+    estimatedBytes,
+    ...(paths?.length ? { paths } : {}),
+  }));
 }
 
 function managerSessionId(ctx: ExtensionContext): string {
@@ -254,21 +288,13 @@ export function workersAttachedToManager(workers: WorkerRecord[], sessionId: str
   return workers.filter((worker) => worker.managerSessionId === sessionId);
 }
 
-export function reserveWorkerRecord(state: WorkerStateFile, worker: WorkerRecord): void {
-  const index = state.workers.findIndex((candidate) => candidate.id === worker.id);
-  const existing = index >= 0 ? state.workers[index] : undefined;
-  if (existing && isLiveState(existing.state)) throw new Error(`Worker ${worker.id} is already ${existing.state}`);
-  if (index >= 0) state.workers[index] = worker;
-  else state.workers.push(worker);
-}
-
 export async function removeWorkerRuntimeAndRecord(
   store: WorkerStore,
   worker: WorkerRecord,
   agentDir: string,
   removeRuntime: (path: string) => Promise<void> = async (path) => rm(path, { recursive: true, force: true }),
 ): Promise<void> {
-  await removeRuntime(workerRuntimeRoot(worker.id, agentDir));
+  for (const path of fullRuntimePaths(worker.id, agentDir)) await removeRuntime(path);
   await store.mutate((state) => {
     state.workers = state.workers.filter((candidate) => candidate.id !== worker.id || candidate.runId !== worker.runId);
   });
@@ -402,7 +428,7 @@ function formatConfig(config: OrchestratorConfig, configPath: string): string {
   lines.push(`permissions: ${Object.keys(config.permissionProfiles).sort().join(", ") || "(none)"}`);
   lines.push(`roles: ${Object.keys(config.roles).sort().join(", ") || "(none)"}`);
   lines.push(`lease=${config.leaseMinutes}m idle=${config.idleTimeoutMinutes}m checkpoint-warning=${config.checkpointWarningMinutes}m retry=${config.checkpointRetryMinutes}m grace=${config.cleanupGraceMinutes}m heartbeat=${config.heartbeatSeconds}s max-runtime=${config.maxRuntime}`);
-  lines.push(`cleanup: startup=${config.cleanupExpiredOnStart} shutdown=${config.cleanupOnShutdown} timer=${config.cleanupTimerEnabled ? `${config.cleanupTimerMinutes}m` : "disabled"}`);
+  lines.push(`cleanup: startup=${config.cleanupExpiredOnStart} shutdown=${config.cleanupOnShutdown} timer=${config.cleanupTimerEnabled ? `${config.cleanupTimerMinutes}m` : "disabled"} terminal-cache=${config.terminalCacheRetentionMinutes}m terminal-full=${config.terminalRuntimeRetentionMinutes}m orphan-runtime=${config.orphanRuntimeRetentionMinutes}m`);
   return lines.join("\n");
 }
 
@@ -475,11 +501,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           health: worker.healthPath ? await readOpenCodePeerHealth(worker.healthPath) : undefined,
         })),
     );
-    const { workers, retireUnits } = await store.mutate((state) => {
+    const { workers, retireUnits } = await store.mutateConditionally((state) => {
       const retireUnits: string[] = [];
+      let changed = false;
       for (const observation of observations) {
         const worker = state.workers.find((candidate) => candidate.id === observation.id && candidate.runId === observation.runId && candidate.unit === observation.unit);
         if (!worker) continue;
+        const before = JSON.stringify(worker);
         const observedState = stateFromUnit(observation.status, worker.state);
         const nextState = worker.state === "stopping" && observedState === "running" ? "stopping" : observedState;
         if (observation.health?.runId === worker.runId) {
@@ -497,8 +525,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         if (nextState === "completed" && observation.status.activeState === "active" && observation.status.subState === "exited") {
           retireUnits.push(observation.unit);
         }
+        changed = JSON.stringify(worker) !== before || changed;
       }
-      return { workers: structuredClone(state.workers), retireUnits };
+      return { value: { workers: structuredClone(state.workers), retireUnits }, changed };
     });
     await Promise.allSettled(retireUnits.map((unit) => stopUnit(runner, unit)));
     await updateStatus();
@@ -569,29 +598,137 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return finalWorker;
   };
 
-  const cleanupExpired = async (execute: boolean, now = Date.now()) => {
+  const planCleanup = async (now = Date.now(), estimateBytes = false): Promise<CleanupCandidate[]> => {
+    const recovery = await recoverStaleRuntimeCleanupClaims({ store, runner, agentDir });
+    for (const failure of recovery.errors) {
+      console.error(`[agent-intercom-orchestrator] Runtime cleanup recovery ${failure.token} failed: ${failure.error}`);
+    }
     await reconcile();
-    await store.mutate((state) => {
-      for (const worker of state.workers) initializeWorkerLifecycle(worker, config, now);
+    await store.mutateConditionally((state) => {
+      let changed = false;
+      for (const worker of state.workers) changed = initializeWorkerLifecycle(worker, config, now) || changed;
+      return { value: undefined, changed };
     });
-    const migrated = await store.read();
-    const candidates = migrated.workers
-      .map((worker) => ({ worker, reason: cleanupReason(worker, now) }))
-      .filter((item): item is { worker: WorkerRecord; reason: string } => Boolean(item.reason));
-    if (!execute) return candidates;
-    const stopped: typeof candidates = [];
-    for (const candidate of candidates) {
-      try {
-        await stopWorker(candidate.worker, {
-          reason: "idle-grace-expired",
-          expectedCheckpointDeadlineAt: candidate.worker.checkpointDeadlineAt,
+    const snapshot = await store.read();
+    const candidates: CleanupCandidate[] = snapshot.workers.flatMap((worker) => {
+      const reason = cleanupReason(worker, now);
+      return reason ? [{
+        action: "stop" as const,
+        workerId: worker.id,
+        runId: worker.runId,
+        worker,
+        reason,
+        estimatedBytes: 0,
+      }] : [];
+    });
+    const fullCutoff = now - config.terminalRuntimeRetentionMinutes * 60_000;
+    const cacheCutoff = now - config.terminalCacheRetentionMinutes * 60_000;
+    for (const worker of snapshot.workers) {
+      const terminalAt = terminalWorkerAt(worker);
+      if (terminalAt === undefined || snapshot.runtimeCleanupClaims?.some((claim) => claim.workerId === worker.id)) continue;
+      if (terminalAt <= fullCutoff) {
+        const runtime = estimateBytes ? await inspectFullRuntime(worker.id, agentDir).catch(() => undefined) : undefined;
+        candidates.push({
+          action: "full",
+          workerId: worker.id,
+          runId: worker.runId,
+          worker,
+          terminalAt,
+          reason: `terminal runtime retention expired ${Math.ceil((now - terminalAt) / 60_000)}m after terminal state`,
+          estimatedBytes: (runtime?.estimatedBytes ?? 0) + (estimateBytes ? Buffer.byteLength(JSON.stringify(worker), "utf8") : 0),
+          paths: runtime?.paths ?? fullRuntimePaths(worker.id, agentDir),
         });
-        stopped.push(candidate);
-      } catch (error) {
-        if (!/lifecycle changed|renewed before expired cleanup/.test(error instanceof Error ? error.message : String(error))) throw error;
+        continue;
+      }
+      if (terminalAt <= cacheCutoff) {
+        const cachePaths = await existingTerminalCachePaths(worker.id, agentDir).catch(() => []);
+        if (cachePaths.length) {
+          const caches = estimateBytes ? await inspectTerminalCaches(worker.id, agentDir).catch(() => undefined) : undefined;
+          candidates.push({
+            action: "cache",
+            workerId: worker.id,
+            runId: worker.runId,
+            worker,
+            terminalAt,
+            reason: `terminal cache retention expired ${Math.ceil((now - terminalAt) / 60_000)}m after terminal state`,
+            estimatedBytes: caches?.estimatedBytes ?? 0,
+            paths: caches?.paths ?? cachePaths,
+          });
+        }
       }
     }
-    return stopped;
+    const registeredIds = new Set(snapshot.workers.map((worker) => worker.id));
+    const claimedIds = new Set((snapshot.runtimeCleanupClaims ?? []).map((claim) => claim.workerId));
+    const loadedUnits = await listWorkerUnitsForVerification(runner);
+    if (loadedUnits.verified) {
+      const orphanCutoff = now - config.orphanRuntimeRetentionMinutes * 60_000;
+      for (const runtime of await listRuntimeRoots(agentDir)) {
+        if (registeredIds.has(runtime.workerId) || claimedIds.has(runtime.workerId)) continue;
+        const unitPrefix = `agent-intercom-worker-${sanitizeUnitPart(runtime.workerId)}-`;
+        if (loadedUnits.units.some((unit) => unit.startsWith(unitPrefix))) continue;
+        const metadata = await lstat(runtime.path).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw error;
+        });
+        if (metadata && metadata.mtimeMs <= orphanCutoff) {
+          const inspection = estimateBytes ? await inspectPath(runtime.path) : undefined;
+          candidates.push({
+            action: "orphan",
+            workerId: runtime.workerId,
+            path: runtime.path,
+            reason: `unregistered runtime has been unchanged for ${Math.ceil((now - metadata.mtimeMs) / 60_000)}m`,
+            estimatedBytes: inspection?.estimatedBytes ?? 0,
+            paths: [runtime.path],
+          });
+        }
+      }
+    }
+    return candidates;
+  };
+
+  const executeCleanupCandidate = async (candidate: CleanupCandidate, now: number): Promise<boolean> => {
+    if (candidate.action === "stop") {
+      try {
+        await stopWorker(candidate.worker!, {
+          reason: "idle-grace-expired",
+          expectedCheckpointDeadlineAt: candidate.worker!.checkpointDeadlineAt,
+        });
+        return true;
+      } catch (error) {
+        if (/lifecycle changed|renewed before expired cleanup/.test(error instanceof Error ? error.message : String(error))) return false;
+        throw error;
+      }
+    }
+    if (candidate.action === "orphan") {
+      return deleteOrphanRuntimeSafely({
+        store,
+        runner,
+        config,
+        workerId: candidate.workerId,
+        agentDir,
+        path: candidate.path!,
+        now,
+      });
+    }
+    return deleteTerminalRuntimeSafely({
+      store,
+      runner,
+      config,
+      agentDir,
+      workerId: candidate.workerId,
+      runId: candidate.runId!,
+      terminalAt: candidate.terminalAt!,
+      action: candidate.action,
+      now,
+    });
+  };
+
+  const cleanupExpired = async (execute: boolean, now = Date.now(), estimateBytes = false) => {
+    const candidates = await planCleanup(now, estimateBytes);
+    if (!execute) return { candidates, executed: [] as CleanupCandidate[], errors: [] as Array<{ candidate: CleanupCandidate; error: string }> };
+    const { executed, errors } = await executeCleanupCandidatesIsolated(candidates, (candidate) => executeCleanupCandidate(candidate, now));
+    await updateStatus();
+    return { candidates, executed, errors };
   };
 
   const runLifecycleHeartbeat = async (ctx: ExtensionContext) => {
@@ -736,6 +873,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       workerHealthPath = join(launchStateDir, `${id}.health.json`);
       workerStatePath = join(launchStateDir, `${id}.state.json`);
     }
+    await recoverStaleRuntimeCleanupClaims({ store, runner, agentDir });
     await store.mutate((state) => reserveWorkerRecord(state, worker));
     try {
       const runtime = permissionProfile.hardened ? await prepareWorkerRuntime(harness, id, agentDir) : undefined;
@@ -922,12 +1060,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
 
       if (params.action === "cleanup") {
-        const candidates = await cleanupExpired(Boolean(params.execute));
-        if (candidates.length === 0) return textResult("No owned workers have expired leases.", { candidates: [] });
-        const lines = candidates.map(({ worker, reason }) => `${worker.id}: ${reason}`);
+        const automatic = process.env.AGENT_INTERCOM_AUTOMATIC_CLEANUP === "1";
+        const result = await cleanupExpired(Boolean(params.execute), Date.now(), !automatic);
+        if (result.candidates.length === 0) return textResult("No worker cleanup actions are currently eligible.", { actions: [], executed: [], estimatedBytes: 0, scope: "global" });
+        const actions = cleanupActionDetails(result.candidates);
+        const executed = cleanupActionDetails(result.executed);
+        const estimatedBytes = actions.reduce((bytes, action) => bytes + action.estimatedBytes, 0);
+        const failures = result.errors.map(({ candidate, error }) => ({ action: candidate.action, workerId: candidate.workerId, error }));
+        const failureText = failures.length ? `\nFailures:\n${failures.map((failure) => `[${failure.action}] ${failure.workerId}: ${failure.error}`).join("\n")}` : "";
         return textResult(
-          `${params.execute ? "Cleaned" : "Cleanup preview"}:\n${lines.join("\n")}${params.execute ? "" : "\nRun cleanup with execute=true to stop these owned workers."}`,
-          { candidates },
+          `${params.execute ? `Cleanup executed ${executed.length}/${actions.length} eligible actions` : "Cleanup preview"}:\n${formatCleanupActions(result.candidates)}${failureText}${params.execute ? "" : "\nRun cleanup with execute=true to apply these global actions."}`,
+          { actions, executed, failures, estimatedBytes, scope: "global" },
         );
       }
 
@@ -1048,6 +1191,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         const owner = managerSessionId(ctx);
         const worker = await store.mutate((state) => {
           const current = extractWorkers(state, params.id)[0];
+          if (state.runtimeCleanupClaims?.some((claim) => claim.workerId === current.id)) {
+            throw new Error(`Worker ${current.id} runtime cleanup is in progress`);
+          }
           if (isLiveState(current.state)) {
             if (current.managerSessionId !== owner) throw new Error(`Worker ${current.id} belongs to another manager session; adopt it before forgetting`);
             throw new Error(`Refusing to forget live worker ${current.id}; stop it first`);
@@ -1293,6 +1439,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const checkpointWarning = await ctx.ui.input("Checkpoint warning minutes before idle deadline", String(draft.checkpointWarningMinutes));
           const checkpointRetry = await ctx.ui.input("Checkpoint retry minutes", String(draft.checkpointRetryMinutes));
           const cleanupGrace = await ctx.ui.input("Cleanup grace minutes after idle deadline", String(draft.cleanupGraceMinutes));
+          const terminalCacheRetention = await ctx.ui.input("Terminal cache retention minutes", String(draft.terminalCacheRetentionMinutes));
+          const terminalRuntimeRetention = await ctx.ui.input("Full terminal runtime retention minutes", String(draft.terminalRuntimeRetentionMinutes));
+          const orphanRuntimeRetention = await ctx.ui.input("Unregistered runtime retention minutes", String(draft.orphanRuntimeRetentionMinutes));
           const cleanupTimerChoice = await ctx.ui.select("Enable managerless cleanup timer?", preferredFirst(["yes", "no"], draft.cleanupTimerEnabled ? "yes" : "no"));
           const cleanupTimer = await ctx.ui.input("Managerless cleanup timer minutes", String(draft.cleanupTimerMinutes));
           const heartbeatSeconds = await ctx.ui.input("Heartbeat seconds", String(draft.heartbeatSeconds));
@@ -1303,6 +1452,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           if (checkpointWarning && Number(checkpointWarning) > 0) draft.checkpointWarningMinutes = Number(checkpointWarning);
           if (checkpointRetry && Number(checkpointRetry) > 0) draft.checkpointRetryMinutes = Number(checkpointRetry);
           if (cleanupGrace && Number(cleanupGrace) > 0) draft.cleanupGraceMinutes = Number(cleanupGrace);
+          if (terminalCacheRetention && Number(terminalCacheRetention) > 0) draft.terminalCacheRetentionMinutes = Number(terminalCacheRetention);
+          if (terminalRuntimeRetention && Number(terminalRuntimeRetention) > 0) draft.terminalRuntimeRetentionMinutes = Number(terminalRuntimeRetention);
+          if (orphanRuntimeRetention && Number(orphanRuntimeRetention) > 0) draft.orphanRuntimeRetentionMinutes = Number(orphanRuntimeRetention);
           if (cleanupTimerChoice === "yes") draft.cleanupTimerEnabled = true;
           if (cleanupTimerChoice === "no") draft.cleanupTimerEnabled = false;
           if (cleanupTimer && Number(cleanupTimer) > 0) draft.cleanupTimerMinutes = Number(cleanupTimer);
@@ -1351,23 +1503,24 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("agents-cleanup", {
-    description: "Preview or execute cleanup of owned workers with expired leases",
+    description: "Preview or execute global worker lifecycle and runtime retention",
     handler: async (args, ctx) => {
       if (!config) await loadConfig();
       const execute = args.trim() === "execute" || args.trim() === "--execute";
-      const candidates = await cleanupExpired(false);
-      if (candidates.length === 0) {
-        ctx.ui.notify("No owned workers have expired leases.", "info");
+      const preview = await cleanupExpired(false, Date.now(), true);
+      if (preview.candidates.length === 0) {
+        ctx.ui.notify("No worker cleanup actions are currently eligible.", "info");
         return;
       }
-      const summary = candidates.map(({ worker, reason }) => `${worker.id}: ${reason}`).join("\n");
+      const summary = formatCleanupActions(preview.candidates);
       if (!execute) {
-        if (ctx.hasUI) await ctx.ui.editor("Cleanup preview", `${summary}\n\nRun /agents-cleanup execute to stop them.`);
+        if (ctx.hasUI) await ctx.ui.editor("Cleanup preview", `${summary}\n\nRun /agents-cleanup execute to apply these global actions.`);
         return;
       }
-      if (ctx.hasUI && !(await ctx.ui.confirm("Stop expired workers?", summary))) return;
-      await cleanupExpired(true);
-      ctx.ui.notify(`Stopped ${candidates.length} expired worker${candidates.length === 1 ? "" : "s"}.`, "info");
+      if (ctx.hasUI && !(await ctx.ui.confirm("Apply worker cleanup?", summary))) return;
+      const result = await cleanupExpired(true, Date.now(), false);
+      const suffix = result.errors.length ? ` ${result.errors.length} action(s) failed; see logs.` : "";
+      ctx.ui.notify(`Applied ${result.executed.length} of ${result.candidates.length} eligible cleanup actions.${suffix}`, result.errors.length ? "warning" : "info");
     },
   });
 
@@ -1380,7 +1533,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       });
     }
     await reconcile();
-    if (config.cleanupExpiredOnStart && process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP !== "1") await cleanupExpired(true);
+    if (config.cleanupExpiredOnStart && process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP !== "1") await cleanupExpired(true, Date.now(), false);
     clearInterval(heartbeat);
     heartbeatRunning = false;
     heartbeat = setInterval(() => {

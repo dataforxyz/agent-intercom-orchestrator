@@ -150,9 +150,9 @@ agent_fleet({ action: "forget", id: "codex-build-api", acknowledge: true })
 - `/agents-new` — interactive role, harness, launch profile, permission profile, model, effort, cwd, id, and task wizard
 - `/agents-config` — edit per-harness defaults, lifecycle settings, and role presets
 - `/agents-models [pi|codex|claude|opencode]` — browse available models
-- `/agents-cleanup [execute]` — preview or execute expired-lease cleanup
+- `/agents-cleanup [execute]` — preview or execute global stop/cache/full/orphan cleanup
 
-Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unless `PI_CODING_AGENT_DIR` changes the Pi agent directory. By default, manager-received worker Intercom traffic or explicit `renew` extends a lease, but never beyond 60 minutes since the last worker activity. The manager begins checkpoint requests 10 minutes before that idle deadline and retries every 5 minutes while available; cleanup waits another 15 minutes, then stops the exact owned cgroup. A persistent systemd user timer checks every 15 minutes even when no manager is running. `stop` is always allowed; `forget` requires a stopped record and explicit manager `acknowledge: true`.
+Configuration is stored at `~/.pi/agent/intercom/orchestrator/config.json` unless `PI_CODING_AGENT_DIR` changes the Pi agent directory. By default, manager-received worker Intercom traffic or explicit `renew` extends a lease, but never beyond 60 minutes since the last worker activity. The manager begins checkpoint requests 10 minutes before that idle deadline and retries every 5 minutes while available; cleanup waits another 15 minutes, then stops the exact owned cgroup. A persistent systemd user timer checks globally every 15 minutes even when no manager is running. Terminal caches are pruned after 60 minutes while records and primary session state remain resumable; full terminal private runtimes and records expire after 7 days, and unregistered runtime directories expire after 60 minutes. Configure these with `terminalCacheRetentionMinutes`, `terminalRuntimeRetentionMinutes`, and `orphanRuntimeRetentionMinutes`. Cleanup preview details distinguish `stop`, `cache`, `full`, and `orphan` and report estimated bytes. `stop` is always allowed; `forget` requires a stopped record and explicit manager `acknowledge: true`.
 
 ## Current limitations
 
