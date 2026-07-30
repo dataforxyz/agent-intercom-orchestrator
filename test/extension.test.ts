@@ -61,6 +61,91 @@ test("reconciliation retires completed one-shot units after preserving their com
   }
 });
 
+test("reconciliation observes only live worker units and skips retained terminal history", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-live-reconcile-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSkipStartupCleanup = process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP = "1";
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    const statePath = join(orchestratorDir, "workers.json");
+    await mkdir(orchestratorDir, { recursive: true });
+    const worker = (id: string, state: "running" | "stopped" | "failed" | "lost" | "completed") => ({
+      id,
+      runId: `run-${id}`,
+      harness: "pi",
+      role: "reviewer",
+      task: "review",
+      cwd: "/tmp",
+      state,
+      unit: `agent-intercom-worker-${id}.service`,
+      owned: true,
+      managerSessionId: "manager-a",
+      createdAt: 1,
+      updatedAt: 1,
+      leaseExpiresAt: Date.now() + 60_000,
+      ...(state === "completed" ? { stoppedAt: 2, stopReason: "one-shot-complete" } : {}),
+    });
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      workers: [
+        worker("live", "running"),
+        worker("stopped", "stopped"),
+        worker("failed", "failed"),
+        worker("lost", "lost"),
+        worker("completed", "completed"),
+      ],
+    }));
+
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const observedUnits: string[] = [];
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool() {},
+      registerCommand() {},
+      async exec(command: string, args: string[]) {
+        if (command === "systemctl" && args[1] === "show") {
+          observedUnits.push(args[2]);
+          return {
+            ...commandResult(),
+            stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\n",
+          };
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: "/tmp",
+      mode: "rpc",
+      hasUI: false,
+      sessionManager: { getSessionId: () => "manager-a", getSessionFile: () => undefined },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const extensionUrl = new URL(`../src/index.ts?live-reconcile=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+
+    assert.deepEqual(observedUnits, ["agent-intercom-worker-live.service"]);
+    const saved = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(saved.workers.find((candidate: any) => candidate.id === "live").state, "registering");
+    assert.equal(saved.workers.find((candidate: any) => candidate.id === "stopped").state, "stopped");
+    assert.equal(saved.workers.find((candidate: any) => candidate.id === "failed").state, "failed");
+    assert.equal(saved.workers.find((candidate: any) => candidate.id === "lost").state, "lost");
+    assert.equal(saved.workers.find((candidate: any) => candidate.id === "completed").state, "stopped");
+    assert.equal(saved.workers.find((candidate: any) => candidate.id === "completed").terminalOutcome, "completed");
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSkipStartupCleanup === undefined) delete process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP;
+    else process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP = previousSkipStartupCleanup;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("stop patches the current worker record without clobbering concurrent metadata", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-stop-patch-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

@@ -615,7 +615,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
     const observations = await Promise.all(
       snapshot.workers
-        .filter((worker) => worker.state !== "migration_pending")
+        .filter((worker) => isLiveState(worker.state))
         .filter((worker) => typeof worker.unit === "string")
         .map(async (worker) => {
           const unit = worker.unit!;
