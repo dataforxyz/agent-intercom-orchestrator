@@ -1,6 +1,6 @@
 # `/boss` change-plan approval record
 
-> **CURRENT STATUS:** Revision 17 remains the fully approved base specification at SHA-256 `ee871327a61f3ec39df684e27eace1328f2f4e21b69d126fcae15cabc58c0c03`. The additive, non-operational Revision 18 amendment is Council-approved at SHA-256 `600bf7bbf9f9889197e432a5e0efc46d10ca7bea197fe3c6954769053fdd957e` by unchanged-hash Pi Opus 5 `max` → Pi Fable 5 `max` → Codex Sol `xhigh`. This approval records the separate protected-service repository and future trusted-admin boundary; it creates no signing, installation, elevated-action, service, runtime, or production authority. The two named human trust-policy decisions remain unresolved and blocking.
+> **CURRENT STATUS:** Revision 17 remains the fully approved base specification at SHA-256 `ee871327a61f3ec39df684e27eace1328f2f4e21b69d126fcae15cabc58c0c03`. Revision 18 remains the Council-approved protected-repository/trusted-admin amendment at SHA-256 `600bf7bbf9f9889197e432a5e0efc46d10ca7bea197fe3c6954769053fdd957e`. The additive, non-operational Revision 19 trust-decisions amendment is Council-approved at SHA-256 `38feaf5d6a3b75bec5e848a38e4496fdb082d4ece750767e7d6eed90a4fa8eb8` by unchanged-hash Pi Opus 5 `max` → Pi Fable 5 `max` → Codex Sol `xhigh`. It selects witnessed transparency with intersecting stateful witness quorums and exactly one installable artifact per `(channel,target,version)`. These approvals create no signing, installation, elevated-action, service, runtime, or production authority.
 
 Formerly approved artifact:
 
@@ -94,3 +94,22 @@ Before implementation, copy the exact approved plan and this approval record int
 - Amendment effect: authorizes only the documented architectural scope and governance record. It does not create or approve a trust root, signing ceremony, key, release, installer, path, UID, package, service, runtime, elevated action, or production availability.
 - Still unresolved and blocking: split-view/cross-verifier equivocation policy, and artifact cardinality for each `(channel,target,version)`.
 - Any change to the amendment bytes invalidates this chain and requires a new SHA-256 plus a restart at Pi Opus.
+
+## Revision 19 trust-decisions amendment approval chain
+
+- Amendment path: `docs/boss-workflow-revision-19-trust-decisions.md`
+- Repository base commit: `08d36e1074245f67f3a3f465ef82aa58486dcb79`
+- Revision 17 SHA-256: `ee871327a61f3ec39df684e27eace1328f2f4e21b69d126fcae15cabc58c0c03`
+- Revision 18 SHA-256: `600bf7bbf9f9889197e432a5e0efc46d10ca7bea197fe3c6954769053fdd957e`
+- Exact-byte Revision 19 amendment SHA-256: `38feaf5d6a3b75bec5e848a38e4496fdb082d4ece750767e7d6eed90a4fa8eb8`
+- Exact-byte amendment size: 8,223 bytes
+- User authorization: the user's broad instruction to proceed and make the reviewed design happen, followed by confirmation that the recommended defaults had already been approved, authorizes these specification decisions and this exact Council sequence only. It does not authorize keys, signing, `sudo`, installation, services, system mutation, releases, or Boss activation.
+- Superseded Revision 19 candidate SHA-256 `9da0864609f24c24f438d6105386465dd2fa9c8bbd9648e650781781fc3c904b`: Opus **APPROVE**, Fable **APPROVE**, Sol **REVISE**. Sol found that a 1-of-N stateless witness policy lacked quorum intersection and cross-log continuity. No approval carries forward from that candidate.
+- Repair: require one active log per trust generation; distinct witnesses counted once; witness set size `n` and threshold `t` with `2t > n`; mutually independent control domains; persisted per-log witness consistency state; verifier checkpoint and global `(channel,target)` release high-water marks; and root-authorized log transitions preserving monotonicity with no simultaneous fallback or reset.
+- `claude/claude-opus-5` at `max`: **APPROVE** — worker `boss-revision19-opus-r2-review` independently matched the exact hash with `sha256sum`, OpenSSL, and Python at start/end; verified quorum intersection and the complete fail-closed authority boundary.
+- `claude/claude-fable-5` at `max`: **APPROVE** — worker `boss-revision19-fable-r2-review` independently matched the exact hash at start/end with `sha256sum` and OpenSSL; verified the repaired split-view policy, exact artifact cardinality, and non-authority boundaries.
+- `gpt-5.6-sol` at `xhigh`: **FINAL APPROVE** — worker `boss-revision19-sol-r2-final` independently matched the exact hash and confirmed its prior policy blocker was closed without introducing elevated, cryptographic, runtime, installation, or production authority.
+- Sequence completed on exact unchanged repaired bytes: Pi Opus **APPROVE** → Pi Fable **APPROVE** → Codex Sol **FINAL APPROVE**.
+- Approved policy decisions: an append-only transparency log plus independently controlled, stateful, intersecting witness quorums; and exactly one installable artifact for each `(channel,target,version)`, with SBOM/provenance/attestations/build records separately typed and digest-bound.
+- Amendment effect: unblocks drafting semantic schemas and validation rules only. Production identities, algorithms, keys, trust roots, ceremony, verifier, installer, services, elevation, releases, and Boss remain unavailable.
+- Any change to the Revision 19 amendment bytes invalidates this chain and requires a new SHA-256 plus restart at Pi Opus.
