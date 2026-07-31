@@ -1,6 +1,6 @@
 # `/boss` change-plan approval record
 
-> **CURRENT STATUS:** Revision 17 remains the fully approved base specification at SHA-256 `ee871327a61f3ec39df684e27eace1328f2f4e21b69d126fcae15cabc58c0c03`. Revision 18 remains the Council-approved protected-repository/trusted-admin amendment at SHA-256 `600bf7bbf9f9889197e432a5e0efc46d10ca7bea197fe3c6954769053fdd957e`. The additive, non-operational Revision 19 trust-decisions amendment is Council-approved at SHA-256 `38feaf5d6a3b75bec5e848a38e4496fdb082d4ece750767e7d6eed90a4fa8eb8` by unchanged-hash Pi Opus 5 `max` → Pi Fable 5 `max` → Codex Sol `xhigh`. It selects witnessed transparency with intersecting stateful witness quorums and exactly one installable artifact per `(channel,target,version)`. These approvals create no signing, installation, elevated-action, service, runtime, or production authority.
+> **CURRENT STATUS:** Revision 17 remains the fully approved base specification at SHA-256 `ee871327a61f3ec39df684e27eace1328f2f4e21b69d126fcae15cabc58c0c03`; Revision 18 remains the protected-repository/trusted-admin amendment at `600bf7bbf9f9889197e432a5e0efc46d10ca7bea197fe3c6954769053fdd957e`; and Revision 19 remains the witnessed-transparency/artifact-cardinality amendment at `38feaf5d6a3b75bec5e848a38e4496fdb082d4ece750767e7d6eed90a4fa8eb8`. Revision 20 is approved at SHA-256 `2d8395a3545159980487fdcd9eaa3aed644c88006e6523dd83455f42ed874f89` and records the user's governance decision that every review after Revision 19 uses unchanged-hash Pi Fable 5 `max` → Codex Sol `xhigh`; Opus is no longer required. These approvals create no signing, installation, elevated-action, service, runtime, or production authority.
 
 Formerly approved artifact:
 
@@ -112,4 +112,21 @@ Before implementation, copy the exact approved plan and this approval record int
 - Sequence completed on exact unchanged repaired bytes: Pi Opus **APPROVE** → Pi Fable **APPROVE** → Codex Sol **FINAL APPROVE**.
 - Approved policy decisions: an append-only transparency log plus independently controlled, stateful, intersecting witness quorums; and exactly one installable artifact for each `(channel,target,version)`, with SBOM/provenance/attestations/build records separately typed and digest-bound.
 - Amendment effect: unblocks drafting semantic schemas and validation rules only. Production identities, algorithms, keys, trust roots, ceremony, verifier, installer, services, elevation, releases, and Boss remain unavailable.
-- Any change to the Revision 19 amendment bytes invalidates this chain and requires a new SHA-256 plus restart at Pi Opus.
+- Any change to the Revision 19 amendment bytes invalidates this historical chain and requires review under the then-governing protocol.
+
+## Revision 20 review-protocol amendment approval chain
+
+- Amendment path: `docs/boss-workflow-revision-20-review-protocol.md`
+- Repository base commit: `10aa89f8206085a7d63386958f158c1f39516bb5`
+- Revision 17 SHA-256: `ee871327a61f3ec39df684e27eace1328f2f4e21b69d126fcae15cabc58c0c03`
+- Revision 18 SHA-256: `600bf7bbf9f9889197e432a5e0efc46d10ca7bea197fe3c6954769053fdd957e`
+- Revision 19 SHA-256: `38feaf5d6a3b75bec5e848a38e4496fdb082d4ece750767e7d6eed90a4fa8eb8`
+- Exact-byte Revision 20 amendment SHA-256: `2d8395a3545159980487fdcd9eaa3aed644c88006e6523dd83455f42ed874f89`
+- Exact-byte amendment size: 3,359 bytes
+- User authorization: explicit direction to “drop the opus approval from now on; just do the other two; keep going.” This is review-governance authority only and does not authorize implementation, crypto, signing, elevation, installation, services, releases, runtime activation, or Boss.
+- `claude/claude-fable-5` at `max`: **APPROVE** — worker `boss-revision20-fable-review` independently matched the amendment SHA-256 with `sha256sum` and OpenSSL, verified all predecessor hashes and chains, and found the user-directed Fable→Sol protocol coherent, non-circular, and non-operational.
+- `gpt-5.6-sol` at `xhigh`: **FINAL APPROVE** — worker `boss-revision20-sol-final-review` independently matched the same exact hash and hostile-reviewed the governance override, exact tuples/order/restart, external ledger, predecessor preservation, and non-authority boundary with no blocker.
+- Sequence completed on exact unchanged bytes: Pi Fable **APPROVE** → Codex Sol **FINAL APPROVE**.
+- Governing effect: every amendment and review after Revision 19 uses Pi Fable 5 `max` followed by Codex Sol `xhigh`. Any byte change restarts at Pi Fable. Opus is neither required nor part of future sequences.
+- Existing Revision 17, Revision 18, and Revision 19 approval chains remain valid historical records and are not retroactively changed.
+- Any change to the Revision 20 amendment bytes invalidates this chain and requires restart at Pi Fable.
