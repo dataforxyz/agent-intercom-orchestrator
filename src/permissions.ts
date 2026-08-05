@@ -30,7 +30,7 @@ export const SAFE_PI_MANAGER_TOOLS = [
   "bash",
 ];
 
-export const SAFE_PI_BOSS_RALPH_TOOLS = ["ralph_start", "ralph_done"] as const;
+export const SAFE_PI_BOSS_RALPH_TOOLS = ["ralph_start", "ralph_update", "ralph_done"] as const;
 
 const SENSITIVE_HOME_PATHS = [
   "~/.ssh",

@@ -79,9 +79,15 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     const lifecycle = new Map<string, (...args: any[]) => any>();
     const tools = new Map<string, any>();
     const launches: string[][] = [];
+    const intercomDeliveries: Array<{ to: string; message: string }> = [];
     const pi: any = {
       on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
-      events: { on() { return () => {}; }, emit() {} },
+      events: {
+        on() { return () => {}; },
+        emit(name: string, payload: { to: string; message: string }) {
+          if (name === "agent-intercom:lifecycle-send") intercomDeliveries.push(payload);
+        },
+      },
       registerTool(tool: any) { tools.set(tool.name, tool); },
       registerCommand() {},
       async exec(command: string, args: string[]) {
@@ -128,7 +134,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       const toolsIndex = launch.indexOf("--tools");
       assert.notEqual(toolsIndex, -1);
       const allowedTools = launch[toolsIndex + 1].split(",");
-      assert.deepEqual(allowedTools.slice(-2), ["ralph_start", "ralph_done"]);
+      assert.deepEqual(allowedTools.slice(-3), ["ralph_start", "ralph_update", "ralph_done"]);
       assert.equal(allowedTools.includes("agent_fleet"), false);
       assert.equal(allowedTools.includes("boss"), false);
       const prompt = launch.join("\n");
@@ -138,8 +144,19 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     const managerPrompt = launches.find((args) => args.includes("--setenv=AGENT_INTERCOM_BOSS_ROLE=manager"))!.join("\n");
     assert.match(managerPrompt, /At the start of every Ralph iteration, call intercom_team/);
     assert.match(managerPrompt, /Every iteration, send bounded progress nudges to both Worker and Scout/);
+    assert.match(managerPrompt, /stop without ralph_done so inbound Intercom can wake the idle Manager/);
     const workerPrompt = launches.find((args) => args.includes("--setenv=AGENT_INTERCOM_BOSS_ROLE=worker"))!.join("\n");
     assert.match(workerPrompt, /Report concrete progress, verification evidence, and blockers to the Manager/);
+    assert.equal(intercomDeliveries.length, 3);
+    assert.deepEqual(intercomDeliveries.map((delivery) => delivery.to).sort(), [
+      `boss-manager-${suffix}`,
+      `boss-scout-${suffix}`,
+      `boss-worker-${suffix}`,
+    ].sort());
+    for (const delivery of intercomDeliveries) {
+      assert.match(delivery.message, /Initial (manager|worker|scout) assignment/);
+      assert.match(delivery.message, /Begin now using the isolated Ralph protocol/);
+    }
 
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
   } finally {

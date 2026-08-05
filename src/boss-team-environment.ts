@@ -57,6 +57,7 @@ export function buildTrustedLocalBossParticipantPrompt(identity: TrustedLocalBos
       "Every iteration, send bounded progress nudges to both Worker and Scout with intercom_send; never passively wait for updates.",
       "Escalation is bounded: after one missing or stale update, nudge the participant; after two consecutive stale checks, report the blocker to the Controller and reassign other unblocked work.",
       "Integrate evidence, assign the next bounded work, and report a concise team summary to the Controller every iteration.",
+      "After sending nudges, if the next useful step depends on Worker or Scout reports, stop the turn without calling ralph_done. Let the inbound Intercom report wake you, integrate it, then continue; never queue Ralph continuations merely to poll.",
     ]
     : identity.role === "adversary"
       ? [
@@ -93,7 +94,9 @@ export function buildTrustedLocalBossParticipantPrompt(identity: TrustedLocalBos
     `Use taskContent exactly as follows: ${JSON.stringify(taskContent)}.`,
     "Set itemsPerIteration=3, reflectEvery=5, maxIterations=100, and endInstructions to report final evidence and blockers to the Manager and Controller.",
     ...reporting,
-    "After productive work, call ralph_done so the next supervised iteration starts; do not use it to poll or wait.",
+    identity.role === "manager"
+      ? "After productive work, call ralph_done only when another unblocked iteration should start immediately. When awaiting Worker or Scout reports, stop without ralph_done so inbound Intercom can wake the idle Manager."
+      : "After productive work, call ralph_done so the next supervised iteration starts; do not use it to poll or wait.",
   ].join("\n");
 }
 

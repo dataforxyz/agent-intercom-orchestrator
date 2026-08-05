@@ -2089,6 +2089,20 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
     }
     const staffed = await trustedLocalBossStore.execute({ action: "status", bossRunId }, managerSessionId(ctx));
+    if (staffed.run) {
+      const snapshot = await store.read();
+      for (const assignment of staffed.run.assignments.filter((candidate) => candidate.state === "assigned" && candidate.workerId && candidate.workerIncarnationId)) {
+        const worker = snapshot.workers.find((candidate) => candidate.id === assignment.workerId
+          && workerIncarnation(candidate) === assignment.workerIncarnationId
+          && candidate.bossRunId === bossRunId
+          && candidate.managerSessionId === staffed.run!.managerSessionId);
+        if (!worker || !isLiveState(worker.state)) continue;
+        pi.events.emit(INTERCOM_LIFECYCLE_SEND_EVENT, {
+          to: worker.intercomTarget ?? worker.id,
+          message: `${TRUSTED_LOCAL_BOSS_WARNING}\nInitial ${assignment.role} assignment for Boss run ${bossRunId}: ${assignment.task}\nBegin now using the isolated Ralph protocol from your launch mandate.`,
+        });
+      }
+    }
     return staffed;
   }
 
