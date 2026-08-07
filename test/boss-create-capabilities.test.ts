@@ -71,6 +71,19 @@ test("canonical cwd identity accepts a symlink to the exact linked-worktree root
     assert.equal(report.status, "ready");
     assert.equal(report.cwd, worktree);
     assert.deepEqual(report.probes.map((finding) => finding.availability), ["verified", "configured"]);
+
+    const masked = await inspectBossCreateCapabilities({
+      cwd: alias,
+      requirements: { worktree: "write", edit: true },
+      workerPermissionProfileName: "alias-masked-builder",
+      workerPermissionProfile: {
+        ...DEFAULT_PERMISSION_PROFILES["builder-restricted"],
+        inaccessiblePaths: [...(DEFAULT_PERMISSION_PROFILES["builder-restricted"].inaccessiblePaths ?? []), alias],
+      },
+    });
+    assert.equal(masked.status, "blocked");
+    assert.deepEqual(masked.gaps.map((finding) => finding.capability), ["worktree-write", "edit"]);
+    assert.match(masked.gaps[0].evidence, /through canonical path/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

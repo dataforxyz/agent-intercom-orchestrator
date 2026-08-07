@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -110,7 +110,16 @@ function profileBoundaryGap(profile: PermissionProfile, target: string): string 
     for (const configuredPath of paths ?? []) {
       const expanded = expandProfilePath(configuredPath);
       if (!expanded) return `${field} contains a relative path that this create-time probe cannot model`;
-      if (pathsIntersect(expanded, target)) return `${field} entry ${configuredPath} intersects ${target}`;
+      let canonicalExpanded: string | undefined;
+      try {
+        canonicalExpanded = resolve(realpathSync(expanded));
+      } catch {
+        // A missing configured path cannot currently alias the assigned target;
+        // its lexical relationship is still checked below.
+      }
+      if (pathsIntersect(expanded, target) || (canonicalExpanded !== undefined && pathsIntersect(canonicalExpanded, target))) {
+        return `${field} entry ${configuredPath} intersects ${target}${canonicalExpanded && canonicalExpanded !== expanded ? ` through canonical path ${canonicalExpanded}` : ""}`;
+      }
     }
   }
   return undefined;
