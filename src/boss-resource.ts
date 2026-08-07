@@ -205,7 +205,7 @@ export async function cleanupProvisionedBossResource(resource: TrustedLocalBossR
   }
   try {
     await gitDirectoryResult(resource.gitCommonDirectory, ["worktree", "remove", resource.path]);
-    await gitDirectoryResult(resource.gitCommonDirectory, ["branch", "-D", resource.branch]);
+    await gitDirectoryResult(resource.gitCommonDirectory, ["update-ref", "-d", `refs/heads/${resource.branch}`, currentHead]);
     return {
       resource: nextResourceRevision(resource, { existence: "missing", leaseState: "released" }),
       removed: true,

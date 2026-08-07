@@ -1956,6 +1956,30 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
   }
 
+  async function stopBossAssignedWorkers(run: NonNullable<TrustedLocalBossResult["run"]>): Promise<unknown | undefined> {
+    try {
+      const snapshot = await store.read();
+      const failures: string[] = [];
+      for (const assignment of run.assignments.filter((candidate) => candidate.state === "assigned" && candidate.workerId && candidate.workerIncarnationId)) {
+        try {
+          const worker = snapshot.workers.find((candidate) => candidate.id === assignment.workerId && workerIncarnation(candidate) === assignment.workerIncarnationId && candidate.bossRunId === run.bossRunId && candidate.managerSessionId === run.managerSessionId);
+          if (!worker) {
+            const conflicting = snapshot.workers.find((candidate) => candidate.id === assignment.workerId && candidate.bossRunId === run.bossRunId && candidate.managerSessionId === run.managerSessionId);
+            if (conflicting) throw new Error(`Boss ${assignment.role} worker identity changed before terminal cleanup`);
+            continue;
+          }
+          if (isLiveState(worker.state)) await stopWorker(worker, { expectedManagerSessionId: run.managerSessionId, reason: "boss-run-terminal" });
+        } catch (error) {
+          failures.push(`${assignment.role}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (failures.length) throw new Error(failures.join("; "));
+      return undefined;
+    } catch (error) {
+      return error;
+    }
+  }
+
   async function cleanupTerminalBossResource(result: TrustedLocalBossResult): Promise<TrustedLocalBossResult> {
     const current = result.run?.resource;
     if (!result.run || !current || current.leaseState === "released") return result;
@@ -2048,7 +2072,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
 
     if ((request.action === "approve" || request.action === "reject") && result.run) {
-      result = await cleanupTerminalBossResource(result);
+      const stopError = await stopBossAssignedWorkers(result.run);
+      result = stopError === undefined
+        ? await cleanupTerminalBossResource(result)
+        : { ...result, message: `${result.message}\n\nCanonical resource cleanup was not attempted because exact participant shutdown failed: ${stopError instanceof Error ? stopError.message : String(stopError)}` };
     }
 
     if (request.action === "proof" && result.run) {
@@ -2123,27 +2150,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
 
     if (request.action === "cancel" && result.run) {
-      let stopError: unknown;
-      try {
-        const snapshot = await store.read();
-        const failures: string[] = [];
-        for (const assignment of result.run.assignments.filter((candidate) => candidate.state === "assigned" && candidate.workerId && candidate.workerIncarnationId)) {
-          try {
-            const worker = snapshot.workers.find((candidate) => candidate.id === assignment.workerId && workerIncarnation(candidate) === assignment.workerIncarnationId && candidate.bossRunId === result.run!.bossRunId && candidate.managerSessionId === result.run!.managerSessionId);
-            if (!worker) {
-              const conflicting = snapshot.workers.find((candidate) => candidate.id === assignment.workerId && candidate.bossRunId === result.run!.bossRunId && candidate.managerSessionId === result.run!.managerSessionId);
-              if (conflicting) throw new Error(`Boss ${assignment.role} worker identity changed before cancellation`);
-              continue;
-            }
-            if (isLiveState(worker.state)) await stopWorker(worker, { expectedManagerSessionId: result.run!.managerSessionId, reason: "boss-run-cancelled" });
-          } catch (error) {
-            failures.push(`${assignment.role}: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-        if (failures.length) throw new Error(failures.join("; "));
-      } catch (error) {
-        stopError = error;
-      }
+      const stopError = await stopBossAssignedWorkers(result.run);
       result = { title: result.title, message: result.message, run: await trustedLocalBossStore.recordCancellationResult(result.run.bossRunId, stopError) };
       result.message = `${result.run ? `${TRUSTED_LOCAL_BOSS_WARNING}\nrun: ${result.run.bossRunId}\nstate: ${result.run.state}\ncancellation: ${result.run.cancellation?.state}${result.run.cancellation?.error ? ` — ${result.run.cancellation.error}` : ""}` : result.message}`;
       if (result.run?.cancellation?.state === "succeeded") result = await cleanupTerminalBossResource(result);
