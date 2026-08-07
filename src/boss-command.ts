@@ -13,10 +13,13 @@ export const BOSS_COMMAND_ACTIONS = [
 
 export type BossCommandAction = typeof BOSS_COMMAND_ACTIONS[number];
 
+export const BOSS_CREATE_NEEDS = ["worktree", "edit", "test", "git-transport"] as const;
+export type BossCreateNeed = typeof BOSS_CREATE_NEEDS[number];
+
 export type BossCommandRequest =
   | { action: "status"; bossRunId?: string }
   | { action: "doctor" | "plan" }
-  | { action: "create"; goal: string }
+  | { action: "create"; goal: string; needs?: BossCreateNeed[] }
   | { action: "resume" | "pause" | "cancel" | "proof" | "approve" | "reject"; bossRunId: string; note?: string };
 
 export interface BossCommandContextLike {
@@ -34,6 +37,25 @@ function parseRunId(value: string | undefined): string {
   return id;
 }
 
+export function bossCreateRequest(goal: string | undefined, needs?: readonly string[]): BossCommandRequest {
+  const normalizedGoal = goal?.trim() ?? "";
+  if (!normalizedGoal) throw new Error("Boss create requires one explicit goal.");
+  const normalizedNeeds = needs ?? [];
+  if (new Set(normalizedNeeds).size !== normalizedNeeds.length) {
+    throw new Error("Boss create needs must not contain duplicates.");
+  }
+  for (const need of normalizedNeeds) {
+    if (!BOSS_CREATE_NEEDS.includes(need as BossCreateNeed)) {
+      throw new Error(`Unknown Boss create need '${need}'. Choose: ${BOSS_CREATE_NEEDS.join(", ")}.`);
+    }
+  }
+  return {
+    action: "create",
+    goal: normalizedGoal,
+    ...(normalizedNeeds.length ? { needs: [...normalizedNeeds] as BossCreateNeed[] } : {}),
+  };
+}
+
 export function parseBossCommand(input: string): BossCommandRequest {
   const trimmed = input.trim();
   if (!trimmed) return { action: "status" };
@@ -46,7 +68,7 @@ export function parseBossCommand(input: string): BossCommandRequest {
   const action = actionText as BossCommandAction;
   if (action === "create") {
     if (!remainder) throw new Error("/boss create requires one explicit goal.");
-    return { action, goal: remainder };
+    return bossCreateRequest(remainder);
   }
   if (action === "doctor" || action === "plan") {
     if (remainder) throw new Error(`/boss ${action} does not accept arguments.`);

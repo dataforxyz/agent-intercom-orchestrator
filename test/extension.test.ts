@@ -150,13 +150,34 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.match(diagnosed.content[0].text, /Orc Boss trusted-local readiness: warning/);
     assert.match(diagnosed.content[0].text, /required-stack: ready/);
     assert.match(diagnosed.content[0].text, /models: warning/);
+    await assert.rejects(
+      tools.get("boss").execute(
+        "boss-capability-gap-test",
+        { action: "create", goal: "publish through Git", needs: ["git-transport"] },
+        new AbortController().signal,
+        () => {},
+        ctx,
+      ),
+      /BOSS_CAPABILITY_GAP:[\s\S]*No Boss run was created/,
+    );
+    assert.equal(launches.length, 0, "a requested capability gap must fail before staffing");
+    const afterGap = await tools.get("boss").execute("boss-after-gap-status", { action: "status" }, new AbortController().signal, () => {}, ctx);
+    assert.match(afterGap.content[0].text, /No Boss runs are owned by this Controller/);
     const created = await tools.get("boss").execute(
       "boss-launch-test",
-      { action: "create", goal: "ship supervised Ralph loops" },
+      { action: "create", goal: "ship supervised Ralph loops", needs: ["edit", "test"] },
       new AbortController().signal,
       () => {},
       ctx,
     );
+
+    assert.equal(created.details.capabilityReport.status, "ready");
+    assert.deepEqual(created.details.capabilityReport.findings.map((finding: any) => [finding.need, finding.status]), [
+      ["edit", "configured"],
+      ["test", "configured"],
+    ]);
+    assert.match(created.content[0].text, /Boss create capability report: ready/);
+    assert.match(created.content[0].text, /project-specific commands and toolchains are not claimed as preflight-verified/);
 
     assert.equal(launches.length, 3);
     const bossRunId = created.details.run.bossRunId as string;

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   assertDirectInteractiveBossCommand,
   bossAuthorityUnavailableMessage,
+  bossCreateRequest,
   parseBossCommand,
 } from "../src/boss-command.ts";
 
@@ -30,6 +31,18 @@ test("Boss command parser is exact and defaults to status", () => {
   }
   assert.throws(() => parseBossCommand("status boss-run_123 unexpected-detail-token"), /Boss run id must be 8-128/);
   assert.throws(() => parseBossCommand("unknown"), /Unknown \/boss action/);
+});
+
+test("Boss tool create requirements accept only unique declared capability needs", () => {
+  assert.deepEqual(bossCreateRequest("  implement and verify  ", ["worktree", "edit", "test"]), {
+    action: "create",
+    goal: "implement and verify",
+    needs: ["worktree", "edit", "test"],
+  });
+  assert.deepEqual(bossCreateRequest("inspect only", []), { action: "create", goal: "inspect only" });
+  assert.throws(() => bossCreateRequest("", ["edit"]), /requires one explicit goal/);
+  assert.throws(() => bossCreateRequest("work", ["edit", "edit"]), /must not contain duplicates/);
+  assert.throws(() => bossCreateRequest("work", ["remote-shell"]), /Unknown Boss create need/);
 });
 
 test("Boss commands reject every non-interactive invocation", () => {

@@ -138,6 +138,18 @@ boss({ action: "create", goal: "Inspect this repository, make no edits, and repo
 boss({ action: "status" })
 ```
 
+When the goal has concrete execution needs, declare them on the tool call instead of relying on goal-text inference:
+
+```typescript
+boss({
+  action: "create",
+  goal: "Implement and verify the requested change in the assigned worktree.",
+  needs: ["worktree", "edit", "test"],
+})
+```
+
+The optional values are `worktree`, `edit`, `test`, and `git-transport`. Boss checks them before persisting a run. It verifies linked-worktree metadata, reports edit/test access as configured policy rather than proof of successful work, and reports Git transport as a gap because remote reachability, credentials, and write authority are not verified at create time. `BOSS_CAPABILITY_GAP` means no run or participant was created. The successful structured result includes `details.capabilityReport`; `/boss create` remains the goal-only interactive shorthand.
+
 A run displays both a deterministic `<prefix>-<base32-digest>` handle and its exact `boss-...` run ID. Later commands accept either value; mutation results continue to show the exact ID. Multiple nonterminal trusted-local runs may coexist, but each remains owned by its exact creating Controller session.
 
 Status deliberately separates process/transport lifecycle from communication and substantive work. A participant may be `ready` while no authenticated communication has been observed. Each assigned role shows a ten-minute authenticated-communication deadline and becomes `authenticated-communication-stale` if the exact owned WorkerStore incarnation has produced no later authenticated Intercom traffic. Manual lease renewal and adoption update general lifecycle timing but not this dedicated evidence timestamp. Assignment acknowledgement, authenticated communication, and substantive typed checkpoints are reported separately: the timestamp proves communication only, while acknowledgement and substantive-checkpoint telemetry remain explicitly unavailable.

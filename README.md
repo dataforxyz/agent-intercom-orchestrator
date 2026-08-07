@@ -77,6 +77,7 @@ A top-level Pi Controller can create and manage concurrent logical Boss teams th
 boss({ action: "plan" })
 boss({ action: "doctor" })
 boss({ action: "create", goal: "Implement and verify the requested feature" })
+boss({ action: "create", goal: "Implement and verify in the assigned worktree", needs: ["worktree", "edit", "test"] })
 boss({ action: "status" })
 boss({ action: "status", bossRunId: "<handle-or-exact-run-id>" })
 boss({ action: "pause", bossRunId: "<handle-or-exact-run-id>", note: "Hold while CI is investigated" })
@@ -88,6 +89,8 @@ boss({ action: "cancel", bossRunId: "<handle-or-exact-run-id>" })
 ```
 
 The interactive `/boss` command remains available for direct user control. The tool uses the calling top-level Pi session as the exact creating Controller and is absent from Manager, Worker, Scout, and Adversary participants because they launch with orchestration disabled. Only the creating Controller can inspect or mutate its runs. Boss participants currently use independent Pi peers for the exact team contract, even when their configured model identifiers route to different providers; ordinary `agent_fleet` continues to support Pi, Codex, Claude, and OpenCode coworkers.
+
+Tool-based create accepts an optional `needs` list containing `worktree`, `edit`, `test`, and `git-transport`. Requested needs are checked after general readiness but before any run is persisted or participant is launched. A linked worktree is verified from Git administrative metadata; Boss does not create one. Edit and test findings report the enforced Worker permission/tool configuration without claiming that a particular edit or project toolchain succeeded. Git transport remains a gap because create does not verify remote reachability, credentials, or write authority. Any gap returns `BOSS_CAPABILITY_GAP` and creates no run. Successful requested checks are returned in `details.capabilityReport`; later status continues to report runtime/communication evidence and does not reinterpret that create-time preflight as completed work.
 
 Boss status treats `ready` as process/transport lifecycle evidence, not productive work. Detailed status exposes a ten-minute authenticated-communication deadline per exact assigned worker and marks communication stale until WorkerStore observes later authenticated inbound Intercom traffic. Manual lease renewal and adoption do not satisfy this deadline. Assignment acknowledgement, authenticated communication, and substantive typed checkpoints are separate fields: authenticated traffic proves communication only, while acknowledgement and substantive-checkpoint telemetry remain explicitly unavailable until Orc observes those typed events.
 

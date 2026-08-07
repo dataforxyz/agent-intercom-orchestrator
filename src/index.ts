@@ -8,10 +8,11 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_CONFIG, readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
-import { assertDirectInteractiveBossCommand, parseBossCommand } from "./boss-command.ts";
+import { BOSS_CREATE_NEEDS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, type BossCommandRequest } from "./boss-command.ts";
+import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type BossCreateCapabilityReport } from "./boss-create-capabilities.ts";
 import { formatBossReadinessReport, formatBossSetupReport, inspectBossSetup, inspectTrustedLocalBossReadiness } from "./boss-setup.ts";
 import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, trustedLocalBossParticipantTargets, type TrustedLocalBossTeamIdentity } from "./boss-team-environment.ts";
-import { TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore } from "./boss-trusted-local.ts";
+import { TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, type TrustedLocalBossResult } from "./boss-trusted-local.ts";
 import { CLEANUP_SERVICE, CLEANUP_TIMER, ensureCleanupTimer } from "./cleanup-timer.ts";
 import { addPiTools, buildPermissionEnvironment, buildPermissionUnitProperties, registerWorkerPermissionPolicy, SAFE_PI_BOSS_SUPERVISION_TOOLS } from "./permissions.ts";
 import { resolvePiRuntime } from "./pi-runtime.ts";
@@ -1954,10 +1955,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
   }
 
-  async function executeTrustedLocalBoss(args: string, ctx: ExtensionContext) {
+  async function executeTrustedLocalBoss(request: BossCommandRequest, ctx: ExtensionContext): Promise<TrustedLocalBossResult & { capabilityReport?: BossCreateCapabilityReport }> {
     if (!config) await loadConfig();
     trustedLocalBossStore.setHandlePrefix(config.boss.handlePrefix);
-    const request = parseBossCommand(args);
     if (request.action === "plan") {
       const report = await inspectBossSetup({ agentDir });
       return { title: "Orc Boss setup plan", message: formatBossSetupReport(report, "plan") };
@@ -1967,10 +1967,25 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       return { title: "Orc Boss readiness", message: formatBossReadinessReport(report) };
     }
     await synchronizeTrustedLocalBossWorkers();
+    let capabilityReport: BossCreateCapabilityReport | undefined;
     if (request.action === "create") {
       const readiness = await trustedLocalBossReadiness(ctx);
       if (readiness.status === "blocked") {
         throw new Error(`BOSS_TRUSTED_LOCAL_NOT_READY:\n${formatBossReadinessReport(readiness)}`);
+      }
+      if (request.needs?.length) {
+        const workerPermissionProfileName = config.roles.worker?.permissionProfile ?? "builder-restricted";
+        const workerPermissionProfile = config.permissionProfiles[workerPermissionProfileName];
+        if (!workerPermissionProfile) throw new Error(`BOSS_CAPABILITY_GAP: unknown Worker permission profile ${workerPermissionProfileName}; no run was created.`);
+        capabilityReport = await inspectBossCreateCapabilities({
+          cwd: ctx.cwd,
+          needs: request.needs,
+          workerPermissionProfileName,
+          workerPermissionProfile,
+        });
+        if (capabilityReport.status === "blocked") {
+          throw new Error(`BOSS_CAPABILITY_GAP:\n${formatBossCreateCapabilityReport(capabilityReport)}`);
+        }
       }
     }
     let result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
@@ -2164,7 +2179,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         });
       }
     }
-    return staffed;
+    if (!capabilityReport) return staffed;
+    return {
+      ...staffed,
+      message: `${formatBossCreateCapabilityReport(capabilityReport)}\n\n${staffed.message}`,
+      capabilityReport,
+    };
   }
 
   pi.registerTool({
@@ -2180,17 +2200,19 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     parameters: Type.Object({
       action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "cancel", "proof", "approve", "reject"] as const),
       goal: Type.Optional(Type.String({ description: "Explicit goal; required for create." })),
+      needs: Type.Optional(Type.Array(StringEnum(BOSS_CREATE_NEEDS), { description: "Capabilities explicitly required for create; any reported gap blocks run creation.", uniqueItems: true })),
       bossRunId: Type.Optional(Type.String({ description: "Exact Boss run id; required except for create and status-all." })),
       note: Type.Optional(Type.String({ description: "Optional control or decision note." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const args = params.action === "create"
-        ? `create ${params.goal ?? ""}`
-        : `${params.action}${params.bossRunId ? ` ${params.bossRunId}` : ""}${params.note ? ` ${params.note}` : ""}`;
-      const result = await executeTrustedLocalBoss(args, ctx);
+      if (params.action !== "create" && params.needs?.length) throw new Error("Boss create needs are accepted only for action=create.");
+      const request = params.action === "create"
+        ? bossCreateRequest(params.goal, params.needs)
+        : parseBossCommand(`${params.action}${params.bossRunId ? ` ${params.bossRunId}` : ""}${params.note ? ` ${params.note}` : ""}`);
+      const result = await executeTrustedLocalBoss(request, ctx);
       return {
         content: [{ type: "text", text: result.message }],
-        details: { title: result.title, run: result.run, runs: result.runs, communication: result.communication },
+        details: { title: result.title, run: result.run, runs: result.runs, communication: result.communication, capabilityReport: result.capabilityReport },
       };
     },
     renderCall(args, theme) {
@@ -2214,7 +2236,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       try {
         assertDirectInteractiveBossCommand(ctx);
-        const result = await executeTrustedLocalBoss(args, ctx);
+        const result = await executeTrustedLocalBoss(parseBossCommand(args), ctx);
         await ctx.ui.editor(result.title, result.message);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
