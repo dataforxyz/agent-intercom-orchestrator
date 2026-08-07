@@ -393,6 +393,74 @@ test("trusted-local Boss migrates v6/v4 proof packets with explicit unavailable 
   }
 });
 
+test("trusted-local Boss migrates v3 canonical proof, delivery, and decision history as explicitly unbound", async () => {
+  const { dir, store } = await fixture();
+  const path = join(dir, "runs.json");
+  try {
+    const controller = "controller-v3-proof-migration";
+    const { created, fingerprint } = await createFrozenRun(store, controller, "migrate deployed v3 proof history");
+    const bossRunId = created.run!.bossRunId;
+    await store.recordManagerStarted(bossRunId, managerWorker(bossRunId));
+    await store.execute(parseBossCommand(`proof ${bossRunId}`), controller);
+    const reviewer = { ...managerWorker(bossRunId), id: `boss-adversary-${bossRunId.slice(-12)}`, runId: "v3-reviewer", workerIncarnationId: "v3-reviewer", role: "challenger" };
+    await store.recordReviewerStarted(bossRunId, reviewer);
+    const proof = await store.execute(parseBossCommand(`proof ${bossRunId}`), controller, fingerprint);
+    await store.recordProofDelivery(bossRunId, proof.run!.proofPackets[0].proofPacketId, fingerprint);
+    await store.execute(parseBossCommand(`approve ${bossRunId} deployed v3 decision`), controller, fingerprint);
+
+    const legacy = JSON.parse(await readFile(path, "utf8"));
+    legacy.version = "orc.boss-trusted-local.v5";
+    legacy.runs[0].version = "orc.boss-trusted-local.v3";
+    for (const field of ["acceptanceRevision", "designRevision", "freezeTransitions", "currentFreeze"]) delete legacy.runs[0][field];
+    for (const field of ["freezeRevision", "acceptanceRevision", "designRevision", "resourceRevision", "fingerprintSha256"]) delete legacy.runs[0].proofPackets[0][field];
+    await writeFile(path, JSON.stringify(legacy));
+
+    const reopened = new TrustedLocalBossStore(path);
+    const status = await reopened.execute(parseBossCommand(`status ${bossRunId}`), controller);
+    assert.equal(status.run?.resource?.resourceId, created.run!.resource!.resourceId);
+    assert.deepEqual(
+      [status.run!.proofPackets[0].freezeRevision, status.run!.proofPackets[0].acceptanceRevision, status.run!.proofPackets[0].designRevision, status.run!.proofPackets[0].resourceRevision, status.run!.proofPackets[0].fingerprintSha256],
+      [null, null, null, null, null],
+    );
+    assert.equal(status.run?.deliveries.at(-1)?.kind, "proof-review");
+    assert.equal(status.run?.decisions[0].outcome, "approved");
+    await reopened.execute(parseBossCommand("create force v3 migration write"), controller);
+    const migrated = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v5");
+    assert.equal(migrated.runs[0].proofPackets[0].fingerprintSha256, null);
+    assert.equal(migrated.runs[0].decisions[0].outcome, "approved");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss upgrades active v3 canonical resources to initial Controller revisions and permits freeze", async () => {
+  const { dir, store } = await fixture();
+  const path = join(dir, "runs.json");
+  try {
+    const bossRunId = "boss-33333333-3333-4333-8333-333333333333";
+    const controller = "controller-v3-canonical-freeze";
+    const resource = canonicalResource(bossRunId);
+    await store.createProvisionedRun({ bossRunId, goal: "freeze migrated canonical run", managerSessionId: controller, resource });
+    const legacy = JSON.parse(await readFile(path, "utf8"));
+    legacy.version = "orc.boss-trusted-local.v5";
+    legacy.runs[0].version = "orc.boss-trusted-local.v3";
+    for (const field of ["acceptanceRevision", "designRevision", "freezeTransitions", "currentFreeze"]) delete legacy.runs[0][field];
+    await writeFile(path, JSON.stringify(legacy));
+
+    const reopened = new TrustedLocalBossStore(path);
+    const status = await reopened.execute(parseBossCommand(`status ${bossRunId}`), controller);
+    assert.equal(status.run?.acceptanceRevision, 1);
+    assert.equal(status.run?.designRevision, 1);
+    const frozen = await reopened.authorizeFreeze({ bossRunId, managerSessionId: controller, expectedAcceptanceRevision: 1, expectedDesignRevision: 1, fingerprint: candidateFingerprint(resource) });
+    assert.equal(frozen.freezeTransition?.outcome, "accepted");
+    assert.equal(frozen.run?.currentFreeze?.freezeRevision, 1);
+    assert.equal(JSON.parse(await readFile(path, "utf8")).runs[0].version, "orc.boss-trusted-local.v5");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("trusted-local Boss refuses future schemas and freeze projections not derived from the audit ledger", async () => {
   const first = await fixture();
   try {

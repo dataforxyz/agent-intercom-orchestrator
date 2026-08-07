@@ -199,7 +199,7 @@ async function observeSnapshot(resource: TrustedLocalBossResource, bounds: Requi
     throw new Error("Boss candidate canonical resource identity drifted");
   }
   if (!GIT_SHA.test(headSha)) throw new Error("Boss candidate HEAD is invalid");
-  const tracked = await gitBuffer(cwd, ["diff", "--binary", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--"], bounds.maxTrackedDiffBytes + 1);
+  const tracked = await gitBuffer(cwd, ["diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--"], bounds.maxTrackedDiffBytes + 1);
   if (tracked.byteLength > bounds.maxTrackedDiffBytes) throw new Error(`Boss candidate tracked diff exceeds ${bounds.maxTrackedDiffBytes} bytes`);
   const untracked = await observeUntracked({ cwd, maxFiles: bounds.maxUntrackedFiles, maxFileBytes: bounds.maxUntrackedFileBytes, maxTotalBytes: bounds.maxUntrackedTotalBytes });
   return {

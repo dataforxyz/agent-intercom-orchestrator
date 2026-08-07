@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, mkdtemp, mkdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -73,6 +74,21 @@ test("candidate fingerprints are deterministic and bind tracked plus complete un
   const linkChanged = await observeBossCandidateFingerprint(resource);
   assert.notEqual(linkChanged.aggregateSha256, contentChanged.aggregateSha256);
   assert.notEqual(linkChanged.untrackedManifest[0].sha256, contentChanged.untrackedManifest[0].sha256);
+});
+
+test("candidate tracked fingerprints disable textconv and bind raw candidate changes", async (context) => {
+  const { root, repository, worktree, resource } = await fixture(context);
+  const textconv = join(root, "constant-textconv.sh");
+  await writeFile(textconv, "#!/bin/sh\nprintf 'constant presentation\\n'\n");
+  await chmod(textconv, 0o700);
+  await writeFile(join(repository, ".git", "info", "attributes"), "README.md diff=constant\n");
+  await git(repository, "config", "diff.constant.textconv", textconv);
+  await writeFile(join(worktree, "README.md"), "changed raw candidate bytes\n");
+
+  assert.equal(await git(worktree, "diff", "--no-ext-diff", "HEAD", "--", "README.md"), "", "the configured presentation filter hides the tracked change from ordinary diff");
+  const fingerprint = await observeBossCandidateFingerprint(resource);
+  assert.ok(fingerprint.trackedDirtyBytes > 0, "the canonical fingerprint hashes the raw binary patch instead of textconv output");
+  assert.notEqual(fingerprint.trackedDirtySha256, createHash("sha256").update("").digest("hex"));
 });
 
 test("candidate observation fails closed on bounds, special files, identity drift, and inactive leases", async (context) => {

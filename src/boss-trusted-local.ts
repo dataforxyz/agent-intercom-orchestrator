@@ -529,7 +529,7 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const parsedDeliveries = deliveries.map(parseDelivery);
   const parsedResults = assignmentResults.map(parseAssignmentResult);
   const parsedLifecycle = lifecycle.map(parseLifecycleObservation);
-  const parsedProofs = proofPackets.map((packet) => parseProofPacket(packet, value.version === "orc.boss-trusted-local.v4"));
+  const parsedProofs = proofPackets.map((packet) => parseProofPacket(packet, value.version !== TRUSTED_LOCAL_BOSS_RUN_VERSION));
   const parsedDecisions = decisions.map(parseDecision);
   const assignmentIds = new Set(parsedAssignments.map((assignment) => assignment.assignmentId));
   if (assignmentIds.size !== parsedAssignments.length || parsedLifecycle.some((entry) => !assignmentIds.has(entry.assignmentId))) throw new Error("Trusted-local Boss state contains invalid assignment correlation");
@@ -544,8 +544,13 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const handle = legacyHandle ? deterministicBossRunHandle(bossRunId, handlePrefix) : value.handle;
   if (typeof handle !== "string" || !BOSS_HANDLE.test(handle)) throw new Error("Trusted-local Boss state contains an invalid run handle");
   const resource = parseResource(legacyResource ? null : value.resource, bossRunId);
-  const acceptanceRevision = legacyFreeze ? null : value.acceptanceRevision === null ? null : positiveRevision(value.acceptanceRevision, "acceptance revision");
-  const designRevision = legacyFreeze ? null : value.designRevision === null ? null : positiveRevision(value.designRevision, "design revision");
+  // v3 introduced Controller-provisioned canonical resources before explicit acceptance/design
+  // fields existed. Their initial resource attachment already represented revision 1 of both
+  // Controller-owned inputs; preserve that durable meaning so migrated canonical runs remain
+  // operable without inventing revisions for older resource-less runs.
+  const legacyCanonicalRevision = legacyFreeze && resource ? 1 : null;
+  const acceptanceRevision = legacyFreeze ? legacyCanonicalRevision : value.acceptanceRevision === null ? null : positiveRevision(value.acceptanceRevision, "acceptance revision");
+  const designRevision = legacyFreeze ? legacyCanonicalRevision : value.designRevision === null ? null : positiveRevision(value.designRevision, "design revision");
   if ((acceptanceRevision === null) !== (designRevision === null)) throw new Error("Trusted-local Boss acceptance and design revisions must be jointly available");
   const freezeTransitions = legacyFreeze ? [] : Array.isArray(value.freezeTransitions) ? value.freezeTransitions.map(parseFreezeTransition) : (() => { throw new Error("Trusted-local Boss state contains invalid freeze transitions"); })();
   if (freezeTransitions.some((transition, index) => transition.revision !== index + 1)) throw new Error("Trusted-local Boss freeze transition revisions must be monotonic");
