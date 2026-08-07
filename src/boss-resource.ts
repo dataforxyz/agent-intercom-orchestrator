@@ -31,6 +31,15 @@ async function gitResult(cwd: string, args: string[]): Promise<{ stdout: string;
   return { stdout: result.stdout.trim(), stderr: result.stderr.trim() };
 }
 
+async function gitDirectoryResult(gitDirectory: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const result = await execFileAsync("/usr/bin/git", ["--git-dir", gitDirectory, ...args], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+    timeout: 30_000,
+  });
+  return { stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+}
+
 async function canonical(path: string): Promise<string> {
   if (!isAbsolute(path)) throw new Error("Boss canonical resource path must be absolute");
   return resolve(await realpath(path));
@@ -50,6 +59,19 @@ export interface ProvisionedBossWorktree {
   path: string;
   branch: string;
   baseSha: string;
+}
+
+export interface BossResourceCleanupResult {
+  resource: TrustedLocalBossResource;
+  removed: boolean;
+  dirty: boolean;
+  dirtyStatus?: string;
+  error?: string;
+}
+
+function nextResourceRevision(resource: TrustedLocalBossResource, changes: Partial<TrustedLocalBossResource>): TrustedLocalBossResource {
+  if (!Number.isSafeInteger(resource.revision) || resource.revision < 1) throw new Error("Boss canonical resource revision is invalid");
+  return { ...resource, ...changes, resourceId: resource.resourceId, revision: resource.revision + 1 };
 }
 
 /**
@@ -113,6 +135,77 @@ export async function rollbackProvisionedBossWorktree(provisioned: ProvisionedBo
     failures.push(error instanceof Error ? error.message : String(error));
   }
   if (failures.length) throw new Error(`Boss worktree rollback was incomplete: ${failures.join("; ")}`);
+}
+
+/** Refreshes Controller-observed mutable resource fields while preserving identity. */
+export async function refreshProvisionedBossResource(input: {
+  resource: TrustedLocalBossResource;
+  capabilityReport: BossCreateCapabilityReport;
+  leaseDurationMs: number;
+  observedAt?: Date;
+}): Promise<TrustedLocalBossResource> {
+  if (input.resource.leaseState !== "active" || input.resource.existence !== "verified") throw new Error("Boss canonical resource refresh requires an active verified lease");
+  const observed = await observeProvisionedBossResource({
+    bossRunId: input.resource.leaseOwnerBossRunId,
+    path: input.resource.path,
+    baseSha: input.resource.baseSha,
+    capabilityReport: input.capabilityReport,
+    leaseAcquiredAt: input.observedAt,
+    leaseDurationMs: input.leaseDurationMs,
+  });
+  for (const field of ["path", "gitAdminDirectory", "gitCommonDirectory", "branch", "baseSha", "leaseOwnerBossRunId"] as const) {
+    if (observed[field] !== input.resource[field]) throw new Error(`Boss canonical resource ${field} changed during refresh`);
+  }
+  return nextResourceRevision(input.resource, {
+    headSha: observed.headSha,
+    existence: observed.existence,
+    leaseState: "active",
+    leaseExpiresAt: observed.leaseExpiresAt,
+    capabilities: observed.capabilities,
+  });
+}
+
+/**
+ * Explicit terminal cleanup. Dirty worktrees are released but preserved. Clean
+ * worktrees are removed with their dedicated branch; failures are represented in
+ * the returned monotonic resource transition instead of being hidden.
+ */
+export async function cleanupProvisionedBossResource(resource: TrustedLocalBossResource): Promise<BossResourceCleanupResult> {
+  if (resource.leaseState === "released" && resource.existence === "missing") return { resource, removed: true, dirty: false };
+  if (resource.leaseState !== "active" && resource.leaseState !== "cleanup_failed") throw new Error(`Boss canonical resource cannot be cleaned from ${resource.leaseState}`);
+  let dirtyStatus = "";
+  try {
+    dirtyStatus = (await gitResult(resource.path, ["status", "--porcelain=v1", "--untracked-files=all"])).stdout;
+  } catch (error) {
+    const message = `Could not inspect Boss candidate dirtiness: ${error instanceof Error ? error.message : String(error)}`;
+    return { resource: nextResourceRevision(resource, { leaseState: "cleanup_failed" }), removed: false, dirty: false, error: message };
+  }
+  if (dirtyStatus) {
+    return {
+      resource: nextResourceRevision(resource, { leaseState: "released" }),
+      removed: false,
+      dirty: true,
+      dirtyStatus,
+    };
+  }
+  try {
+    await gitDirectoryResult(resource.gitCommonDirectory, ["worktree", "remove", resource.path]);
+    await gitDirectoryResult(resource.gitCommonDirectory, ["branch", "-D", resource.branch]);
+    return {
+      resource: nextResourceRevision(resource, { existence: "missing", leaseState: "released" }),
+      removed: true,
+      dirty: false,
+    };
+  } catch (error) {
+    const exists = await realpath(resource.path).then(() => true).catch(() => false);
+    const message = `Boss canonical resource cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+    return {
+      resource: nextResourceRevision(resource, { existence: exists ? "verified" : "missing", leaseState: "cleanup_failed" }),
+      removed: false,
+      dirty: false,
+      error: message,
+    };
+  }
 }
 
 /**

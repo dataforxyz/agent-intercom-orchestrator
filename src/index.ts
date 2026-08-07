@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { DEFAULT_CONFIG, readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
 import { BOSS_CREATE_ACCESS_LEVELS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, type BossCommandRequest } from "./boss-command.ts";
 import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type BossCreateCapabilityReport } from "./boss-create-capabilities.ts";
-import { observeProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
+import { cleanupProvisionedBossResource, observeProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
 import { formatBossReadinessReport, formatBossSetupReport, inspectBossSetup, inspectTrustedLocalBossReadiness } from "./boss-setup.ts";
 import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, trustedLocalBossParticipantTargets, type TrustedLocalBossTeamIdentity } from "./boss-team-environment.ts";
 import { TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, type TrustedLocalBossResult } from "./boss-trusted-local.ts";
@@ -1956,6 +1956,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
   }
 
+  async function cleanupTerminalBossResource(result: TrustedLocalBossResult): Promise<TrustedLocalBossResult> {
+    const current = result.run?.resource;
+    if (!result.run || !current || current.leaseState === "released") return result;
+    const cleanup = await cleanupProvisionedBossResource(current);
+    const run = cleanup.resource.revision === current.revision
+      ? result.run
+      : await trustedLocalBossStore.recordResourceTransition(result.run.bossRunId, current.revision, cleanup.resource);
+    const detail = cleanup.dirty
+      ? `Canonical resource revision ${run.resource?.revision} was released but preserved because the candidate is dirty.\n${cleanup.dirtyStatus}`
+      : cleanup.removed
+        ? `Canonical resource revision ${run.resource?.revision} was released and its clean worktree and branch were removed.`
+        : `Canonical resource cleanup failed safely at revision ${run.resource?.revision}: ${cleanup.error ?? "unknown cleanup error"}`;
+    return { ...result, run, message: `${result.message}\n\n${detail}` };
+  }
+
   async function executeTrustedLocalBoss(request: BossCommandRequest, ctx: ExtensionContext): Promise<TrustedLocalBossResult & { capabilityReport?: BossCreateCapabilityReport; created?: boolean }> {
     if (!config) await loadConfig();
     trustedLocalBossStore.setHandlePrefix(config.boss.handlePrefix);
@@ -2030,6 +2045,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
     } else {
       result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
+    }
+
+    if ((request.action === "approve" || request.action === "reject") && result.run) {
+      result = await cleanupTerminalBossResource(result);
     }
 
     if (request.action === "proof" && result.run) {
@@ -2127,6 +2146,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
       result = { title: result.title, message: result.message, run: await trustedLocalBossStore.recordCancellationResult(result.run.bossRunId, stopError) };
       result.message = `${result.run ? `${TRUSTED_LOCAL_BOSS_WARNING}\nrun: ${result.run.bossRunId}\nstate: ${result.run.state}\ncancellation: ${result.run.cancellation?.state}${result.run.cancellation?.error ? ` — ${result.run.cancellation.error}` : ""}` : result.message}`;
+      if (result.run?.cancellation?.state === "succeeded") result = await cleanupTerminalBossResource(result);
       return result;
     }
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { observeProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree } from "../src/boss-resource.ts";
+import { cleanupProvisionedBossResource, observeProvisionedBossResource, provisionBossLinkedWorktree, refreshProvisionedBossResource, rollbackProvisionedBossWorktree } from "../src/boss-resource.ts";
 import { TrustedLocalBossStore } from "../src/boss-trusted-local.ts";
 
 const execFileAsync = promisify(execFile);
@@ -153,4 +153,66 @@ test("persists a provisioned run and stamps every initial assignment with the re
   const result = await store.createProvisionedRun({ bossRunId, goal: "use canonical cwd", managerSessionId: "controller-provisioned", resource });
   assert.equal(result.run?.resource?.path, worktree);
   assert.deepEqual(result.run?.assignments.map((assignment) => assignment.resourceRevision), [1, 1, 1]);
+});
+
+test("refreshes resource observations with monotonic revisions and CAS persistence", async (context) => {
+  const { root, worktree, baseSha } = await fixture(context);
+  const bossRunId = "boss-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const resource = await observeProvisionedBossResource({
+    bossRunId, path: worktree, baseSha, capabilityReport: readyReport(worktree), leaseAcquiredAt: new Date("2026-02-03T04:00:00.000Z"), leaseDurationMs: 60_000,
+  });
+  await writeFile(join(worktree, "README.md"), "advanced\n");
+  await git(worktree, "add", "README.md");
+  await git(worktree, "-c", "user.name=Boss Resource Test", "-c", "user.email=boss-resource@example.invalid", "commit", "-m", "advance");
+  const refreshed = await refreshProvisionedBossResource({
+    resource, capabilityReport: readyReport(worktree), observedAt: new Date("2026-02-03T04:01:00.000Z"), leaseDurationMs: 120_000,
+  });
+  assert.equal(refreshed.revision, 2);
+  assert.notEqual(refreshed.headSha, resource.headSha);
+  assert.equal(refreshed.leaseExpiresAt, "2026-02-03T04:03:00.000Z");
+  assert.equal(refreshed.resourceId, resource.resourceId);
+
+  const store = new TrustedLocalBossStore(join(root, "refresh-runs.json"));
+  await store.createProvisionedRun({ bossRunId, goal: "refresh canonical resource", managerSessionId: "controller-refresh", resource });
+  const transitioned = await store.recordResourceTransition(bossRunId, 1, refreshed);
+  assert.deepEqual(transitioned.assignments.map((assignment) => assignment.resourceRevision), [2, 2, 2]);
+  await assert.rejects(store.recordResourceTransition(bossRunId, 1, refreshed), /revision conflict/);
+  assert.deepEqual(await store.protectedResourcePaths(), [worktree]);
+});
+
+test("terminal cleanup preserves dirty candidates and records a released revision", async (context) => {
+  const { worktree, baseSha } = await fixture(context);
+  const bossRunId = "boss-ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const resource = await observeProvisionedBossResource({ bossRunId, path: worktree, baseSha, capabilityReport: readyReport(worktree), leaseDurationMs: 60_000 });
+  await writeFile(join(worktree, "candidate.txt"), "keep me\n");
+  const cleanup = await cleanupProvisionedBossResource(resource);
+  assert.equal(cleanup.dirty, true);
+  assert.equal(cleanup.removed, false);
+  assert.match(cleanup.dirtyStatus ?? "", /candidate\.txt/);
+  assert.equal(cleanup.resource.revision, 2);
+  assert.equal(cleanup.resource.leaseState, "released");
+  assert.equal(await realpath(worktree), worktree);
+});
+
+test("terminal cleanup removes clean resources and reports failures honestly", async (context) => {
+  const cleanFixture = await fixture(context);
+  const cleanRunId = "boss-99999999-9999-4999-8999-999999999999";
+  const clean = await observeProvisionedBossResource({ bossRunId: cleanRunId, path: cleanFixture.worktree, baseSha: cleanFixture.baseSha, capabilityReport: readyReport(cleanFixture.worktree), leaseDurationMs: 60_000 });
+  const removed = await cleanupProvisionedBossResource(clean);
+  assert.equal(removed.removed, true);
+  assert.equal(removed.resource.revision, 2);
+  assert.equal(removed.resource.existence, "missing");
+  assert.equal(removed.resource.leaseState, "released");
+  await assert.rejects(realpath(cleanFixture.worktree));
+  await assert.rejects(git(cleanFixture.repository, "show-ref", "--verify", `refs/heads/${clean.branch}`));
+
+  const failedFixture = await fixture(context);
+  const failedRunId = "boss-88888888-8888-4888-8888-888888888888";
+  const failedResource = await observeProvisionedBossResource({ bossRunId: failedRunId, path: failedFixture.worktree, baseSha: failedFixture.baseSha, capabilityReport: readyReport(failedFixture.worktree), leaseDurationMs: 60_000 });
+  const failure = await cleanupProvisionedBossResource({ ...failedResource, gitCommonDirectory: join(failedFixture.root, "missing-git-common") });
+  assert.equal(failure.removed, false);
+  assert.equal(failure.resource.revision, 2);
+  assert.equal(failure.resource.existence, "verified");
+  assert.equal(failure.resource.leaseState, "cleanup_failed");
+  assert.match(failure.error ?? "", /cleanup failed/);
 });

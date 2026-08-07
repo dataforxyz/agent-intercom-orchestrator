@@ -590,6 +590,36 @@ export class TrustedLocalBossStore {
     });
   }
 
+  async recordResourceTransition(bossRunId: string, expectedRevision: number, resourceValue: TrustedLocalBossResource): Promise<TrustedLocalBossRun> {
+    return this.mutate((state, timestamp) => {
+      const run = state.runs.find((candidate) => candidate.bossRunId === bossRunId);
+      if (!run?.resource) throw new Error(`Trusted-local Boss canonical resource not found: ${bossRunId}`);
+      const previous = run.resource;
+      if (previous.revision !== expectedRevision) throw new Error(`Trusted-local Boss resource revision conflict: expected ${expectedRevision}, found ${previous.revision}`);
+      const resource = parseResource(structuredClone(resourceValue), bossRunId);
+      if (!resource || resource.revision !== previous.revision + 1) throw new Error("Trusted-local Boss resource revision must advance exactly once");
+      for (const field of ["version", "resourceId", "kind", "path", "gitAdminDirectory", "gitCommonDirectory", "branch", "baseSha", "leaseOwnerBossRunId", "leaseAcquiredAt"] as const) {
+        if (resource[field] !== previous[field]) throw new Error(`Trusted-local Boss resource ${field} is immutable`);
+      }
+      if (previous.leaseState === "released") throw new Error("Trusted-local Boss released resource is terminal");
+      if (previous.leaseState === "cleanup_failed" && resource.leaseState === "active") throw new Error("Trusted-local Boss cleanup-failed resource cannot reactivate");
+      if (resource.leaseState === "active" && Date.parse(resource.leaseExpiresAt) <= Date.parse(previous.leaseExpiresAt)) throw new Error("Trusted-local Boss active lease refresh must extend expiry monotonically");
+      run.resource = resource;
+      for (const assignment of run.assignments) assignment.resourceRevision = resource.revision;
+      run.updatedAt = timestamp;
+      state.revision += 1;
+      return structuredClone(run);
+    });
+  }
+
+  async protectedResourcePaths(): Promise<string[]> {
+    const state = await this.readState();
+    return [...new Set(state.runs
+      .map((run) => run.resource)
+      .filter((resource): resource is TrustedLocalBossResource => Boolean(resource && resource.existence === "verified"))
+      .map((resource) => resource.path))].sort();
+  }
+
   private async recordAssignmentStarted(bossRunId: string, role: TrustedLocalBossAssignmentRole, worker: WorkerRecord): Promise<TrustedLocalBossRun> {
     return this.mutate((state, timestamp) => {
       const run = state.runs.find((candidate) => candidate.bossRunId === bossRunId);

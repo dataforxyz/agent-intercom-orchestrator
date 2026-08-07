@@ -114,6 +114,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     const lifecycle = new Map<string, (...args: any[]) => any>();
     const tools = new Map<string, any>();
     const launches: string[][] = [];
+    const stoppedUnits = new Set<string>();
     const intercomDeliveries: Array<{ to: string; message: string }> = [];
     let contextStale = false;
     const pi: any = {
@@ -129,8 +130,15 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       async exec(command: string, args: string[]) {
         if (command === "systemd-run" && args.some((arg) => arg.startsWith("--unit=agent-intercom-worker-boss-"))) launches.push([...args]);
         if (command === "systemd") return { ...commandResult(), stdout: "systemd 257\n" };
+        if (command === "systemctl" && args.includes("stop")) {
+          stoppedUnits.add(args.at(-1)!);
+          return commandResult();
+        }
         if (command === "systemctl" && args.includes("show")) {
-          return { ...commandResult(), stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\nJob=\nExecMainStartTimestampMonotonic=10\n" };
+          const stopped = stoppedUnits.has(args[args.indexOf("show") + 1]);
+          return { ...commandResult(), stdout: stopped
+            ? "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nResult=success\nExecMainStatus=0\nJob=\nInactiveEnterTimestampMonotonic=20\n"
+            : "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\nJob=\nExecMainStartTimestampMonotonic=10\n" };
         }
         return commandResult();
       },
@@ -244,6 +252,20 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       assert.ok(delivery.message.includes(`Canonical cwd: ${canonicalCwd}`));
       assert.match(delivery.message, /Begin now using the isolated Ralph protocol/);
     }
+
+    const cancelled = await tools.get("boss").execute(
+      "boss-clean-resource-test",
+      { action: "cancel", bossRunId },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.equal(cancelled.details.run.cancellation.state, "succeeded");
+    assert.equal(cancelled.details.run.resource.revision, 2);
+    assert.equal(cancelled.details.run.resource.leaseState, "released");
+    assert.equal(cancelled.details.run.resource.existence, "missing");
+    assert.match(cancelled.content[0].text, /clean worktree and branch were removed/);
+    await assert.rejects(access(canonicalCwd));
 
     const defaultCreated = await tools.get("boss").execute(
       "boss-default-create-test",
