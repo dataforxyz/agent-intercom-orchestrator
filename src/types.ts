@@ -269,8 +269,8 @@ export interface WorkerRecord {
   backendDetails?: unknown;
 }
 
-/** Canonical in-memory record. Deprecated aliases are hydrated for callers but are not serialized. */
-export interface WorkerRecordV2 extends WorkerRecord {
+/** Canonical legacy-v2 record. The authenticated activity field did not exist in this schema. */
+export interface WorkerRecordV2 extends Omit<WorkerRecord, "lastAuthenticatedIntercomActivityAt"> {
   workerIncarnationId: string;
   workerGeneration: number;
   state: CanonicalWorkerState | "migration_pending";
@@ -278,7 +278,12 @@ export interface WorkerRecordV2 extends WorkerRecord {
 }
 
 /** WorkerStore v3 is the first schema that authenticates the Intercom activity timestamp. */
-export interface WorkerRecordV3 extends WorkerRecordV2 {}
+export interface WorkerRecordV3 extends WorkerRecord {
+  workerIncarnationId: string;
+  workerGeneration: number;
+  state: CanonicalWorkerState | "migration_pending";
+  managerOwner: ManagerOwnerBinding;
+}
 
 export interface RuntimeCleanupClaim {
   token: string;

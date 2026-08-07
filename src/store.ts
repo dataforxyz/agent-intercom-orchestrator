@@ -40,7 +40,7 @@ const MANAGER_CONTEXTS = new Set<ManagerOwnerKind>(["pi", "opencode", "headless_
 const LEGACY_WORKER_KEYS = new Set([
   "id", "runId", "harness", "backend", "role", "task", "cwd", "profile", "permissionProfile", "model", "effort", "instructions",
   "state", "owned", "managerSessionId", "intercomTarget", "unit", "mainPid", "externalSessionId", "healthPath", "runtimeStatePath",
-  "createdAt", "updatedAt", "leaseExpiresAt", "lastWorkerActivityAt", "lastAuthenticatedIntercomActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt",
+  "createdAt", "updatedAt", "leaseExpiresAt", "lastWorkerActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt",
   "checkpointAttemptCount", "checkpointDeadlineAt", "stopRequestedAt", "stoppedAt", "stopReason", "dirtyAtStop", "dirtyStatusAtStop", "dirtyCheckErrorAtStop",
   "lastError", "backendDetails",
 ]);
@@ -48,10 +48,16 @@ const V2_STORED_WORKER_KEYS = new Set([
   "id", "workerIncarnationId", "workerGeneration", "bossRunId", "harness", "backend", "role", "task", "cwd", "profile",
   "permissionProfile", "model", "effort", "instructions", "state", "stateReason", "terminalOutcome", "owned", "managerOwner",
   "migrationAudit", "intercomTarget", "unit", "mainPid", "externalSessionId", "healthPath", "runtimeStatePath", "createdAt", "updatedAt",
-  "leaseExpiresAt", "lastWorkerActivityAt", "lastAuthenticatedIntercomActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt", "checkpointAttemptCount",
+  "leaseExpiresAt", "lastWorkerActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt", "checkpointAttemptCount",
   "checkpointDeadlineAt", "stopRequestedAt", "stoppedAt", "stopReason", "dirtyAtStop", "dirtyStatusAtStop", "dirtyCheckErrorAtStop", "lastError", "backendDetails",
 ]);
 const V2_API_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "runId", "managerSessionId"]);
+// Compatibility-only input for the briefly shipped writer that emitted the
+// authenticated timestamp under a v2 header. It is never canonicalized.
+const V2_COMPAT_STORED_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
+const V2_COMPAT_API_WORKER_KEYS = new Set([...V2_API_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
+const V3_STORED_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
+const V3_API_WORKER_KEYS = new Set([...V3_STORED_WORKER_KEYS, "runId", "managerSessionId"]);
 const STRING_WORKER_KEYS = [
   "profile", "permissionProfile", "model", "instructions", "intercomTarget", "unit", "externalSessionId", "healthPath", "runtimeStatePath",
   "stopReason", "dirtyStatusAtStop", "dirtyCheckErrorAtStop", "lastError", "stateReason",
@@ -434,8 +440,10 @@ function parseLegacyWorker(value: unknown, path: string): WorkerRecord {
   } as WorkerRecord;
 }
 
-function parseV2Worker(value: unknown, path: string, allowAliases: boolean): WorkerRecordV2 {
-  const allowed = allowAliases ? V2_API_WORKER_KEYS : V2_STORED_WORKER_KEYS;
+function parseVersionedWorker(value: unknown, path: string, allowAliases: boolean, expectedVersion: 2 | 3): WorkerRecordV2 | WorkerRecordV3 {
+  const allowed = expectedVersion === 2
+    ? (allowAliases ? V2_COMPAT_API_WORKER_KEYS : V2_COMPAT_STORED_WORKER_KEYS)
+    : (allowAliases ? V3_API_WORKER_KEYS : V3_STORED_WORKER_KEYS);
   const required = [
     "id", "workerIncarnationId", "workerGeneration", "harness", "backend", "role", "task", "cwd", "state", "owned", "managerOwner",
     "createdAt", "updatedAt", "leaseExpiresAt",
@@ -466,7 +474,7 @@ function parseV2Worker(value: unknown, path: string, allowAliases: boolean): Wor
   }
   const terminalOutcome = optionalString(object, "terminalOutcome", path);
   if (terminalOutcome !== undefined && terminalOutcome !== "completed") throw new WorkerStoreValidationError(`${path}.terminalOutcome is invalid`);
-  const record: WorkerRecordV2 = {
+  const record: WorkerRecordV3 = {
     ...parseWorkerCommon(object, path),
     runId,
     workerIncarnationId,
@@ -479,7 +487,9 @@ function parseV2Worker(value: unknown, path: string, allowAliases: boolean): Wor
     managerOwner,
     ...(migrationAudit ? { migrationAudit } : {}),
   };
-  return record;
+  if (expectedVersion === 3) return record;
+  const { lastAuthenticatedIntercomActivityAt: _untrustedCompatibilityClaim, ...legacyRecord } = record;
+  return legacyRecord as WorkerRecordV2;
 }
 
 function parseClaim(value: unknown, path: string): RuntimeCleanupClaim {
@@ -557,7 +567,7 @@ function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersi
 function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2 | 3): WorkerStateFileV2 | WorkerStateFileV3 {
   const object = assertExactObject(value, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers", ...(allowAliases ? [] : ["workerGenerations"])], "worker state");
   if (object.version !== expectedVersion) throw new WorkerStoreValidationError(`worker state version is not ${expectedVersion}`);
-  const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => parseV2Worker(worker, `worker state.workers[${index}]`, allowAliases));
+  const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => parseVersionedWorker(worker, `worker state.workers[${index}]`, allowAliases, expectedVersion));
   assertUniqueWorkers(workers);
   const claims = object.runtimeCleanupClaims === undefined
     ? undefined
@@ -657,12 +667,8 @@ function migrateLegacyWorker(worker: WorkerRecord, migratedAt: number, options: 
     managerOwnerInferredFromLegacySession: true,
     ...flags,
   };
-  // v1 did not define authenticated Intercom evidence. Some unversioned
-  // writers emitted this newer field under a v1 header; carrying it forward
-  // would turn an unauthenticated legacy claim into v3 evidence.
-  const { lastAuthenticatedIntercomActivityAt: _legacyActivity, ...legacyWorker } = worker;
   return {
-    ...legacyWorker,
+    ...worker,
     workerIncarnationId: worker.runId,
     workerGeneration: 1,
     state,
@@ -691,13 +697,7 @@ function migrateV2File(legacy: WorkerStateFileV2): WorkerStateFileV3 {
   return {
     ...legacy,
     version: 3,
-    workers: legacy.workers.map((worker) => {
-      // v2 predates the authenticated-activity contract. Accept the field for
-      // compatibility with the briefly shipped unversioned writer, but never
-      // promote that claim to authoritative v3 evidence.
-      const { lastAuthenticatedIntercomActivityAt: _legacyActivity, ...migrated } = worker;
-      return migrated as WorkerRecordV3;
-    }),
+    workers: legacy.workers.map((worker) => ({ ...worker })),
   };
 }
 
@@ -924,9 +924,15 @@ export class WorkerStore {
     }
     const header = assertPlainObject(value, "worker state");
     const version = header.version;
+    // Gate on the top-level version and declared feature set before exact or
+    // nested parsing. Future feature-owned fields must not look like corruption
+    // to an older reader that already knows it cannot interpret the feature.
     if (typeof version === "number" && Number.isSafeInteger(version) && version > CURRENT_VERSION) {
       throw new WorkerStoreUnsupportedVersionError(version);
     }
+    const declaredFeatures = parseFeatureList(header.activeFeatures);
+    const unsupportedFeatures = (declaredFeatures ?? []).filter((feature) => !this.supportedFeatures.has(feature));
+    if (unsupportedFeatures.length > 0) throw new WorkerStoreUnsupportedFeatureError(unsupportedFeatures);
     if (version === 1) return { state: migrateLegacyFile(parseLegacyFile(value), this.options.now(), this.options), sourceVersion: 1 };
     if (version === 2) {
       const state = parseV2File(value, false);
@@ -1039,8 +1045,9 @@ export class WorkerStore {
     }
   }
 
-  private normalizeApiWorker(value: unknown, path: string, previous: WorkerRecord | undefined, previousGeneration = 0): WorkerRecordV3 {
-    const object = assertExactObject(value, V2_API_WORKER_KEYS, ["id", "harness", "role", "task", "cwd", "state", "owned", "createdAt", "updatedAt", "leaseExpiresAt"], path);
+  private normalizeApiWorker(value: unknown, path: string, previous: WorkerRecord | undefined, previousGeneration = 0, sourceVersion: 2 | 3 = 3): WorkerRecordV3 {
+    const allowed = sourceVersion === 2 ? V2_API_WORKER_KEYS : V3_API_WORKER_KEYS;
+    const object = assertExactObject(value, allowed, ["id", "harness", "role", "task", "cwd", "state", "owned", "createdAt", "updatedAt", "leaseExpiresAt"], path);
     const id = requiredString(object, "id", path);
     const runAlias = optionalString(object, "runId", path);
     let incarnation = optionalString(object, "workerIncarnationId", path) ?? runAlias;
@@ -1115,7 +1122,7 @@ export class WorkerStore {
       const migrated = migrateLegacyWorker(legacy, this.options.now(), this.options);
       candidate = { ...migrated, workerGeneration: expectedWorkerGeneration, managerOwner, managerSessionId: managerOwner.sessionId };
     }
-    return parseV2Worker(compactObject(candidate), path, true) as WorkerRecordV3;
+    return parseVersionedWorker(compactObject(candidate), path, true, 3) as WorkerRecordV3;
   }
 
   private normalizeInput(state: WorkerStateFile, previous: WorkerStateFileV3): WorkerStateFileV3 {
@@ -1148,10 +1155,7 @@ export class WorkerStore {
     const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => {
       const raw = assertPlainObject(worker, `worker state.workers[${index}]`);
       const id = requiredString(raw, "id", `worker state.workers[${index}]`);
-      const normalized = this.normalizeApiWorker(worker, `worker state.workers[${index}]`, previousById.get(id), previousGenerationById.get(id) ?? 0);
-      if (sourceVersion === 3) return normalized;
-      const { lastAuthenticatedIntercomActivityAt: _legacyActivity, ...withoutLegacyEvidence } = normalized;
-      return withoutLegacyEvidence as WorkerRecordV3;
+      return this.normalizeApiWorker(worker, `worker state.workers[${index}]`, previousById.get(id), previousGenerationById.get(id) ?? 0, sourceVersion);
     });
     assertUniqueWorkers(workers);
     const claims = object.runtimeCleanupClaims === undefined

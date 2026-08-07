@@ -21,7 +21,7 @@ import { captureCleanupUnitInventory, deleteOrphanRuntimeSafely, deleteTerminalR
 import { detectHarnessAvailability, formatRoutingDecision, inferHarnessFromModel, normalizeModelForHarness, roleInstructionsForHarness, roleRequiresSubagents, resolveHarnessRoute, type HarnessAvailability, type RoutingDecision } from "./routing.ts";
 import { WorkerStore } from "./store.ts";
 import { formatUnitStatus, getUnitStatus, getUserManagerHealth, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, sanitizeUnitPart, stopUnit, systemdAvailable, waitForUnitRunning } from "./systemd.ts";
-import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerStateFile } from "./types.ts";
+import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerRecordV3, WorkerStateFile, WorkerStateFileV3 } from "./types.ts";
 import {
   boundedLeaseExpiry,
   buildWorkerArgs,
@@ -441,12 +441,12 @@ export function renewObservedWorkerLeases(
 }
 
 export function recordIntercomWorkerActivity(
-  state: WorkerStateFile,
+  state: WorkerStateFileV3,
   managerId: string,
   sender: { id?: string; name?: string },
   config: OrchestratorConfig,
   now = Date.now(),
-): WorkerRecord | undefined {
+): WorkerRecordV3 | undefined {
   const worker = state.workers.find((candidate) => {
     if (candidate.managerSessionId !== managerId || !candidate.owned || !isLiveState(candidate.state) || candidate.stateReason === "stop_in_progress") return false;
     const expectedSenderId = candidate.intercomTarget ?? candidate.id;
@@ -590,7 +590,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const sender = parseInboundActivitySender(payload);
     if (!ctx || !config || !sender) return;
     const now = Date.now();
-    void store.mutate((state) => recordIntercomWorkerActivity(state, managerSessionId(ctx), sender, config, now))
+    void store.mutate((state) => recordIntercomWorkerActivity(state as WorkerStateFileV3, managerSessionId(ctx), sender, config, now))
       .then((worker) => { if (worker) return updateStatus(ctx); })
       .catch(() => undefined);
   });

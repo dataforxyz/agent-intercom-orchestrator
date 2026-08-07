@@ -9,6 +9,7 @@ import {
   WorkerStoreCorruptError,
   WorkerStoreMigrationPendingError,
   WorkerStorePoisonedError,
+  WorkerStoreUnsupportedFeatureError,
   WorkerStoreUnsupportedVersionError,
   WorkerStoreValidationError,
 } from "../src/store.ts";
@@ -75,19 +76,14 @@ test("durable stop intent round-trips as a late-start fence", async () => {
   }
 });
 
-test("WorkerStore v1 migration maps every state, identity, owner, and audit field without inventing activity evidence", async () => {
+test("WorkerStore v1 migration maps every state, identity, owner, and audit field while leaving activity evidence undefined", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-store-v2-mapping-"));
   const path = join(root, "workers.json");
   const states: LegacyWorkerState[] = [
     "provisioning", "running", "idle", "needs_attention", "completed", "failed", "stopping", "stopped", "lost",
   ];
   try {
-    const workers = states.map((state) => ({
-      ...legacyWorker(state, state),
-      // A briefly shipped writer emitted this under an unchanged legacy
-      // header. v1 cannot authenticate its semantics, so migration drops it.
-      lastAuthenticatedIntercomActivityAt: 9_000,
-    }));
+    const workers = states.map((state) => legacyWorker(state, state));
     await writeFile(path, JSON.stringify({ version: 1, workers }));
     const store = new WorkerStore(path, { now: () => 10_000 });
     const migrated = await store.read();
@@ -141,7 +137,7 @@ test("WorkerStore v1 migration maps every state, identity, owner, and audit fiel
   }
 });
 
-test("WorkerStore v2 migration preserves canonical state but drops unauthenticated legacy timestamp claims", async () => {
+test("WorkerStore v2 migration preserves canonical state while leaving activity evidence undefined", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-store-v3-v2-migration-"));
   const path = join(root, "workers.json");
   const source = {
@@ -163,7 +159,6 @@ test("WorkerStore v2 migration preserves canonical state but drops unauthenticat
       updatedAt: 20,
       leaseExpiresAt: 30,
       lastWorkerActivityAt: 19,
-      lastAuthenticatedIntercomActivityAt: 18,
     }],
     workerGenerations: [{ workerId: "legacy-v2", generation: 4 }],
   };
@@ -183,6 +178,46 @@ test("WorkerStore v2 migration preserves canonical state but drops unauthenticat
     assert.equal(raw.version, 3);
     assert.equal(raw.generation, 7);
     assert.equal(raw.workers[0].lastAuthenticatedIntercomActivityAt, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("WorkerStore migrates the briefly shipped v2 timestamp as an untrusted compatibility field", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-v3-v2-compat-"));
+  const path = join(root, "workers.json");
+  const source = {
+    version: 2,
+    generation: 1,
+    workers: [{
+      id: "compat-v2",
+      workerIncarnationId: "incarnation",
+      workerGeneration: 1,
+      harness: "pi",
+      backend: "systemd",
+      role: "builder",
+      task: "drop untrusted evidence",
+      cwd: "/tmp",
+      state: "working",
+      owned: true,
+      managerOwner: { context: "pi", principalId: "manager", sessionId: "manager", bindingEpoch: 0 },
+      createdAt: 1,
+      updatedAt: 2,
+      leaseExpiresAt: 3,
+      lastAuthenticatedIntercomActivityAt: 2,
+    }],
+    workerGenerations: [{ workerId: "compat-v2", generation: 1 }],
+  };
+  try {
+    await writeFile(path, JSON.stringify(source));
+    const store = new WorkerStore(path);
+    assert.equal((await store.read()).workers[0].lastAuthenticatedIntercomActivityAt, undefined);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), source, "compatibility reads do not rewrite or quarantine v2");
+    await store.migrate();
+    const migrated = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(migrated.version, 3);
+    assert.equal(migrated.workers[0].lastAuthenticatedIntercomActivityAt, undefined);
+    await assert.rejects(access(`${path}.poison.json`));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -283,12 +318,34 @@ test("malformed poison markers remain fail-closed", async () => {
 test("newer schemas refuse downgrade without rewriting, quarantining, or poisoning the source", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-store-v2-newer-"));
   const path = join(root, "workers.json");
-  const source = `${JSON.stringify({ version: 4, generation: 99, workers: [], future: true })}\n`;
+  const source = `${JSON.stringify({ version: 4, generation: "must not parse", workers: [null], future: true })}\n`;
   try {
     await writeFile(path, source);
     await assert.rejects(new WorkerStore(path).read(), WorkerStoreUnsupportedVersionError);
     assert.equal(await readFile(path, "utf8"), source);
     await assert.rejects(access(`${path}.poison.json`));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unsupported active features refuse before exact nested parsing without quarantine", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-v3-feature-gate-"));
+  const path = join(root, "workers.json");
+  const source = `${JSON.stringify({
+    version: 3,
+    generation: 1,
+    activeFeatures: ["future-worker-shape"],
+    workers: [{ futureNestedField: true }],
+    workerGenerations: [],
+    futureTopLevelField: true,
+  })}\n`;
+  try {
+    await writeFile(path, source);
+    await assert.rejects(new WorkerStore(path).read(), WorkerStoreUnsupportedFeatureError);
+    assert.equal(await readFile(path, "utf8"), source);
+    await assert.rejects(access(`${path}.poison.json`));
+    assert.equal((await new WorkerStore(path, { supportedFeatures: ["future-worker-shape"] }).read().catch((error) => error)).code, "WORKER_STORE_CORRUPT");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

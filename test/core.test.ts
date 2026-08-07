@@ -8,7 +8,7 @@ import { parseOpenCodeModelsVerbose, parsePiModels, recordIntercomWorkerActivity
 import { workerRuntimeRoot } from "../src/runtime.ts";
 import { WorkerStore } from "../src/store.ts";
 import { getUnitStatus, launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit, waitForUnitRunning } from "../src/systemd.ts";
-import type { WorkerRecord } from "../src/types.ts";
+import type { WorkerRecord, WorkerRecordV3 } from "../src/types.ts";
 import {
   boundedLeaseExpiry,
   buildWorkerArgs,
@@ -310,7 +310,7 @@ test("manager-received worker Intercom activity resets the idle budget but manag
   });
   worker.state = "running";
   worker.checkpointRequestedAt = 2_000;
-  const state = { version: 1 as const, workers: [worker] };
+  const state = { version: 3 as const, generation: 0, workers: [worker as WorkerRecordV3], workerGenerations: [{ workerId: worker.id, generation: worker.workerGeneration! }] };
   recordWorkerActivity(worker, DEFAULT_CONFIG, 2_500);
   assert.equal(worker.lastAuthenticatedIntercomActivityAt, undefined, "manual renewal activity must not claim inbound Intercom evidence");
   assert.equal(recordIntercomWorkerActivity(state, "manager-a", { id: "other", name: "other" }, DEFAULT_CONFIG, 3_000), undefined);
