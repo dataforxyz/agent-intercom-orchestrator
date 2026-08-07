@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -53,6 +53,45 @@ test("Boss create verifies a real linked worktree but reports Worker access as c
     assert.match(formatted, /\/usr\/bin\/git verified linked worktree/);
     assert.match(formatted, /configured access is policy evidence, not proof of effective Worker access/);
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("canonical cwd identity accepts a symlink to the exact linked-worktree root", async () => {
+  const { dir, worktree } = await linkedWorktreeFixture();
+  try {
+    const alias = join(dir, "worktree-alias");
+    await symlink(worktree, alias, "dir");
+    const report = await inspectBossCreateCapabilities({
+      cwd: alias,
+      requirements: { worktree: "write" },
+      workerPermissionProfileName: "builder-restricted",
+      workerPermissionProfile: DEFAULT_PERMISSION_PROFILES["builder-restricted"],
+    });
+    assert.equal(report.status, "ready");
+    assert.equal(report.cwd, worktree);
+    assert.deepEqual(report.probes.map((finding) => finding.availability), ["verified", "configured"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree write requires R|W|X on the canonical root", async () => {
+  const { dir, worktree } = await linkedWorktreeFixture();
+  try {
+    await chmod(worktree, 0o500);
+    const report = await inspectBossCreateCapabilities({
+      cwd: worktree,
+      requirements: { worktree: "write" },
+      workerPermissionProfileName: "builder-restricted",
+      workerPermissionProfile: DEFAULT_PERMISSION_PROFILES["builder-restricted"],
+    });
+    assert.equal(report.status, "blocked");
+    assert.equal(report.probes[0].availability, "verified");
+    assert.equal(report.gaps[0].capability, "worktree-write");
+    assert.match(report.gaps[0].evidence, /failed the required R\|W\|X Controller access prerequisite/);
+  } finally {
+    await chmod(worktree, 0o755).catch(() => undefined);
     await rm(dir, { recursive: true, force: true });
   }
 });

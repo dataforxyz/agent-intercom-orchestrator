@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { constants } from "node:fs";
+import { access, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -44,24 +46,35 @@ async function gitOutput(cwd: string, args: string[]): Promise<string | undefine
   }
 }
 
+async function canonicalPath(path: string): Promise<string | undefined> {
+  return realpath(path).then((value) => resolve(value), () => undefined);
+}
+
+async function hasAccess(path: string, mode: number): Promise<boolean> {
+  return access(path, mode).then(() => true, () => false);
+}
+
 async function verifyLinkedWorktree(cwd: string): Promise<LinkedWorktreeEvidence | undefined> {
   const inside = await gitOutput(cwd, ["rev-parse", "--is-inside-work-tree"]);
   const rootOutput = await gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
   if (inside !== "true" || !rootOutput || !isAbsolute(rootOutput)) return undefined;
-  const root = resolve(rootOutput);
+  const root = await canonicalPath(rootOutput);
+  if (!root) return undefined;
   const adminOutput = await gitOutput(root, ["rev-parse", "--absolute-git-dir"]);
   const commonOutput = await gitOutput(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   if (!adminOutput || !commonOutput || !isAbsolute(adminOutput) || !isAbsolute(commonOutput)) return undefined;
-  const adminDirectory = resolve(adminOutput);
-  const commonDirectory = resolve(commonOutput);
+  const adminDirectory = await canonicalPath(adminOutput);
+  const commonDirectory = await canonicalPath(commonOutput);
+  if (!adminDirectory || !commonDirectory) return undefined;
   if (adminDirectory === commonDirectory) return undefined;
   const adminRelationship = relative(commonDirectory, adminDirectory).split(sep);
   if (adminRelationship.length !== 2 || adminRelationship[0] !== "worktrees" || !adminRelationship[1]) return undefined;
   const worktreeList = await gitOutput(root, ["worktree", "list", "--porcelain"]);
   if (!worktreeList) return undefined;
-  const listedRoots = worktreeList.split(/\r?\n/)
+  const listedRootOutputs = worktreeList.split(/\r?\n/)
     .filter((line) => line.startsWith("worktree "))
-    .map((line) => resolve(line.slice("worktree ".length)));
+    .map((line) => line.slice("worktree ".length));
+  const listedRoots = (await Promise.all(listedRootOutputs.map(canonicalPath))).filter((value): value is string => value !== undefined);
   if (!listedRoots.includes(root)) return undefined;
   return { root, adminDirectory, commonDirectory };
 }
@@ -149,7 +162,8 @@ export async function inspectBossCreateCapabilities(input: {
   workerPermissionProfileName: string;
   workerPermissionProfile: PermissionProfile;
 }): Promise<BossCreateCapabilityReport> {
-  const cwd = resolve(input.cwd);
+  const requestedCwd = resolve(input.cwd);
+  const cwd = await canonicalPath(requestedCwd) ?? requestedCwd;
   const findings: BossCreateCapabilityFinding[] = [];
   let worktree: LinkedWorktreeEvidence | undefined;
   if (input.requirements.worktree) {
@@ -163,6 +177,10 @@ export async function inspectBossCreateCapabilities(input: {
         : "/usr/bin/git could not verify cwd as an exact listed linked worktree with a valid common/admin relationship; Boss does not provision worktrees",
     });
     const capability = input.requirements.worktree === "read" ? "worktree-read" : "worktree-write";
+    const requiredMode = input.requirements.worktree === "write"
+      ? constants.R_OK | constants.W_OK | constants.X_OK
+      : constants.R_OK | constants.X_OK;
+    const rootAccess = worktree ? await hasAccess(worktree.root, requiredMode) : false;
     findings.push(worktree && input.requirements.worktree === "write" && cwd !== worktree.root
       ? {
         capability,
@@ -170,6 +188,13 @@ export async function inspectBossCreateCapabilities(input: {
         availability: "gap",
         evidence: `assigned cwd ${cwd} is nested below linked worktree root ${worktree.root}; the Worker unit makes only the assigned cwd writable, so whole-worktree write access is not configured`,
       }
+      : worktree && !rootAccess
+        ? {
+          capability,
+          requested: input.requirements.worktree,
+          availability: "gap",
+          evidence: `linked worktree root ${worktree.root} failed the required ${input.requirements.worktree === "write" ? "R|W|X" : "R|X"} Controller access prerequisite; Worker access is not claimed`,
+        }
       : worktree
         ? configuredWorkspaceAccess({
           capability,
