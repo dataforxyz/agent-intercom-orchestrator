@@ -150,16 +150,21 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.match(diagnosed.content[0].text, /Orc Boss trusted-local readiness: warning/);
     assert.match(diagnosed.content[0].text, /required-stack: ready/);
     assert.match(diagnosed.content[0].text, /models: warning/);
-    await assert.rejects(
-      tools.get("boss").execute(
-        "boss-capability-gap-test",
-        { action: "create", goal: "test and publish through Git", requirements: { tests: true, gitTransport: "write" } },
-        new AbortController().signal,
-        () => {},
-        ctx,
-      ),
-      /BOSS_CAPABILITY_GAP:[\s\S]*No Boss run was created/,
+    const blocked = await tools.get("boss").execute(
+      "boss-capability-gap-test",
+      { action: "create", goal: "test and publish through Git", requirements: { tests: true, gitTransport: "write" } },
+      new AbortController().signal,
+      () => {},
+      ctx,
     );
+    assert.equal(blocked.details.created, false);
+    assert.deepEqual(blocked.details.capabilityReport.requested, { tests: true, gitTransport: "write" });
+    assert.deepEqual(blocked.details.capabilityReport.probes.map((finding: any) => [finding.capability, finding.requested, finding.availability]), [
+      ["tests", "required", "gap"],
+      ["git-transport", "write", "gap"],
+    ]);
+    assert.deepEqual(blocked.details.gaps, blocked.details.capabilityReport.probes);
+    assert.match(blocked.content[0].text, /BOSS_CAPABILITY_GAP:[\s\S]*No Boss run was created/);
     assert.equal(launches.length, 0, "a requested capability gap must fail before staffing");
     const afterGap = await tools.get("boss").execute("boss-after-gap-status", { action: "status" }, new AbortController().signal, () => {}, ctx);
     assert.match(afterGap.content[0].text, /No Boss runs are owned by this Controller/);
@@ -171,12 +176,14 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       ctx,
     );
 
+    assert.equal(created.details.created, true);
     assert.equal(created.details.capabilityReport.status, "ready");
-    assert.deepEqual(created.details.capabilityReport.findings.map((finding: any) => [finding.capability, finding.requested, finding.availability]), [
-      ["edit", "required", "available"],
+    assert.deepEqual(created.details.capabilityReport.probes.map((finding: any) => [finding.capability, finding.requested, finding.availability]), [
+      ["edit", "required", "configured"],
     ]);
+    assert.deepEqual(created.details.gaps, []);
     assert.match(created.content[0].text, /Boss create capability report: ready/);
-    assert.match(created.content[0].text, /not proof that implementation or validation succeeded/);
+    assert.match(created.content[0].text, /configured access is policy evidence, not proof of effective Worker access/);
 
     assert.equal(launches.length, 3);
     const bossRunId = created.details.run.bossRunId as string;
@@ -226,6 +233,19 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       assert.match(delivery.message, /Initial (manager|worker|scout) assignment/);
       assert.match(delivery.message, /Begin now using the isolated Ralph protocol/);
     }
+
+    const defaultCreated = await tools.get("boss").execute(
+      "boss-default-create-test",
+      { action: "create", goal: "preserve default create behavior" },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.equal(defaultCreated.details.created, true);
+    assert.equal(defaultCreated.details.capabilityReport, undefined);
+    assert.ok(defaultCreated.details.run?.bossRunId);
+    assert.doesNotMatch(defaultCreated.content[0].text, /Boss create capability report/);
+    assert.equal(launches.length, 6, "omitting requirements preserves ordinary three-role staffing");
 
     contextStale = true;
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);

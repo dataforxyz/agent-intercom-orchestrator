@@ -1955,7 +1955,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
   }
 
-  async function executeTrustedLocalBoss(request: BossCommandRequest, ctx: ExtensionContext): Promise<TrustedLocalBossResult & { capabilityReport?: BossCreateCapabilityReport }> {
+  async function executeTrustedLocalBoss(request: BossCommandRequest, ctx: ExtensionContext): Promise<TrustedLocalBossResult & { capabilityReport?: BossCreateCapabilityReport; created?: boolean }> {
     if (!config) await loadConfig();
     trustedLocalBossStore.setHandlePrefix(config.boss.handlePrefix);
     if (request.action === "plan") {
@@ -1984,7 +1984,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           workerPermissionProfile,
         });
         if (capabilityReport.status === "blocked") {
-          throw new Error(`BOSS_CAPABILITY_GAP:\n${formatBossCreateCapabilityReport(capabilityReport)}`);
+          return {
+            title: "Boss create capability gap",
+            message: `BOSS_CAPABILITY_GAP:\n${formatBossCreateCapabilityReport(capabilityReport)}`,
+            capabilityReport,
+            created: false,
+          };
         }
       }
     }
@@ -2179,11 +2184,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         });
       }
     }
-    if (!capabilityReport) return staffed;
+    if (!capabilityReport) return { ...staffed, created: true };
     return {
       ...staffed,
       message: `${formatBossCreateCapabilityReport(capabilityReport)}\n\n${staffed.message}`,
       capabilityReport,
+      created: true,
     };
   }
 
@@ -2202,11 +2208,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "cancel", "proof", "approve", "reject"] as const),
       goal: Type.Optional(Type.String({ description: "Explicit goal; required for create." })),
       requirements: Type.Optional(Type.Object({
-        worktree: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required access to an exact linked Git worktree." })),
-        edit: Type.Optional(Type.Boolean({ description: "Require effective workspace edit access." })),
-        tests: Type.Optional(Type.Boolean({ description: "Require an effectively probed project test command/toolchain." })),
+        worktree: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required configured access to a Git-verified exact linked worktree." })),
+        edit: Type.Optional(Type.Boolean({ description: "Require unambiguously configured Worker workspace edit access." })),
+        tests: Type.Optional(Type.Boolean({ description: "Require a concretely probed project test command/toolchain; reports a gap when no exact probe exists." })),
         gitTransport: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required remote Git transport authority." })),
-      }, { additionalProperties: false, description: "Explicit create-time requirements; unavailable probes block before run creation." })),
+      }, { additionalProperties: false, description: "Explicit create-time requirements; identity, configuration, or probe gaps block before run creation." })),
       bossRunId: Type.Optional(Type.String({ description: "Exact Boss run id; required except for create and status-all." })),
       note: Type.Optional(Type.String({ description: "Optional control or decision note." })),
     }),
@@ -2218,7 +2224,15 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const result = await executeTrustedLocalBoss(request, ctx);
       return {
         content: [{ type: "text", text: result.message }],
-        details: { title: result.title, run: result.run, runs: result.runs, communication: result.communication, capabilityReport: result.capabilityReport },
+        details: {
+          title: result.title,
+          created: result.created,
+          run: result.run,
+          runs: result.runs,
+          communication: result.communication,
+          capabilityReport: result.capabilityReport,
+          gaps: result.capabilityReport?.gaps,
+        },
       };
     },
     renderCall(args, theme) {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add an explicit structured Boss create requirements contract for worktree read/write, edit, tests, and Git transport, with pre-mutation fail-closed reports that keep requested levels separate from effectively probed availability and never infer needs from goal text.
+- Add an explicit structured Boss create requirements contract for worktree read/write, edit, tests, and Git transport, with real Git-linked-worktree verification, honest verified/configured/gap evidence, fail-closed custom-profile handling, machine-readable gaps, and no inference from goal text.
 - Version WorkerStore persistence as schema v3 before retaining authenticated inbound Intercom activity timestamps. Legacy v1/v2 reads migrate without promoting timestamp-shaped fields to evidence, explicit migration makes v3 durable, and newer schemas remain untouched and unquarantined behind the downgrade gate.
 - Distinguish Boss participant process/transport readiness, assignment acknowledgement, authenticated communication, and substantive typed checkpoints. The exact-owned WorkerStore Intercom timestamp proves communication only; launch baselines, manual renewals, and adoption do not satisfy the bounded ten-minute communication deadline, and unavailable acknowledgement/checkpoint/source/tool telemetry remains explicit.
 - Make Orc Boss onboarding preview-first and fail-closed with the packaged `agent-intercom-boss-setup` CLI, required-stack inventory for Intercom Pi, Orchestrator, Ralph, and Return On, explicit Manager/Worker/Scout/Adversary model and effort preferences, deterministic handle prefixes, atomic field-preserving config writes, and dirty/pinned/duplicate/filtered install refusal.
