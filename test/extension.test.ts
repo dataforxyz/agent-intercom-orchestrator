@@ -1387,6 +1387,8 @@ test("extension registers discovery tools and interactive configuration commands
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /returned intercomTarget/);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /progress\/status checkpoints/);
     assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /create the feature worktree before spawning/i);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /browser automation, screenshot capture, and artifact write access/i);
+    assert.match(tools.get("agent_fleet").promptGuidelines.join("\n"), /explicit executablePath/);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /versions/);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /update/);
     assert.match(JSON.stringify(tools.get("agent_fleet").parameters), /permissionProfile/);
@@ -1404,6 +1406,7 @@ test("extension registers discovery tools and interactive configuration commands
     assert.match(capabilities.content[0].text, /pi: modes=persistent/);
     assert.match(capabilities.content[0].text, /opencode: modes=persistent,one-shot/);
     assert.match(capabilities.content[0].text, /permissions: builder-restricted,manager-restricted,review-readonly,trusted/);
+    assert.match(capabilities.content[0].text, /visual\/browser capture: unmodeled/);
     const permissions = await tools.get("agent_fleet").execute("permissions-test", { action: "permissions" }, new AbortController().signal, () => {}, ctx);
     assert.match(permissions.content[0].text, /review-readonly \[workspace=read-only git=read-only hardened\]/);
 

@@ -30,6 +30,9 @@ ACCESS AND SAFETY
 - Allowed reads: <paths and repositories>
 - Allowed writes: <paths and worktrees>
 - Network/browser access: <allowed or forbidden>
+- Browser control path: <browser MCP/computer use/local Playwright/unavailable>
+- Browser executable: <verified absolute path or unavailable>
+- Screenshot/artifact write directory: <verified writable path or unavailable>
 - Commits: <allowed or forbidden>
 - Pushes, deployments, issues, emails, forms, payments, and other external
   writes: forbidden unless explicitly listed here
@@ -51,7 +54,7 @@ YOUR RESPONSIBILITIES
    mode before sending the assignment.
 7. Use `send` for assignments and progress. Use `ask` only for decisions that
    genuinely block the sender.
-8. Inspect artifacts instead of trusting summaries.
+8. Inspect artifacts instead of trusting summaries. For visual work, verify browser tooling, an executable, and artifact write access before assigning screenshot evidence; otherwise split code audit from manager-side capture and report capture gaps honestly.
 9. Keep compact run notes containing the current goal, worker ownership,
    accepted evidence, open objections, decisions, blockers, and remaining risks.
    Rewrite these notes when they become stale instead of endlessly appending.

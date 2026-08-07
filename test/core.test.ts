@@ -104,6 +104,10 @@ test("harness launch args include identity or the initial task", () => {
   for (const args of [piArgs, codexArgs, claudeArgs, trustedClaudeArgs, opencodeArgs]) {
     assert.match(args.join(" "), /intercom_send for progress/);
   }
+  for (const args of [piArgs, codexArgs, claudeArgs, minimalClaudeArgs, trustedClaudeArgs, opencodeArgs]) {
+    assert.match(args.join(" "), /verify that this worker actually has a browser or browser tool/);
+    assert.match(args.join(" "), /never present code inspection as visual evidence/);
+  }
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
   const ownedEnv = buildWorkerEnvironment("pi", "advisor-a", "advisor", undefined, {

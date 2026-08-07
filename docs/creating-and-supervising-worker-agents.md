@@ -784,15 +784,26 @@ For critical work, completion requires approval from both the primary manager an
 
 ## Browser and visual tasks
 
-Use full `coi` when Codex’s normal-profile browser or computer-use capabilities are required. Minimal Codex workers can still run Playwright or Chromium through shell commands when installed and permitted.
+Do not infer browser or screenshot capability from `codex-safe`, full `coi`, any other harness/profile name, or the model itself. The current fleet capability report does not probe browser MCP/tools, installed browser executables, or artifact-directory write access. A read-only reviewer can therefore perform a useful source audit while being unable to capture or save screenshots.
+
+Before assigning visual evidence, verify all three requirements explicitly:
+
+1. a usable browser-control path (browser MCP/computer use or local Playwright),
+2. an installed browser executable, and
+3. write access to the repository's designated scratch/artifact directory.
+
+For local Playwright, first try the configured browser. If its bundled executable is missing, probe `chromium`, `chromium-browser`, `google-chrome`, and `google-chrome-stable`, then pass the discovered absolute path as Playwright's `executablePath`. Do not install a browser, widen a read-only worker's permissions, or move artifacts outside the project's required scratch directory merely to rescue a delegated review.
+
+When a reviewer lacks capture capability, split the assignment deliberately: keep source/layout analysis with the read-only coworker and perform browser capture in the manager or another explicitly verified worker. State which agent produced each artifact. If no verified capture path exists, report visual evidence as unavailable rather than treating code inspection as a screenshot-equivalent.
 
 For visual work, require:
 
 - read-only reference inspection
-- matching desktop and mobile captures
+- matching desktop and mobile captures, when capture is verified available
 - written comparison against the source
 - console and request checks
 - navigation, form, image, and overflow checks
+- explicit artifact paths and capture ownership
 - no real payments, orders, emails, or production-mutating submissions
 
 ## Blockers and issue waivers
