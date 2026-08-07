@@ -90,7 +90,10 @@ test("WorkerStore v1 migration maps every state, identity, owner, and audit fiel
     "provisioning", "running", "idle", "needs_attention", "completed", "failed", "stopping", "stopped", "lost",
   ];
   try {
-    const workers = states.map((state) => legacyWorker(state, state));
+    const workers = states.map((state) => ({
+      ...legacyWorker(state, state),
+      lastAuthenticatedIntercomActivityAt: 9_000,
+    }));
     await writeFile(path, JSON.stringify({ version: 1, workers }));
     const store = new WorkerStore(path, { now: () => 10_000 });
     const migrated = await store.read();
@@ -136,6 +139,7 @@ test("WorkerStore v1 migration maps every state, identity, owner, and audit fiel
     await store.migrate();
     const raw = JSON.parse(await readFile(path, "utf8"));
     assert.equal(raw.version, 3);
+    assert.equal(raw.workers[0].lastAuthenticatedIntercomActivityAt, undefined);
     assert.equal(raw.workers[0].runId, undefined);
     assert.equal(raw.workers[0].managerSessionId, undefined);
     assert.equal(raw.workers[0].workerIncarnationId, "run-provisioning");
