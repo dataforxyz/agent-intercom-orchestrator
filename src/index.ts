@@ -1965,8 +1965,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const worker = snapshot.workers.find((candidate) => candidate.id === assignment.workerId && workerIncarnation(candidate) === assignment.workerIncarnationId && candidate.bossRunId === run.bossRunId && candidate.managerSessionId === run.managerSessionId);
           if (!worker) {
             const conflicting = snapshot.workers.find((candidate) => candidate.id === assignment.workerId && candidate.bossRunId === run.bossRunId && candidate.managerSessionId === run.managerSessionId);
-            if (conflicting) throw new Error(`Boss ${assignment.role} worker identity changed before terminal cleanup`);
-            continue;
+            throw new Error(conflicting
+              ? `Boss ${assignment.role} worker identity changed before terminal cleanup`
+              : `Exact assigned Boss ${assignment.role} worker is unavailable; process termination is unverified`);
           }
           if (isLiveState(worker.state)) await stopWorker(worker, { expectedManagerSessionId: run.managerSessionId, reason: "boss-run-terminal" });
         } catch (error) {

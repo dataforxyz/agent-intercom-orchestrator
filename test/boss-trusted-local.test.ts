@@ -459,6 +459,11 @@ test("trusted-local Boss binds advisory proof revisions to an assigned adversary
     assert.equal(approved.run?.decisions[0].proofRevision, 1);
     assert.equal(approved.run?.decisions[0].reviewerWorkerId, reviewerWorker.id);
     assert.match(approved.message, /latest decision: approved on proof revision 1/);
+    const cleanupRetry = await store.execute(parseBossCommand(`approve ${created.run!.bossRunId} retry exact terminal cleanup`), "manager-session-8");
+    assert.equal(cleanupRetry.run?.state, "approved");
+    assert.equal(cleanupRetry.run?.decisions.length, 1, "cleanup retry must not create a second decision");
+    assert.match(cleanupRetry.title, /cleanup retry/);
+    assert.match(cleanupRetry.message, /participant shutdown and canonical resource cleanup may be retried/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

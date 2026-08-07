@@ -118,6 +118,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     const intercomDeliveries: Array<{ to: string; message: string }> = [];
     let contextStale = false;
     let failNextBossLaunch = false;
+    let failNextBossStop = false;
     const pi: any = {
       on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
       events: {
@@ -138,6 +139,10 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
         }
         if (command === "systemd") return { ...commandResult(), stdout: "systemd 257\n" };
         if (command === "systemctl" && args.includes("stop")) {
+          if (failNextBossStop) {
+            failNextBossStop = false;
+            return { ...commandResult(), code: 1, stderr: "injected participant stop failure" };
+          }
           stoppedUnits.add(args.at(-1)!);
           return commandResult();
         }
@@ -287,6 +292,57 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.doesNotMatch(defaultCreated.content[0].text, /Boss create capability report/);
     assert.equal(launches.length, 6, "omitting requirements preserves ordinary three-role staffing");
 
+    const reviewable = await tools.get("boss").execute(
+      "boss-review-cleanup-retry-create",
+      { action: "create", goal: "retry terminal cleanup after transient stop failure", requirements: { worktree: "write" } },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    const reviewableRunId = reviewable.details.run.bossRunId as string;
+    const reviewableCwd = reviewable.details.run.resource.path as string;
+    const proof = await tools.get("boss").execute(
+      "boss-review-cleanup-retry-proof",
+      { action: "proof", bossRunId: reviewableRunId },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.equal(proof.details.run.proofPackets.length, 1);
+    const freshProof = await tools.get("boss").execute(
+      "boss-review-cleanup-fresh-proof",
+      { action: "proof", bossRunId: reviewableRunId },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.ok(freshProof.details.run.proofPackets.length >= 1);
+    failNextBossStop = true;
+    const firstApproval = await tools.get("boss").execute(
+      "boss-review-cleanup-first-approval",
+      { action: "approve", bossRunId: reviewableRunId, note: "exact proof reviewed" },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.equal(firstApproval.details.run.state, "approved");
+    assert.equal(firstApproval.details.run.resource.leaseState, "active");
+    assert.match(firstApproval.content[0].text, /cleanup was not attempted because exact participant shutdown failed/);
+    assert.equal(await access(reviewableCwd).then(() => true), true);
+    const retriedApproval = await tools.get("boss").execute(
+      "boss-review-cleanup-retried-approval",
+      { action: "approve", bossRunId: reviewableRunId, note: "retry exact terminal cleanup" },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.equal(retriedApproval.details.run.state, "approved");
+    assert.equal(retriedApproval.details.run.decisions.length, 1);
+    assert.equal(retriedApproval.details.run.resource.leaseState, "released");
+    assert.equal(retriedApproval.details.run.resource.existence, "missing");
+    await assert.rejects(access(reviewableCwd));
+
+    const launchesBeforeManagerFailure = launches.length;
     failNextBossLaunch = true;
     const managerFailed = await tools.get("boss").execute(
       "boss-manager-failure-cleanup-test",
@@ -303,7 +359,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.equal(managerFailed.details.run.resource.existence, "missing");
     assert.match(managerFailed.content[0].text, /clean worktree and branch were removed/);
     await assert.rejects(access(failedCanonicalCwd));
-    assert.equal(launches.length, 6, "Manager launch failure must not continue staffing Worker or Scout");
+    assert.equal(launches.length, launchesBeforeManagerFailure, "Manager launch failure must not continue staffing Worker or Scout");
 
     contextStale = true;
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);

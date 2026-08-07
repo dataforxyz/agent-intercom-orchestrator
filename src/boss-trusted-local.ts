@@ -847,6 +847,11 @@ export class TrustedLocalBossStore {
       }
       if (request.action === "approve" || request.action === "reject") {
         if (!request.note) throw new Error(`Trusted-local ${request.action} requires an explicit review note.`);
+        const outcome = request.action === "approve" ? "approved" : "rejected";
+        const existingDecision = selected.decisions.at(-1);
+        if (selected.state === outcome && existingDecision?.outcome === outcome) {
+          return { title: `Boss trusted-local ${outcome} cleanup retry`, message: `${formatRun(selected, timestamp)}\n\nThe existing decision is unchanged; exact participant shutdown and canonical resource cleanup may be retried.`, run: structuredClone(selected) };
+        }
         if (selected.state !== "active" && selected.state !== "paused") throw new Error(`Cannot ${request.action} Boss run from ${selected.state}.`);
         const proof = selected.proofPackets.at(-1); if (!proof) throw new Error(`Trusted-local ${request.action} requires an advisory proof packet.`);
         const reviewer = assignmentForRole(selected, "adversary"); if (reviewer.state !== "assigned" || !reviewer.workerId) throw new Error(`Trusted-local ${request.action} requires an assigned adversary reviewer.`);
@@ -855,7 +860,6 @@ export class TrustedLocalBossStore {
         if (!proofDelivery || proofDelivery.state !== "delivered" || proofResult?.outcome !== "accepted") throw new Error(`Trusted-local ${request.action} requires successful delivery of the exact latest proof.`);
         if (proof.runState !== selected.state || proof.snapshotSha256 !== proofDigest(selected, reviewer)) throw new Error(`Trusted-local ${request.action} requires a fresh proof of the exact current run state.`);
         if (selected.decisions.length) throw new Error("Trusted-local Boss run already has a review decision.");
-        const outcome = request.action === "approve" ? "approved" : "rejected";
         selected.decisions.push({ decisionId: `decision-${randomUUID()}`, proofPacketId: proof.proofPacketId, proofRevision: proof.revision, reviewerAssignmentId: reviewer.assignmentId, reviewerWorkerId: reviewer.workerId, outcome, note: request.note.slice(0, 4_096), decidedBySessionId: managerSessionId, decidedAt: timestamp });
         selected.state = outcome; selected.updatedAt = timestamp; state.revision += 1;
         return { title: `Boss trusted-local run ${outcome}`, message: formatRun(selected, timestamp), run: structuredClone(selected) };
