@@ -281,6 +281,42 @@ test("read-only Git policy allows inspection and blocks mutations or remote writ
   assert.equal(blockedToolReason("bash", { command: "git push origin main" }, "read-write", "full"), undefined);
 });
 
+test("safe Git inspection commands use an explicit allow and block matrix", () => {
+  const allowed = [
+    "git show-ref --heads",
+    "git symbolic-ref HEAD",
+    "git symbolic-ref --quiet --short HEAD",
+    "git symbolic-ref 'refs/remotes/origin/HEAD'",
+    "git merge-base HEAD origin/main",
+    "git merge-base --is-ancestor HEAD origin/main",
+    "git worktree list",
+    "git worktree list --porcelain -z",
+    "git worktree list --expire=now --verbose",
+  ];
+  const blocked = [
+    "git symbolic-ref HEAD refs/heads/other",
+    "git symbolic-ref --delete HEAD",
+    "git symbolic-ref -m reason HEAD refs/heads/other",
+    "ARGS='HEAD refs/heads/other'; /usr/bin/git symbolic-ref $ARGS",
+    "git symbolic-ref ${REF_NAME}",
+    "git symbolic-ref refs/heads/../other",
+    "git worktree add ../other",
+    "git worktree move ../old ../new",
+    "git worktree remove ../other",
+    "git worktree lock ../other",
+    "git worktree unlock ../other",
+    "git worktree prune",
+    "git worktree repair",
+    "git worktree list --unknown-option",
+  ];
+  for (const command of allowed) {
+    assert.equal(blockedToolReason("bash", { command }, "read-write", "read-only"), undefined, command);
+  }
+  for (const command of blocked) {
+    assert.match(blockedToolReason("bash", { command }, "read-write", "read-only") ?? "", /git (?:symbolic-ref|worktree)/, command);
+  }
+});
+
 test("cross-harness Git guard allows inspection and blocks mutation", () => {
   const guard = fileURLToPath(new URL("../src/guard-bin/git", import.meta.url));
   const environment = {
@@ -289,13 +325,39 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
     AGENT_INTERCOM_GIT_POLICY: "read-only",
     AGENT_INTERCOM_PERMISSION_PROFILE: "builder-restricted",
   };
-  const allowed = spawnSync(guard, ["-C", process.cwd(), "status", "--short"], { env: environment, encoding: "utf8" });
-  assert.equal(allowed.status, 0, allowed.stderr);
-  const blocked = spawnSync(guard, ["push", "origin", "main"], { env: environment, encoding: "utf8" });
-  assert.equal(blocked.status, 126);
-  assert.match(blocked.stderr, /git push blocked/);
-  const branchBlocked = spawnSync(guard, ["branch", "new-feature"], { env: environment, encoding: "utf8" });
-  assert.equal(branchBlocked.status, 126);
+  const symbolicRepo = mkdtempSync(join(tmpdir(), "agent-intercom-symbolic-ref-"));
+  assert.equal(spawnSync("/usr/bin/git", ["init", "--quiet", symbolicRepo]).status, 0);
+  try {
+  const allowedMatrix: Array<{ args: string[]; statuses: number[] }> = [
+    { args: ["-C", process.cwd(), "status", "--short"], statuses: [0] },
+    { args: ["-C", process.cwd(), "show-ref", "--heads"], statuses: [0, 1] },
+    { args: ["-C", symbolicRepo, "symbolic-ref", "--short", "HEAD"], statuses: [0] },
+    { args: ["-C", process.cwd(), "merge-base", "HEAD", "HEAD"], statuses: [0] },
+    { args: ["-C", process.cwd(), "worktree", "list", "--porcelain"], statuses: [0] },
+  ];
+  for (const { args, statuses } of allowedMatrix) {
+    const allowed = spawnSync(guard, args, { env: environment, encoding: "utf8" });
+    assert.ok(allowed.status !== null && statuses.includes(allowed.status), `${args.join(" ")}: status=${allowed.status}; ${allowed.stderr}`);
+  }
+  const blockedMatrix = [
+    ["push", "origin", "main"],
+    ["branch", "new-feature"],
+    ["symbolic-ref", "HEAD", "refs/heads/other"],
+    ["symbolic-ref", "--delete", "HEAD"],
+    ["worktree", "add", "../other"],
+    ["worktree", "move", "../old", "../new"],
+    ["worktree", "remove", "../other"],
+    ["worktree", "lock", "../other"],
+    ["worktree", "unlock", "../other"],
+    ["worktree", "prune"],
+    ["worktree", "repair"],
+    ["worktree", "list", "--unknown-option"],
+  ];
+  for (const args of blockedMatrix) {
+    const blocked = spawnSync(guard, args, { env: environment, encoding: "utf8" });
+    assert.equal(blocked.status, 126, `${args.join(" ")}: ${blocked.stderr}`);
+    assert.match(blocked.stderr, /git .* blocked/);
+  }
   const overrideBlocked = spawnSync(guard, ["push", "origin", "main"], { env: { ...environment, AGENT_INTERCOM_GIT_POLICY: "full" }, encoding: "utf8" });
   assert.equal(overrideBlocked.status, 126);
   const executableOverride = spawnSync(guard, ["status"], { env: { ...environment, AGENT_INTERCOM_REAL_GIT: "/bin/sh" }, encoding: "utf8" });
@@ -308,6 +370,9 @@ test("cross-harness Git guard allows inspection and blocks mutation", () => {
   const ghBlocked = spawnSync(ghGuard, ["pr", "merge", "42"], { env: ghEnvironment, encoding: "utf8" });
   assert.equal(ghBlocked.status, 126);
   assert.match(ghBlocked.stderr, /gh pr merge .*blocked/);
+  } finally {
+    rmSync(symbolicRepo, { recursive: true, force: true });
+  }
 });
 
 test("GitHub policy validates repository targets and API reads", () => {

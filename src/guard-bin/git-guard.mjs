@@ -23,6 +23,46 @@ function commandIndex(argv) {
   return -1;
 }
 
+function isSafeSymbolicRefName(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value)
+    && !value.includes("..")
+    && !value.includes("//")
+    && !value.endsWith("/")
+    && !value.endsWith(".")
+    && !value.endsWith(".lock");
+}
+
+function isReadOnlySymbolicRefArgs(argv) {
+  let name;
+  let optionsEnded = false;
+  for (const arg of argv) {
+    if (!optionsEnded && arg === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && ["-q", "--quiet", "--short"].includes(arg)) continue;
+    if (!optionsEnded && arg.startsWith("-")) return false;
+    if (name !== undefined || !isSafeSymbolicRefName(arg)) return false;
+    name = arg;
+  }
+  return name !== undefined;
+}
+
+function isReadOnlyWorktreeArgs(argv) {
+  if (argv[0] !== "list") return false;
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (["--porcelain", "-z", "--verbose"].includes(arg)) continue;
+    if (arg === "--expire") {
+      if (++index >= argv.length) return false;
+      continue;
+    }
+    if (arg.startsWith("--expire=") && arg.length > "--expire=".length) continue;
+    return false;
+  }
+  return true;
+}
+
 function isReadOnlyInvocation(argv) {
   const index = commandIndex(argv);
   if (index < 0) return true;
@@ -30,10 +70,12 @@ function isReadOnlyInvocation(argv) {
   const rest = argv.slice(index + 1);
   if (["--version", "version", "--help", "help"].includes(command)) return true;
   const safe = new Set([
-    "status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree", "grep", "blame",
+    "status", "diff", "log", "show", "show-ref", "rev-parse", "merge-base", "ls-files", "ls-tree", "grep", "blame",
     "shortlog", "describe", "name-rev", "cat-file", "for-each-ref",
   ]);
   if (safe.has(command)) return true;
+  if (command === "symbolic-ref") return isReadOnlySymbolicRefArgs(rest);
+  if (command === "worktree") return isReadOnlyWorktreeArgs(rest);
   if (command === "branch") return rest.length === 0 || rest.every((arg) => ["-a", "--all", "-r", "--remotes", "-v", "-vv", "--show-current", "--list"].includes(arg));
   if (command === "tag") return rest.length === 0 || rest[0] === "-l" || rest[0] === "--list";
   if (command === "remote") return rest.length === 0 || rest[0] === "-v" || rest[0] === "get-url";

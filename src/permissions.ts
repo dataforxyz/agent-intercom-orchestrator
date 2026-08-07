@@ -660,7 +660,9 @@ const SAFE_GIT_COMMANDS = new Set([
   "diff",
   "log",
   "show",
+  "show-ref",
   "rev-parse",
+  "merge-base",
   "ls-files",
   "ls-tree",
   "grep",
@@ -671,6 +673,46 @@ const SAFE_GIT_COMMANDS = new Set([
   "cat-file",
   "for-each-ref",
 ]);
+
+function isSafeSymbolicRefName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value)
+    && !value.includes("..")
+    && !value.includes("//")
+    && !value.endsWith("/")
+    && !value.endsWith(".")
+    && !value.endsWith(".lock");
+}
+
+function isReadOnlySymbolicRefArgs(args: string[]): boolean {
+  let name: string | undefined;
+  let optionsEnded = false;
+  for (const arg of args) {
+    if (!optionsEnded && arg === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && ["-q", "--quiet", "--short"].includes(arg)) continue;
+    if (!optionsEnded && arg.startsWith("-")) return false;
+    if (name !== undefined || !isSafeSymbolicRefName(arg)) return false;
+    name = arg;
+  }
+  return name !== undefined;
+}
+
+function isReadOnlyWorktreeArgs(args: string[]): boolean {
+  if (args[0] !== "list") return false;
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (["--porcelain", "-z", "--verbose"].includes(arg)) continue;
+    if (arg === "--expire") {
+      if (++index >= args.length) return false;
+      continue;
+    }
+    if (arg.startsWith("--expire=") && arg.length > "--expire=".length) continue;
+    return false;
+  }
+  return true;
+}
 
 const TEA_COMMAND_ALIASES: Record<string, string> = {
   issues: "issues", issue: "issues", i: "issues",
@@ -1098,8 +1140,10 @@ function gitInvocationReason(command: string): string | undefined {
   const invocations = command.matchAll(/(?:^|[\s;&|()])(?:[\w./-]+\/)?git\s+(?:(?:(?:-C|-c|--git-dir|--work-tree)\s+\S+|(?:--git-dir|--work-tree)=\S+|--no-pager)\s+)*([a-z][a-z-]*)([^\n;&|)]*)/gi);
   for (const match of invocations) {
     const subcommand = match[1].toLowerCase();
-    const rest = (match[2] ?? "").trim().split(/\s+/).filter(Boolean);
+    const rest = shellWords((match[2] ?? "").trim());
     if (SAFE_GIT_COMMANDS.has(subcommand)) continue;
+    if (subcommand === "symbolic-ref" && isReadOnlySymbolicRefArgs(rest)) continue;
+    if (subcommand === "worktree" && isReadOnlyWorktreeArgs(rest)) continue;
     if (subcommand === "branch" && (rest.length === 0 || rest.every((arg) => ["-a", "--all", "-r", "--remotes", "-v", "-vv", "--show-current", "--list"].includes(arg)))) continue;
     if (subcommand === "tag" && (rest.length === 0 || rest[0] === "-l" || rest[0] === "--list")) continue;
     if (subcommand === "remote" && (rest.length === 0 || rest[0] === "-v" || rest[0] === "get-url")) continue;
