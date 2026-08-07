@@ -33,16 +33,17 @@ test("Boss command parser is exact and defaults to status", () => {
   assert.throws(() => parseBossCommand("unknown"), /Unknown \/boss action/);
 });
 
-test("Boss tool create requirements accept only unique declared capability needs", () => {
-  assert.deepEqual(bossCreateRequest("  implement and verify  ", ["worktree", "edit", "test"]), {
+test("Boss tool create requirements use only explicit structured fields", () => {
+  assert.deepEqual(bossCreateRequest("  implement and verify  ", { worktree: "write", edit: true, tests: true }), {
     action: "create",
     goal: "implement and verify",
-    needs: ["worktree", "edit", "test"],
+    requirements: { worktree: "write", edit: true, tests: true },
   });
-  assert.deepEqual(bossCreateRequest("inspect only", []), { action: "create", goal: "inspect only" });
-  assert.throws(() => bossCreateRequest("", ["edit"]), /requires one explicit goal/);
-  assert.throws(() => bossCreateRequest("work", ["edit", "edit"]), /must not contain duplicates/);
-  assert.throws(() => bossCreateRequest("work", ["remote-shell"]), /Unknown Boss create need/);
+  assert.deepEqual(bossCreateRequest("inspect only", { edit: false, tests: false }), { action: "create", goal: "inspect only" });
+  assert.throws(() => bossCreateRequest("", { edit: true }), /requires one explicit goal/);
+  assert.throws(() => bossCreateRequest("work", ["edit"] as any), /structured object/);
+  assert.throws(() => bossCreateRequest("work", { worktree: "execute" } as any), /must be read or write/);
+  assert.throws(() => bossCreateRequest("work", { remoteShell: true } as any), /unknown field/);
 });
 
 test("Boss commands reject every non-interactive invocation", () => {

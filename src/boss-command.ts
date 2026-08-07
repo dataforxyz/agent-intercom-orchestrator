@@ -13,13 +13,20 @@ export const BOSS_COMMAND_ACTIONS = [
 
 export type BossCommandAction = typeof BOSS_COMMAND_ACTIONS[number];
 
-export const BOSS_CREATE_NEEDS = ["worktree", "edit", "test", "git-transport"] as const;
-export type BossCreateNeed = typeof BOSS_CREATE_NEEDS[number];
+export const BOSS_CREATE_ACCESS_LEVELS = ["read", "write"] as const;
+export type BossCreateAccessLevel = typeof BOSS_CREATE_ACCESS_LEVELS[number];
+
+export interface BossCreateRequirements {
+  worktree?: BossCreateAccessLevel;
+  edit?: boolean;
+  tests?: boolean;
+  gitTransport?: BossCreateAccessLevel;
+}
 
 export type BossCommandRequest =
   | { action: "status"; bossRunId?: string }
   | { action: "doctor" | "plan" }
-  | { action: "create"; goal: string; needs?: BossCreateNeed[] }
+  | { action: "create"; goal: string; requirements?: BossCreateRequirements }
   | { action: "resume" | "pause" | "cancel" | "proof" | "approve" | "reject"; bossRunId: string; note?: string };
 
 export interface BossCommandContextLike {
@@ -37,22 +44,29 @@ function parseRunId(value: string | undefined): string {
   return id;
 }
 
-export function bossCreateRequest(goal: string | undefined, needs?: readonly string[]): BossCommandRequest {
+export function bossCreateRequest(goal: string | undefined, requirements?: BossCreateRequirements): BossCommandRequest {
   const normalizedGoal = goal?.trim() ?? "";
   if (!normalizedGoal) throw new Error("Boss create requires one explicit goal.");
-  const normalizedNeeds = needs ?? [];
-  if (new Set(normalizedNeeds).size !== normalizedNeeds.length) {
-    throw new Error("Boss create needs must not contain duplicates.");
+  if (requirements !== undefined && (requirements === null || typeof requirements !== "object" || Array.isArray(requirements))) {
+    throw new Error("Boss create requirements must be a structured object.");
   }
-  for (const need of normalizedNeeds) {
-    if (!BOSS_CREATE_NEEDS.includes(need as BossCreateNeed)) {
-      throw new Error(`Unknown Boss create need '${need}'. Choose: ${BOSS_CREATE_NEEDS.join(", ")}.`);
-    }
-  }
+  const keys = Object.keys(requirements ?? {});
+  const allowedKeys = new Set(["worktree", "edit", "tests", "gitTransport"]);
+  if (keys.some((key) => !allowedKeys.has(key))) throw new Error("Boss create requirements contain an unknown field.");
+  if (requirements?.worktree !== undefined && !BOSS_CREATE_ACCESS_LEVELS.includes(requirements.worktree)) throw new Error("Boss worktree requirement must be read or write.");
+  if (requirements?.gitTransport !== undefined && !BOSS_CREATE_ACCESS_LEVELS.includes(requirements.gitTransport)) throw new Error("Boss Git transport requirement must be read or write.");
+  if (requirements?.edit !== undefined && typeof requirements.edit !== "boolean") throw new Error("Boss edit requirement must be boolean.");
+  if (requirements?.tests !== undefined && typeof requirements.tests !== "boolean") throw new Error("Boss tests requirement must be boolean.");
+  const normalizedRequirements: BossCreateRequirements = {
+    ...(requirements?.worktree ? { worktree: requirements.worktree } : {}),
+    ...(requirements?.edit ? { edit: true } : {}),
+    ...(requirements?.tests ? { tests: true } : {}),
+    ...(requirements?.gitTransport ? { gitTransport: requirements.gitTransport } : {}),
+  };
   return {
     action: "create",
     goal: normalizedGoal,
-    ...(normalizedNeeds.length ? { needs: [...normalizedNeeds] as BossCreateNeed[] } : {}),
+    ...(Object.keys(normalizedRequirements).length ? { requirements: normalizedRequirements } : {}),
   };
 }
 

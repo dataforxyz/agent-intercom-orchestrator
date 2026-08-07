@@ -8,7 +8,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_CONFIG, readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
-import { BOSS_CREATE_NEEDS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, type BossCommandRequest } from "./boss-command.ts";
+import { BOSS_CREATE_ACCESS_LEVELS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, type BossCommandRequest } from "./boss-command.ts";
 import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type BossCreateCapabilityReport } from "./boss-create-capabilities.ts";
 import { formatBossReadinessReport, formatBossSetupReport, inspectBossSetup, inspectTrustedLocalBossReadiness } from "./boss-setup.ts";
 import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, trustedLocalBossParticipantTargets, type TrustedLocalBossTeamIdentity } from "./boss-team-environment.ts";
@@ -1973,13 +1973,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (readiness.status === "blocked") {
         throw new Error(`BOSS_TRUSTED_LOCAL_NOT_READY:\n${formatBossReadinessReport(readiness)}`);
       }
-      if (request.needs?.length) {
+      if (request.requirements) {
         const workerPermissionProfileName = config.roles.worker?.permissionProfile ?? "builder-restricted";
         const workerPermissionProfile = config.permissionProfiles[workerPermissionProfileName];
         if (!workerPermissionProfile) throw new Error(`BOSS_CAPABILITY_GAP: unknown Worker permission profile ${workerPermissionProfileName}; no run was created.`);
         capabilityReport = await inspectBossCreateCapabilities({
           cwd: ctx.cwd,
-          needs: request.needs,
+          requirements: request.requirements,
           workerPermissionProfileName,
           workerPermissionProfile,
         });
@@ -2195,19 +2195,25 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use boss when the user asks the top-level Pi Controller to create or manage a Boss run; do not ask the user to type /boss.",
       "Boss runs use trusted-local advisory scoping, not protected or tamper-proof authority.",
+      "Pass structured create requirements only when the user explicitly requested those worktree, edit, test, or Git transport needs; never infer them from goal text.",
       "Use exact bossRunId values returned by boss for status, pause, resume, proof, approval, rejection, and cancellation.",
     ],
     parameters: Type.Object({
       action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "cancel", "proof", "approve", "reject"] as const),
       goal: Type.Optional(Type.String({ description: "Explicit goal; required for create." })),
-      needs: Type.Optional(Type.Array(StringEnum(BOSS_CREATE_NEEDS), { description: "Capabilities explicitly required for create; any reported gap blocks run creation.", uniqueItems: true })),
+      requirements: Type.Optional(Type.Object({
+        worktree: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required access to an exact linked Git worktree." })),
+        edit: Type.Optional(Type.Boolean({ description: "Require effective workspace edit access." })),
+        tests: Type.Optional(Type.Boolean({ description: "Require an effectively probed project test command/toolchain." })),
+        gitTransport: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required remote Git transport authority." })),
+      }, { additionalProperties: false, description: "Explicit create-time requirements; unavailable probes block before run creation." })),
       bossRunId: Type.Optional(Type.String({ description: "Exact Boss run id; required except for create and status-all." })),
       note: Type.Optional(Type.String({ description: "Optional control or decision note." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (params.action !== "create" && params.needs?.length) throw new Error("Boss create needs are accepted only for action=create.");
+      if (params.action !== "create" && params.requirements) throw new Error("Boss create requirements are accepted only for action=create.");
       const request = params.action === "create"
-        ? bossCreateRequest(params.goal, params.needs)
+        ? bossCreateRequest(params.goal, params.requirements)
         : parseBossCommand(`${params.action}${params.bossRunId ? ` ${params.bossRunId}` : ""}${params.note ? ` ${params.note}` : ""}`);
       const result = await executeTrustedLocalBoss(request, ctx);
       return {

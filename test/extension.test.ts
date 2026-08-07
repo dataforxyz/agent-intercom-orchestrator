@@ -153,7 +153,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     await assert.rejects(
       tools.get("boss").execute(
         "boss-capability-gap-test",
-        { action: "create", goal: "publish through Git", needs: ["git-transport"] },
+        { action: "create", goal: "test and publish through Git", requirements: { tests: true, gitTransport: "write" } },
         new AbortController().signal,
         () => {},
         ctx,
@@ -165,19 +165,18 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.match(afterGap.content[0].text, /No Boss runs are owned by this Controller/);
     const created = await tools.get("boss").execute(
       "boss-launch-test",
-      { action: "create", goal: "ship supervised Ralph loops", needs: ["edit", "test"] },
+      { action: "create", goal: "ship supervised Ralph loops", requirements: { edit: true } },
       new AbortController().signal,
       () => {},
       ctx,
     );
 
     assert.equal(created.details.capabilityReport.status, "ready");
-    assert.deepEqual(created.details.capabilityReport.findings.map((finding: any) => [finding.need, finding.status]), [
-      ["edit", "configured"],
-      ["test", "configured"],
+    assert.deepEqual(created.details.capabilityReport.findings.map((finding: any) => [finding.capability, finding.requested, finding.availability]), [
+      ["edit", "required", "available"],
     ]);
     assert.match(created.content[0].text, /Boss create capability report: ready/);
-    assert.match(created.content[0].text, /project-specific commands and toolchains are not claimed as preflight-verified/);
+    assert.match(created.content[0].text, /not proof that implementation or validation succeeded/);
 
     assert.equal(launches.length, 3);
     const bossRunId = created.details.run.bossRunId as string;

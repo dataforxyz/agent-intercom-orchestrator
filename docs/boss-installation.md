@@ -143,12 +143,12 @@ When the goal has concrete execution needs, declare them on the tool call instea
 ```typescript
 boss({
   action: "create",
-  goal: "Implement and verify the requested change in the assigned worktree.",
-  needs: ["worktree", "edit", "test"],
+  goal: "Implement the requested change in the assigned worktree.",
+  requirements: { worktree: "write", edit: true },
 })
 ```
 
-The optional values are `worktree`, `edit`, `test`, and `git-transport`. Boss checks them before persisting a run. It verifies linked-worktree metadata, reports edit/test access as configured policy rather than proof of successful work, and reports Git transport as a gap because remote reachability, credentials, and write authority are not verified at create time. `BOSS_CAPABILITY_GAP` means no run or participant was created. The successful structured result includes `details.capabilityReport`; `/boss create` remains the goal-only interactive shorthand.
+The optional fields are `worktree: "read" | "write"`, `edit: boolean`, `tests: boolean`, and `gitTransport: "read" | "write"`. Boss never derives them from goal text. It checks requested requirements before persisting a run and reports the requested level separately from effectively probed availability. Linked-worktree identity is verified from Git administrative metadata; filesystem access is combined with the exact Worker permission/tool policy, so an exact read-only worktree blocks requested write/edit work. Project-specific tests and remote Git transport stay unavailable when no exact probe establishes them; a configured shell or Git policy is not proof. `BOSS_CAPABILITY_GAP` means no run or participant was created. The successful structured result includes `details.capabilityReport`; `/boss create` remains the goal-only interactive shorthand and cannot carry structured requirements.
 
 A run displays both a deterministic `<prefix>-<base32-digest>` handle and its exact `boss-...` run ID. Later commands accept either value; mutation results continue to show the exact ID. Multiple nonterminal trusted-local runs may coexist, but each remains owned by its exact creating Controller session.
 
