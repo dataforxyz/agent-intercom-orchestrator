@@ -273,6 +273,7 @@ test("trusted-local Boss assigns deterministic handles while migrating v2 run re
     legacy.runs[0].version = "orc.boss-trusted-local.v1";
     delete legacy.runs[0].handle;
     delete legacy.runs[0].resource;
+    for (const assignment of legacy.runs[0].assignments) delete assignment.resourceRevision;
     await writeFile(path, JSON.stringify(legacy));
 
     const reopened = new TrustedLocalBossStore(path, undefined, "legacy");
@@ -283,6 +284,7 @@ test("trusted-local Boss assigns deterministic handles while migrating v2 run re
     assert.equal(migrated.version, "orc.boss-trusted-local.v5");
     assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v3");
     assert.equal(migrated.runs[0].resource, null);
+    assert.equal(migrated.runs[0].assignments[0].resourceRevision, null);
     assert.equal(migrated.runs[0].handle, migratedHandle);
   } finally {
     await rm(dir, { recursive: true, force: true });

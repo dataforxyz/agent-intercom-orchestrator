@@ -161,6 +161,8 @@ test("trusted-local readiness composes stack, host, Intercom, onboarding, model,
     config.boss = {
       handlePrefix: onboarding.handlePrefix,
       roles: structuredClone(onboarding.roles),
+      worktreeRoot: DEFAULT_CONFIG.boss.worktreeRoot,
+      resourceLeaseMinutes: DEFAULT_CONFIG.boss.resourceLeaseMinutes,
       onboarding: { version: "orc.boss-onboarding.v1", completedAt: "2026-03-21T00:00:00.000Z" },
     };
     const setup: BossSetupReport = {

@@ -100,6 +100,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
         "pi-peer": { harness: "pi", command: "/bin/true", args: ["--mode", "rpc", "--exclude-tools", "agent_fleet"], mode: "persistent", maxRuntime: "12h" },
       },
       boss: {
+        worktreeRoot: join(agentDir, "boss-worktrees"),
         onboarding: { version: "orc.boss-onboarding.v1", completedAt: "2026-03-01T12:34:56.000Z" },
         roles: {
           manager: { model: "provider/manager", effort: "high" },
@@ -135,7 +136,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       },
     };
     const ctx: any = {
-      cwd: "/tmp", mode: "rpc", hasUI: false,
+      cwd: resources[1][0], mode: "rpc", hasUI: false,
       sessionManager: { getSessionId: () => "controller-exact-target", getSessionFile: () => undefined },
       ui: { setStatus() { if (contextStale) throw new Error("stale context used during reload shutdown"); }, notify() {} },
     };
@@ -170,7 +171,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.match(afterGap.content[0].text, /No Boss runs are owned by this Controller/);
     const created = await tools.get("boss").execute(
       "boss-launch-test",
-      { action: "create", goal: "ship supervised Ralph loops", requirements: { edit: true } },
+      { action: "create", goal: "ship supervised Ralph loops", requirements: { worktree: "write", edit: true } },
       new AbortController().signal,
       () => {},
       ctx,
@@ -179,6 +180,8 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.equal(created.details.created, true);
     assert.equal(created.details.capabilityReport.status, "ready");
     assert.deepEqual(created.details.capabilityReport.probes.map((finding: any) => [finding.capability, finding.requested, finding.availability]), [
+      ["worktree-identity", "required", "verified"],
+      ["worktree-write", "write", "configured"],
       ["edit", "required", "configured"],
     ]);
     assert.deepEqual(created.details.gaps, []);
@@ -187,6 +190,10 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
 
     assert.equal(launches.length, 3);
     const bossRunId = created.details.run.bossRunId as string;
+    const canonicalCwd = created.details.run.resource.path as string;
+    assert.equal(created.details.run.resource.revision, 1);
+    assert.equal(canonicalCwd, join(agentDir, "boss-worktrees", bossRunId));
+    assert.deepEqual(created.details.run.assignments.map((assignment: any) => assignment.resourceRevision), [1, 1, 1]);
     const suffix = bossRunId.slice(-12);
     const orchestratorExtension = new URL("../src/index.ts", import.meta.url).pathname;
     for (const role of ["manager", "worker", "scout"] as const) {
@@ -195,6 +202,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       assert.ok(launch.includes(`--setenv=AGENT_INTERCOM_BOSS_RUN_ID=${bossRunId}`));
       assert.ok(launch.includes("--setenv=AGENT_INTERCOM_BOSS_CONTROLLER_TARGET=controller-exact-target"));
       assert.ok(launch.includes(`--setenv=AGENT_INTERCOM_BOSS_MANAGER_TARGET=boss-manager-${suffix}`));
+      assert.ok(launch.includes(`--working-directory=${canonicalCwd}`), `${role} did not launch in the canonical resource`);
       assert.ok(launch.includes(`--setenv=PI_RALPH_STATE_ROOT=${join(runtimeDir, "agent-intercom-worker", "boss-ralph", bossRunId, role)}`));
       assert.ok(launch.includes(`--setenv=PI_RETURN_ON_STATE_DIR=${join(runtimeDir, "agent-intercom-worker", "boss-return-on", bossRunId, role)}`));
       assert.ok(launch.includes("--no-extensions"));
@@ -212,6 +220,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       const prompt = launch.join("\n");
       assert.match(prompt, new RegExp(`Immediately start the isolated Ralph loop named boss-${suffix}-${role}`));
       assert.match(prompt, /itemsPerIteration=3, reflectEvery=5, maxIterations=100/);
+      assert.ok(prompt.includes(`Canonical resource: ${canonicalCwd} at resource revision 1`));
       const modelIndex = launch.indexOf("--model");
       const thinkingIndex = launch.indexOf("--thinking");
       assert.equal(launch[modelIndex + 1], `provider/${role}`);
@@ -231,6 +240,8 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     ].sort());
     for (const delivery of intercomDeliveries) {
       assert.match(delivery.message, /Initial (manager|worker|scout) assignment/);
+      assert.match(delivery.message, /resource revision 1/);
+      assert.ok(delivery.message.includes(`Canonical cwd: ${canonicalCwd}`));
       assert.match(delivery.message, /Begin now using the isolated Ralph protocol/);
     }
 

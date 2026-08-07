@@ -55,6 +55,8 @@ test("Boss preferences merge only baseline model and effort fields", () => {
       adversary: { model: "provider/adversary", effort: "max" },
     },
     handlePrefix: "team-boss",
+    worktreeRoot: DEFAULT_CONFIG.boss.worktreeRoot,
+    resourceLeaseMinutes: DEFAULT_CONFIG.boss.resourceLeaseMinutes,
     onboarding: { version: "orc.boss-onboarding.v1", completedAt: "2026-03-01T12:34:56.000Z" },
   });
   assert.equal(isBossOnboardingComplete(config), true);

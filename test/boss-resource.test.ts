@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { observeProvisionedBossResource } from "../src/boss-resource.ts";
+import { observeProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree } from "../src/boss-resource.ts";
 import { TrustedLocalBossStore } from "../src/boss-trusted-local.ts";
 
 const execFileAsync = promisify(execFile);
@@ -40,6 +40,40 @@ function readyReport(cwd: string) {
   }];
   return { status: "ready" as const, cwd, requested: { worktree: "write" as const }, probes, gaps: [] };
 }
+
+test("provisions a dedicated direct-child worktree and rolls back observation failures", async (context) => {
+  const { root, repository, baseSha } = await fixture(context);
+  const leaseRoot = join(root, "leases");
+  const bossRunId = "boss-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const provisioned = await provisionBossLinkedWorktree({
+    bossRunId,
+    sourceCwd: repository,
+    leaseRoot,
+    observe: async (candidate) => {
+      assert.equal(candidate.baseSha, baseSha);
+      assert.equal(candidate.path, join(leaseRoot, bossRunId));
+      assert.equal(await git(candidate.path, "symbolic-ref", "--short", "HEAD"), candidate.branch);
+    },
+  });
+  assert.equal(await git(repository, "worktree", "list", "--porcelain").then((value) => value.includes(provisioned.path)), true);
+  await rollbackProvisionedBossWorktree(provisioned);
+  await assert.rejects(realpath(provisioned.path));
+  await assert.rejects(git(repository, "show-ref", "--verify", `refs/heads/${provisioned.branch}`));
+
+  const failedId = "boss-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await assert.rejects(provisionBossLinkedWorktree({ bossRunId: failedId, sourceCwd: repository, leaseRoot, observe: async () => { throw new Error("observation failed"); } }), /observation failed/);
+  await assert.rejects(realpath(join(leaseRoot, failedId)));
+  await assert.rejects(git(repository, "show-ref", "--verify", `refs/heads/boss/run-${failedId.slice(5)}`));
+});
+
+test("fails closed on branch collisions without deleting the pre-existing branch", async (context) => {
+  const { root, repository } = await fixture(context);
+  const bossRunId = "boss-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const branch = `boss/run-${bossRunId.slice(5)}`;
+  await git(repository, "branch", branch);
+  await assert.rejects(provisionBossLinkedWorktree({ bossRunId, sourceCwd: repository, leaseRoot: join(root, "leases"), observe: async () => undefined }));
+  assert.match(await git(repository, "show-ref", "--verify", `refs/heads/${branch}`), /refs\/heads\/boss\/run-/);
+});
 
 test("observes an exact Controller-provisioned linked worktree and binds an active lease", async (context) => {
   const { worktree, baseSha } = await fixture(context);
@@ -106,6 +140,17 @@ test("trusted-local store accepts one exact initial resource and migrates it dur
   });
   const bound = await store.recordProvisionedResource(created.run!.bossRunId, resource);
   assert.deepEqual(bound.resource, resource);
+  assert.deepEqual(bound.assignments.map((assignment) => assignment.resourceRevision), [1, 1, 1]);
   assert.match((await store.execute({ action: "status", bossRunId: created.run!.bossRunId }, "controller-resource")).message, /resource: resource-/);
   await assert.rejects(store.recordProvisionedResource(created.run!.bossRunId, resource), /already has a canonical resource/);
+});
+
+test("persists a provisioned run and stamps every initial assignment with the resource revision", async (context) => {
+  const { root, worktree, baseSha } = await fixture(context);
+  const store = new TrustedLocalBossStore(join(root, "provisioned-runs.json"), () => new Date("2026-02-03T04:05:06.000Z"));
+  const bossRunId = "boss-dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const resource = await observeProvisionedBossResource({ bossRunId, path: worktree, baseSha, capabilityReport: readyReport(worktree), leaseDurationMs: 60_000 });
+  const result = await store.createProvisionedRun({ bossRunId, goal: "use canonical cwd", managerSessionId: "controller-provisioned", resource });
+  assert.equal(result.run?.resource?.path, worktree);
+  assert.deepEqual(result.run?.assignments.map((assignment) => assignment.resourceRevision), [1, 1, 1]);
 });

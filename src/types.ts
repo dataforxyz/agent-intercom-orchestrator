@@ -139,6 +139,10 @@ export interface BossOnboardingRecord {
 export interface BossConfig {
   roles: Partial<Record<BossBaselineRole, BossRolePreference>>;
   handlePrefix: string;
+  /** Absolute Controller-owned root containing one direct child per leased Boss worktree. */
+  worktreeRoot: string;
+  /** Bounded initial canonical-resource lease duration. */
+  resourceLeaseMinutes: number;
   onboarding?: BossOnboardingRecord;
 }
 

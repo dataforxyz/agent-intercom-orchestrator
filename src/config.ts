@@ -219,6 +219,8 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
   boss: {
     roles: {},
     handlePrefix: "boss",
+    worktreeRoot: join(homedir(), ".local", "share", "orc", "boss-worktrees"),
+    resourceLeaseMinutes: 24 * 60,
   },
   routing: {
     preference: ["pi", "codex", "claude", "opencode"],
@@ -371,6 +373,15 @@ function mergeBoss(value: unknown): BossConfig {
   const handlePrefix = typeof value.handlePrefix === "string" && BOSS_HANDLE_PREFIX.test(value.handlePrefix)
     ? value.handlePrefix
     : DEFAULT_CONFIG.boss.handlePrefix;
+  const worktreeRoot = typeof value.worktreeRoot === "string" && isAbsolute(value.worktreeRoot)
+    ? value.worktreeRoot
+    : DEFAULT_CONFIG.boss.worktreeRoot;
+  const resourceLeaseMinutes = typeof value.resourceLeaseMinutes === "number"
+    && Number.isSafeInteger(value.resourceLeaseMinutes)
+    && value.resourceLeaseMinutes >= 1
+    && value.resourceLeaseMinutes <= 7 * 24 * 60
+    ? value.resourceLeaseMinutes
+    : DEFAULT_CONFIG.boss.resourceLeaseMinutes;
   let onboarding: BossConfig["onboarding"];
   if (isRecord(value.onboarding)
     && value.onboarding.version === BOSS_ONBOARDING_VERSION
@@ -378,7 +389,7 @@ function mergeBoss(value: unknown): BossConfig {
     && Number.isFinite(Date.parse(value.onboarding.completedAt))) {
     onboarding = { version: BOSS_ONBOARDING_VERSION, completedAt: new Date(value.onboarding.completedAt).toISOString() };
   }
-  return { roles, handlePrefix, ...(onboarding ? { onboarding } : {}) };
+  return { roles, handlePrefix, worktreeRoot, resourceLeaseMinutes, ...(onboarding ? { onboarding } : {}) };
 }
 
 function mergeHarnessStrings(
@@ -680,11 +691,15 @@ export async function writeConfigDefaults(path: string, config: OrchestratorConf
   const existingBoss = hadBossObject ? structuredClone(existing.boss as Record<string, unknown>) : {};
   delete existingBoss.roles;
   delete existingBoss.handlePrefix;
+  delete existingBoss.worktreeRoot;
+  delete existingBoss.resourceLeaseMinutes;
   delete existingBoss.onboarding;
   const boss = {
     ...existingBoss,
     ...(Object.keys(config.boss.roles).length ? { roles: config.boss.roles } : {}),
     ...(config.boss.handlePrefix !== DEFAULT_CONFIG.boss.handlePrefix ? { handlePrefix: config.boss.handlePrefix } : {}),
+    ...(config.boss.worktreeRoot !== DEFAULT_CONFIG.boss.worktreeRoot ? { worktreeRoot: config.boss.worktreeRoot } : {}),
+    ...(config.boss.resourceLeaseMinutes !== DEFAULT_CONFIG.boss.resourceLeaseMinutes ? { resourceLeaseMinutes: config.boss.resourceLeaseMinutes } : {}),
     ...(config.boss.onboarding ? { onboarding: config.boss.onboarding } : {}),
   };
   const hadRoutingObject = isRecord(existing.routing);
