@@ -11,7 +11,7 @@ export type LegacyWorkerState =
   | "stopped"
   | "lost";
 
-/** The participant lifecycle vocabulary persisted by WorkerStore v2. */
+/** The participant lifecycle vocabulary persisted by WorkerStore v2 and v3. */
 export type CanonicalWorkerState =
   | "provisioning"
   | "registering"
@@ -269,13 +269,16 @@ export interface WorkerRecord {
   backendDetails?: unknown;
 }
 
-/** Canonical in-memory v2 record. Deprecated aliases are hydrated for callers but are not serialized. */
+/** Canonical in-memory record. Deprecated aliases are hydrated for callers but are not serialized. */
 export interface WorkerRecordV2 extends WorkerRecord {
   workerIncarnationId: string;
   workerGeneration: number;
   state: CanonicalWorkerState | "migration_pending";
   managerOwner: ManagerOwnerBinding;
 }
+
+/** WorkerStore v3 is the first schema that authenticates the Intercom activity timestamp. */
+export interface WorkerRecordV3 extends WorkerRecordV2 {}
 
 export interface RuntimeCleanupClaim {
   token: string;
@@ -297,23 +300,31 @@ export interface WorkerGenerationLedgerEntry {
 }
 
 export interface WorkerStateFile {
-  /** Version 1 is accepted only as a compatibility input and explicit migration source. */
-  version: 1 | 2;
-  /** Monotonic compare-and-swap generation. Required for canonical version 2 snapshots. */
+  /** Versions 1 and 2 are accepted only as compatibility inputs and explicit migration sources. */
+  version: 1 | 2 | 3;
+  /** Monotonic compare-and-swap generation. Required for version 2 and canonical version 3 snapshots. */
   generation?: number;
   workers: WorkerRecord[];
-  /** Durable anti-reuse ledger. Canonical version 2 snapshots always include it. */
+  /** Durable anti-reuse ledger. Version 2 and canonical version 3 snapshots always include it. */
   workerGenerations?: WorkerGenerationLedgerEntry[];
   runtimeCleanupClaims?: RuntimeCleanupClaim[];
   /** Active schema features; an unsupported feature prevents reads and mutations. */
   activeFeatures?: string[];
 }
 
-/** Exact canonical snapshot returned by WorkerStore reads. */
+/** Legacy version-2 snapshot accepted only for explicit migration. */
 export interface WorkerStateFileV2 extends WorkerStateFile {
   version: 2;
   generation: number;
   workers: WorkerRecordV2[];
+  workerGenerations: WorkerGenerationLedgerEntry[];
+}
+
+/** Exact canonical snapshot returned by WorkerStore reads. */
+export interface WorkerStateFileV3 extends WorkerStateFile {
+  version: 3;
+  generation: number;
+  workers: WorkerRecordV3[];
   workerGenerations: WorkerGenerationLedgerEntry[];
 }
 

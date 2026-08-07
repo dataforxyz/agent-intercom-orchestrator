@@ -15,13 +15,15 @@ import type {
   WorkerGenerationLedgerEntry,
   WorkerRecord,
   WorkerRecordV2,
+  WorkerRecordV3,
   WorkerState,
   WorkerStateFile,
   WorkerStateFileV2,
+  WorkerStateFileV3,
 } from "./types.ts";
 import { acquireKernelFileLock } from "./file-lock.ts";
 
-const CURRENT_VERSION = 2 as const;
+const CURRENT_VERSION = 3 as const;
 const DEFAULT_LEGACY_STOPPING_SETTLE_MS = 120_000;
 const LOCK_STALE_MS = 120_000;
 const LOCK_ATTEMPTS = 500;
@@ -82,7 +84,7 @@ export interface WorkerStoreOptions {
 export interface WorkerStoreCommit<T> {
   value: T;
   generation: number;
-  state: WorkerStateFileV2;
+  state: WorkerStateFileV3;
 }
 
 export interface WorkerStoreQuarantine {
@@ -550,9 +552,11 @@ function parseFeatureList(value: unknown): string[] | undefined {
   return features;
 }
 
-function parseV2File(value: unknown, allowAliases: boolean): WorkerStateFileV2 {
+function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2): WorkerStateFileV2;
+function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 3): WorkerStateFileV3;
+function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2 | 3): WorkerStateFileV2 | WorkerStateFileV3 {
   const object = assertExactObject(value, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers", ...(allowAliases ? [] : ["workerGenerations"])], "worker state");
-  if (object.version !== 2) throw new WorkerStoreValidationError("worker state version is not 2");
+  if (object.version !== expectedVersion) throw new WorkerStoreValidationError(`worker state version is not ${expectedVersion}`);
   const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => parseV2Worker(worker, `worker state.workers[${index}]`, allowAliases));
   assertUniqueWorkers(workers);
   const claims = object.runtimeCleanupClaims === undefined
@@ -565,7 +569,7 @@ function parseV2File(value: unknown, allowAliases: boolean): WorkerStateFileV2 {
     if (recorded !== undefined && recorded < worker.workerGeneration) throw new WorkerStoreValidationError(`worker state.workerGenerations is behind worker ${worker.id}`);
   }
   return {
-    version: 2,
+    version: expectedVersion,
     generation: requiredNumber(object, "generation", "worker state", true),
     workers,
     workerGenerations: workerGenerations.length > 0 || !allowAliases
@@ -573,7 +577,15 @@ function parseV2File(value: unknown, allowAliases: boolean): WorkerStateFileV2 {
       : workers.map((worker) => ({ workerId: worker.id, generation: worker.workerGeneration })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
     ...(claims ? { runtimeCleanupClaims: claims } : {}),
     ...(activeFeatures ? { activeFeatures } : {}),
-  };
+  } as WorkerStateFileV2 | WorkerStateFileV3;
+}
+
+function parseV2File(value: unknown, allowAliases: boolean): WorkerStateFileV2 {
+  return parseVersionedFile(value, allowAliases, 2);
+}
+
+function parseV3File(value: unknown, allowAliases: boolean): WorkerStateFileV3 {
+  return parseVersionedFile(value, allowAliases, 3);
 }
 
 function migrationOutcome(worker: WorkerRecord): WorkerMigrationOutcomeAudit {
@@ -598,7 +610,7 @@ function inferManagerOwner(worker: WorkerRecord, options: Required<Pick<WorkerSt
   } as ManagerOwnerBinding;
 }
 
-function migrateLegacyWorker(worker: WorkerRecord, migratedAt: number, options: Required<Pick<WorkerStoreOptions, "legacyManagerContext" | "legacyStoppingSettleMs">> & WorkerStoreOptions): WorkerRecordV2 {
+function migrateLegacyWorker(worker: WorkerRecord, migratedAt: number, options: Required<Pick<WorkerStoreOptions, "legacyManagerContext" | "legacyStoppingSettleMs">> & WorkerStoreOptions): WorkerRecordV3 {
   let state: WorkerState;
   let stateReason: string | undefined;
   let terminalOutcome: "completed" | undefined;
@@ -645,8 +657,12 @@ function migrateLegacyWorker(worker: WorkerRecord, migratedAt: number, options: 
     managerOwnerInferredFromLegacySession: true,
     ...flags,
   };
+  // v1 did not define authenticated Intercom evidence. Some unversioned
+  // writers emitted this newer field under a v1 header; carrying it forward
+  // would turn an unauthenticated legacy claim into v3 evidence.
+  const { lastAuthenticatedIntercomActivityAt: _legacyActivity, ...legacyWorker } = worker;
   return {
-    ...worker,
+    ...legacyWorker,
     workerIncarnationId: worker.runId,
     workerGeneration: 1,
     state,
@@ -654,20 +670,34 @@ function migrateLegacyWorker(worker: WorkerRecord, migratedAt: number, options: 
     ...(terminalOutcome ? { terminalOutcome } : {}),
     managerOwner,
     migrationAudit: audit,
-  } as WorkerRecordV2;
+  } as WorkerRecordV3;
 }
 
 function migrateLegacyFile(
   legacy: ReturnType<typeof parseLegacyFile>,
   migratedAt: number,
   options: Required<Pick<WorkerStoreOptions, "legacyManagerContext" | "legacyStoppingSettleMs">> & WorkerStoreOptions,
-): WorkerStateFileV2 {
+): WorkerStateFileV3 {
   return {
-    version: 2,
+    version: 3,
     generation: 1,
     workers: legacy.workers.map((worker) => migrateLegacyWorker(worker, migratedAt, options)),
     workerGenerations: legacy.workers.map((worker) => ({ workerId: worker.id, generation: 1 })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
     ...(legacy.runtimeCleanupClaims ? { runtimeCleanupClaims: legacy.runtimeCleanupClaims } : {}),
+  };
+}
+
+function migrateV2File(legacy: WorkerStateFileV2): WorkerStateFileV3 {
+  return {
+    ...legacy,
+    version: 3,
+    workers: legacy.workers.map((worker) => {
+      // v2 predates the authenticated-activity contract. Accept the field for
+      // compatibility with the briefly shipped unversioned writer, but never
+      // promote that claim to authoritative v3 evidence.
+      const { lastAuthenticatedIntercomActivityAt: _legacyActivity, ...migrated } = worker;
+      return migrated as WorkerRecordV3;
+    }),
   };
 }
 
@@ -676,9 +706,9 @@ function storedWorker(worker: WorkerRecord): Record<string, unknown> {
   return compactObject(stored as Record<string, unknown>) as Record<string, unknown>;
 }
 
-function storedState(state: WorkerStateFileV2): Record<string, unknown> {
+function storedState(state: WorkerStateFileV3): Record<string, unknown> {
   return compactObject({
-    version: 2,
+    version: 3,
     generation: state.generation,
     workers: state.workers.map(storedWorker),
     workerGenerations: state.workerGenerations,
@@ -687,8 +717,8 @@ function storedState(state: WorkerStateFileV2): Record<string, unknown> {
   }) as Record<string, unknown>;
 }
 
-function serializedState(state: WorkerStateFileV2): string {
-  const canonical = parseV2File(storedState(state), false);
+function serializedState(state: WorkerStateFileV3): string {
+  const canonical = parseV3File(storedState(state), false);
   return `${JSON.stringify(storedState(canonical), null, 2)}\n`;
 }
 
@@ -702,7 +732,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function cloneState(state: WorkerStateFileV2): WorkerStateFileV2 {
+function cloneState(state: WorkerStateFileV3): WorkerStateFileV3 {
   return structuredClone(state);
 }
 
@@ -721,9 +751,9 @@ export function isWorkerDispatchAllowed(worker: WorkerRecord): boolean {
 }
 
 interface LoadedState {
-  state: WorkerStateFileV2;
+  state: WorkerStateFileV3;
   raw?: string;
-  sourceVersion: 0 | 1 | 2;
+  sourceVersion: 0 | 1 | 2 | 3;
 }
 
 interface HeldWriteContext {
@@ -880,12 +910,12 @@ export class WorkerStore {
     throw new WorkerStoreCorruptError(`Could not parse worker state ${this.path}: ${reason}; preserved at ${quarantinePath}`, quarantinePath);
   }
 
-  private assertSupportedFeatures(state: WorkerStateFileV2): void {
+  private assertSupportedFeatures(state: WorkerStateFileV2 | WorkerStateFileV3): void {
     const unsupported = (state.activeFeatures ?? []).filter((feature) => !this.supportedFeatures.has(feature));
     if (unsupported.length > 0) throw new WorkerStoreUnsupportedFeatureError(unsupported);
   }
 
-  private parseRaw(raw: string): { state: WorkerStateFileV2; sourceVersion: 1 | 2 } {
+  private parseRaw(raw: string): { state: WorkerStateFileV3; sourceVersion: 1 | 2 | 3 } {
     let value: unknown;
     try {
       value = JSON.parse(raw);
@@ -901,7 +931,12 @@ export class WorkerStore {
     if (version === 2) {
       const state = parseV2File(value, false);
       this.assertSupportedFeatures(state);
-      return { state, sourceVersion: 2 };
+      return { state: migrateV2File(state), sourceVersion: 2 };
+    }
+    if (version === 3) {
+      const state = parseV3File(value, false);
+      this.assertSupportedFeatures(state);
+      return { state, sourceVersion: 3 };
     }
     throw new WorkerStoreValidationError(`unsupported or corrupt worker state version ${String(version)}`);
   }
@@ -912,7 +947,7 @@ export class WorkerStore {
     try {
       raw = await readFile(this.path, "utf8");
     } catch (error) {
-      if (errorCode(error) === "ENOENT") return { state: { version: 2, generation: 0, workers: [], workerGenerations: [] }, sourceVersion: 0 };
+      if (errorCode(error) === "ENOENT") return { state: { version: 3, generation: 0, workers: [], workerGenerations: [] }, sourceVersion: 0 };
       throw new WorkerStoreError(`Could not read worker state ${this.path}: ${errorText(error)}`, "WORKER_STORE_READ_FAILED");
     }
     try {
@@ -1004,7 +1039,7 @@ export class WorkerStore {
     }
   }
 
-  private normalizeApiWorker(value: unknown, path: string, previous: WorkerRecord | undefined, previousGeneration = 0): WorkerRecordV2 {
+  private normalizeApiWorker(value: unknown, path: string, previous: WorkerRecord | undefined, previousGeneration = 0): WorkerRecordV3 {
     const object = assertExactObject(value, V2_API_WORKER_KEYS, ["id", "harness", "role", "task", "cwd", "state", "owned", "createdAt", "updatedAt", "leaseExpiresAt"], path);
     const id = requiredString(object, "id", path);
     const runAlias = optionalString(object, "runId", path);
@@ -1080,10 +1115,10 @@ export class WorkerStore {
       const migrated = migrateLegacyWorker(legacy, this.options.now(), this.options);
       candidate = { ...migrated, workerGeneration: expectedWorkerGeneration, managerOwner, managerSessionId: managerOwner.sessionId };
     }
-    return parseV2Worker(compactObject(candidate), path, true);
+    return parseV2Worker(compactObject(candidate), path, true) as WorkerRecordV3;
   }
 
-  private normalizeInput(state: WorkerStateFile, previous: WorkerStateFileV2): WorkerStateFileV2 {
+  private normalizeInput(state: WorkerStateFile, previous: WorkerStateFileV3): WorkerStateFileV3 {
     const header = assertPlainObject(state, "worker state");
     if (header.version === 1) {
       const migrated = migrateLegacyFile(parseLegacyFile(state), this.options.now(), this.options);
@@ -1101,7 +1136,8 @@ export class WorkerStore {
       return migrated;
     }
     const object = assertExactObject(state, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers"], "worker state");
-    if (object.version !== 2) throw new WorkerStoreValidationError(`worker state version must be 1 or 2`);
+    if (object.version !== 2 && object.version !== 3) throw new WorkerStoreValidationError(`worker state version must be 1, 2, or 3`);
+    const sourceVersion = object.version;
     const generation = requiredNumber(object, "generation", "worker state", true);
     const previousById = new Map(previous.workers.map((worker) => [worker.id, worker]));
     const previousGenerationById = new Map(previous.workerGenerations.map((entry) => [entry.workerId, entry.generation]));
@@ -1112,7 +1148,10 @@ export class WorkerStore {
     const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => {
       const raw = assertPlainObject(worker, `worker state.workers[${index}]`);
       const id = requiredString(raw, "id", `worker state.workers[${index}]`);
-      return this.normalizeApiWorker(worker, `worker state.workers[${index}]`, previousById.get(id), previousGenerationById.get(id) ?? 0);
+      const normalized = this.normalizeApiWorker(worker, `worker state.workers[${index}]`, previousById.get(id), previousGenerationById.get(id) ?? 0);
+      if (sourceVersion === 3) return normalized;
+      const { lastAuthenticatedIntercomActivityAt: _legacyActivity, ...withoutLegacyEvidence } = normalized;
+      return withoutLegacyEvidence as WorkerRecordV3;
     });
     assertUniqueWorkers(workers);
     const claims = object.runtimeCleanupClaims === undefined
@@ -1121,8 +1160,8 @@ export class WorkerStore {
     const activeFeatures = parseFeatureList(object.activeFeatures);
     const nextGenerationById = new Map(previous.workerGenerations.map((entry) => [entry.workerId, entry.generation]));
     for (const worker of workers) nextGenerationById.set(worker.id, Math.max(nextGenerationById.get(worker.id) ?? 0, worker.workerGeneration));
-    const normalized: WorkerStateFileV2 = {
-      version: 2,
+    const normalized: WorkerStateFileV3 = {
+      version: 3,
       generation,
       workers,
       workerGenerations: [...nextGenerationById].map(([workerId, workerGeneration]) => ({ workerId, generation: workerGeneration })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
@@ -1133,7 +1172,7 @@ export class WorkerStore {
     return normalized;
   }
 
-  private assertPendingRecordsPreserved(previous: WorkerStateFileV2, next: WorkerStateFileV2, allowResolution: boolean): void {
+  private assertPendingRecordsPreserved(previous: WorkerStateFileV3, next: WorkerStateFileV3, allowResolution: boolean): void {
     for (const worker of previous.workers) {
       if (worker.state !== "migration_pending") continue;
       const updated = next.workers.find((candidate) => candidate.id === worker.id);
@@ -1208,7 +1247,7 @@ export class WorkerStore {
     }
   }
 
-  private publish(target: WorkerStateFile, committed: WorkerStateFileV2): void {
+  private publish(target: WorkerStateFile, committed: WorkerStateFileV3): void {
     try {
       for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
       Object.assign(target, cloneState(committed));
@@ -1221,7 +1260,7 @@ export class WorkerStore {
 
   private async writeLocked(state: WorkerStateFile, context: HeldWriteContext): Promise<void> {
     const previous = context.loaded.state;
-    if (state.version === 2 && state.generation !== previous.generation) {
+    if ((state.version === 2 || state.version === 3) && state.generation !== previous.generation) {
       throw new WorkerStoreConflictError(state.generation ?? -1, previous.generation);
     }
     const normalized = this.normalizeInput(state, previous);
@@ -1229,16 +1268,16 @@ export class WorkerStore {
     this.assertPendingRecordsPreserved(previous, normalized, context.allowPendingResolution);
     const text = serializedState(normalized);
     await this.durableCommit(text, context.loaded.raw);
-    const committed = parseV2File(JSON.parse(text), false);
-    context.loaded = { state: committed, raw: text, sourceVersion: 2 };
+    const committed = parseV3File(JSON.parse(text), false);
+    context.loaded = { state: committed, raw: text, sourceVersion: 3 };
     this.publish(state, committed);
   }
 
-  async read(): Promise<WorkerStateFileV2> {
+  async read(): Promise<WorkerStateFileV3> {
     return this.enqueue(() => this.withLock(async () => cloneState((await this.loadLocked()).state)));
   }
 
-  /** Persist a validated v2 commit. Version-1 inputs take the explicit migration path first. */
+  /** Persist a validated v3 commit. Version-1/2 inputs take the explicit migration path first. */
   async write(state: WorkerStateFile): Promise<void> {
     await this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
@@ -1246,14 +1285,14 @@ export class WorkerStore {
     }));
   }
 
-  /** Durably migrates a v1 file without applying an unrelated user mutation. */
-  async migrate(): Promise<WorkerStateFileV2> {
+  /** Durably migrates a v1/v2 file without applying an unrelated user mutation. */
+  async migrate(): Promise<WorkerStateFileV3> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
-      if (loaded.sourceVersion === 2) return cloneState(loaded.state);
+      if (loaded.sourceVersion === 3) return cloneState(loaded.state);
       const text = serializedState(loaded.state);
       await this.durableCommit(text, loaded.raw);
-      return cloneState(parseV2File(JSON.parse(text), false));
+      return cloneState(parseV3File(JSON.parse(text), false));
     }));
   }
 
@@ -1272,7 +1311,7 @@ export class WorkerStore {
   /** Lock-backed optimistic mutation. A supplied generation is checked before the callback runs. */
   async mutateWithGeneration<T>(
     expectedGeneration: number | undefined,
-    fn: (state: WorkerStateFileV2) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
+    fn: (state: WorkerStateFileV3) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
   ): Promise<WorkerStoreCommit<T>> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
@@ -1289,7 +1328,7 @@ export class WorkerStore {
 
   async compareAndSwap<T>(
     expectedGeneration: number,
-    fn: (state: WorkerStateFileV2) => T | Promise<T>,
+    fn: (state: WorkerStateFileV3) => T | Promise<T>,
   ): Promise<WorkerStoreCommit<T>> {
     return this.mutateWithGeneration(expectedGeneration, async (state) => ({ value: await fn(state), changed: true }));
   }
@@ -1320,7 +1359,7 @@ export class WorkerStore {
     workerId: string,
     resolution: "stopped" | "failed" | "lost" | "unreachable",
     options: { expectedGeneration?: number; observedAt?: number; reason?: string } = {},
-  ): Promise<WorkerStateFileV2> {
+  ): Promise<WorkerStateFileV3> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
       if (options.expectedGeneration !== undefined && loaded.state.generation !== options.expectedGeneration) {
@@ -1346,7 +1385,7 @@ export class WorkerStore {
   }
 
   /** Reconcile an ambiguous post-rename fault when the expected bytes are now present. */
-  async reconcilePoisonedCommit(): Promise<WorkerStateFileV2> {
+  async reconcilePoisonedCommit(): Promise<WorkerStateFileV3> {
     return this.enqueue(() => this.withLock(async () => {
       const marker = await this.readPoisonMarker();
       if (!marker || marker.kind !== "ambiguous_commit" || !marker.expectedDigest) {
@@ -1364,21 +1403,21 @@ export class WorkerStore {
   }
 
   /** Replace a quarantined store only with an explicitly supplied, fully validated snapshot. */
-  async recoverFromQuarantine(replacement: WorkerStateFileV2, quarantinePath?: string): Promise<WorkerStateFileV2> {
+  async recoverFromQuarantine(replacement: WorkerStateFileV3, quarantinePath?: string): Promise<WorkerStateFileV3> {
     return this.enqueue(() => this.withLock(async () => {
       const marker = await this.readPoisonMarker();
       if (!marker || marker.kind !== "corrupt") throw new WorkerStorePoisonedError(`Worker state ${this.path} is not in corrupt quarantine`, marker);
       if (quarantinePath !== undefined && marker.quarantinePath !== quarantinePath) {
         throw new WorkerStoreValidationError(`Quarantine path does not match the durable poison marker`);
       }
-      const empty: WorkerStateFileV2 = { version: 2, generation: 0, workers: [], workerGenerations: [] };
+      const empty: WorkerStateFileV3 = { version: 3, generation: 0, workers: [], workerGenerations: [] };
       const normalized = this.normalizeInput(replacement, empty);
       const text = serializedState(normalized);
       await this.durableCommit(text);
       await rm(this.poisonPath());
       await this.syncDirectory();
       this.poisoned = undefined;
-      return cloneState(parseV2File(JSON.parse(text), false));
+      return cloneState(parseV3File(JSON.parse(text), false));
     }));
   }
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Version WorkerStore persistence as schema v3 before retaining authenticated inbound Intercom activity timestamps. Legacy v1/v2 reads migrate without promoting timestamp-shaped fields to evidence, explicit migration makes v3 durable, and newer schemas remain untouched and unquarantined behind the downgrade gate.
 - Distinguish Boss participant process/transport readiness, assignment acknowledgement, authenticated communication, and substantive typed checkpoints. The exact-owned WorkerStore Intercom timestamp proves communication only; launch baselines, manual renewals, and adoption do not satisfy the bounded ten-minute communication deadline, and unavailable acknowledgement/checkpoint/source/tool telemetry remains explicit.
 - Make Orc Boss onboarding preview-first and fail-closed with the packaged `agent-intercom-boss-setup` CLI, required-stack inventory for Intercom Pi, Orchestrator, Ralph, and Return On, explicit Manager/Worker/Scout/Adversary model and effort preferences, deterministic handle prefixes, atomic field-preserving config writes, and dirty/pinned/duplicate/filtered install refusal.
 - Gate trusted-local Boss creation on a composed readiness report covering the required stack, responsive systemd user manager, active Controller Intercom identity, completed versioned onboarding, live Pi model-catalog evidence when available, and writable Boss/worker/Ralph/Return On state roots; expose read-only `plan` and `doctor` actions through `/boss` and the `boss` tool.
