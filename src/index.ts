@@ -8,6 +8,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_CONFIG, readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
+import { observeBossCandidateFingerprint } from "./boss-candidate-fingerprint.ts";
 import { BOSS_CREATE_ACCESS_LEVELS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, type BossCommandRequest } from "./boss-command.ts";
 import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type BossCreateCapabilityReport } from "./boss-create-capabilities.ts";
 import { cleanupProvisionedBossResource, observeProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
@@ -2068,6 +2069,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         }
         result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
       }
+    } else if (request.action === "freeze" || request.action === "unfreeze") {
+      const ownerSessionId = managerSessionId(ctx);
+      const status = await trustedLocalBossStore.execute({ action: "status", bossRunId: request.bossRunId }, ownerSessionId);
+      if (!status.run?.resource) throw new Error(`Trusted-local Boss ${request.action} requires a canonical resource.`);
+      const fingerprint = await observeBossCandidateFingerprint(status.run.resource);
+      result = request.action === "freeze"
+        ? await trustedLocalBossStore.authorizeFreeze({ bossRunId: status.run.bossRunId, managerSessionId: ownerSessionId, expectedAcceptanceRevision: request.expectedAcceptanceRevision, expectedDesignRevision: request.expectedDesignRevision, fingerprint })
+        : await trustedLocalBossStore.authorizeUnfreeze({ bossRunId: status.run.bossRunId, managerSessionId: ownerSessionId, expectedFreezeRevision: request.expectedFreezeRevision, expectedFingerprintSha256: request.expectedFingerprintSha256, fingerprint });
     } else {
       result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
     }
@@ -2270,10 +2279,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       "Use boss when the user asks the top-level Pi Controller to create or manage a Boss run; do not ask the user to type /boss.",
       "Boss runs use trusted-local advisory scoping, not protected or tamper-proof authority.",
       "Pass structured create requirements only when the user explicitly requested those worktree, edit, test, or Git transport needs; never infer them from goal text.",
-      "Use exact bossRunId values returned by boss for status, pause, resume, proof, approval, rejection, and cancellation.",
+      "Use exact bossRunId values returned by boss for status, pause, resume, freeze, unfreeze, proof, approval, rejection, and cancellation.",
     ],
     parameters: Type.Object({
-      action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "cancel", "proof", "approve", "reject"] as const),
+      action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "freeze", "unfreeze", "cancel", "proof", "approve", "reject"] as const),
       goal: Type.Optional(Type.String({ description: "Explicit goal; required for create." })),
       requirements: Type.Optional(Type.Object({
         worktree: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required configured access to a Git-verified exact linked worktree." })),
@@ -2282,13 +2291,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         gitTransport: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required remote Git transport authority." })),
       }, { additionalProperties: false, description: "Explicit create-time requirements; identity, configuration, or probe gaps block before run creation." })),
       bossRunId: Type.Optional(Type.String({ description: "Exact Boss run id; required except for create and status-all." })),
+      expectedAcceptanceRevision: Type.Optional(Type.Integer({ minimum: 1, description: "Exact current acceptance revision; required for freeze." })),
+      expectedDesignRevision: Type.Optional(Type.Integer({ minimum: 1, description: "Exact current design revision; required for freeze." })),
+      expectedFreezeRevision: Type.Optional(Type.Integer({ minimum: 1, description: "Exact current authorized freeze revision; required for unfreeze." })),
+      expectedFingerprintSha256: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$", description: "Exact current aggregate candidate fingerprint; required for unfreeze." })),
       note: Type.Optional(Type.String({ description: "Optional control or decision note." })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (params.action !== "create" && params.requirements) throw new Error("Boss create requirements are accepted only for action=create.");
       const request = params.action === "create"
         ? bossCreateRequest(params.goal, params.requirements)
-        : parseBossCommand(`${params.action}${params.bossRunId ? ` ${params.bossRunId}` : ""}${params.note ? ` ${params.note}` : ""}`);
+        : params.action === "freeze"
+          ? parseBossCommand(`freeze ${params.bossRunId ?? ""} ${params.expectedAcceptanceRevision ?? ""} ${params.expectedDesignRevision ?? ""}`)
+          : params.action === "unfreeze"
+            ? parseBossCommand(`unfreeze ${params.bossRunId ?? ""} ${params.expectedFreezeRevision ?? ""} ${params.expectedFingerprintSha256 ?? ""}`)
+            : parseBossCommand(`${params.action}${params.bossRunId ? ` ${params.bossRunId}` : ""}${params.note ? ` ${params.note}` : ""}`);
       const result = await executeTrustedLocalBoss(request, ctx);
       return {
         content: [{ type: "text", text: result.message }],
@@ -2300,6 +2317,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           communication: result.communication,
           capabilityReport: result.capabilityReport,
           gaps: result.capabilityReport?.gaps,
+          freezeTransition: result.freezeTransition,
         },
       };
     },
@@ -2317,7 +2335,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   pi.registerCommand("boss", {
     description: "Create and manage a trusted-local Boss run (same-user agents trusted; advisory evidence)",
     getArgumentCompletions: (prefix) => {
-      const actions = ["create", "doctor", "plan", "status", "resume", "pause", "cancel", "proof", "approve", "reject"];
+      const actions = ["create", "doctor", "plan", "status", "resume", "pause", "freeze", "unfreeze", "cancel", "proof", "approve", "reject"];
       const filtered = actions.filter((action) => action.startsWith(prefix.trim().toLowerCase()));
       return filtered.length ? filtered.map((action) => ({ value: action, label: action })) : null;
     },

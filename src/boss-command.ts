@@ -5,6 +5,8 @@ export const BOSS_COMMAND_ACTIONS = [
   "status",
   "resume",
   "pause",
+  "freeze",
+  "unfreeze",
   "cancel",
   "proof",
   "approve",
@@ -27,6 +29,8 @@ export type BossCommandRequest =
   | { action: "status"; bossRunId?: string }
   | { action: "doctor" | "plan" }
   | { action: "create"; goal: string; requirements?: BossCreateRequirements }
+  | { action: "freeze"; bossRunId: string; expectedAcceptanceRevision: number; expectedDesignRevision: number }
+  | { action: "unfreeze"; bossRunId: string; expectedFreezeRevision: number; expectedFingerprintSha256: string }
   | { action: "resume" | "pause" | "cancel" | "proof" | "approve" | "reject"; bossRunId: string; note?: string };
 
 export interface BossCommandContextLike {
@@ -91,9 +95,22 @@ export function parseBossCommand(input: string): BossCommandRequest {
   if (action === "status") {
     return remainder ? { action, bossRunId: parseRunId(remainder) } : { action };
   }
-  const separator = remainder.search(/\s/);
-  const id = parseRunId(separator < 0 ? remainder : remainder.slice(0, separator));
-  const note = separator < 0 ? "" : remainder.slice(separator).trim();
+  const parts = remainder.split(/\s+/).filter(Boolean);
+  const id = parseRunId(parts[0]);
+  if (action === "freeze") {
+    if (parts.length !== 3 || !/^\d+$/.test(parts[1] ?? "") || !/^\d+$/.test(parts[2] ?? "")) throw new Error("/boss freeze requires: <run> <expected-acceptance-revision> <expected-design-revision>.");
+    const expectedAcceptanceRevision = Number(parts[1]);
+    const expectedDesignRevision = Number(parts[2]);
+    if (!Number.isSafeInteger(expectedAcceptanceRevision) || expectedAcceptanceRevision < 1 || !Number.isSafeInteger(expectedDesignRevision) || expectedDesignRevision < 1) throw new Error("/boss freeze revisions must be positive safe integers.");
+    return { action, bossRunId: id, expectedAcceptanceRevision, expectedDesignRevision };
+  }
+  if (action === "unfreeze") {
+    if (parts.length !== 3 || !/^\d+$/.test(parts[1] ?? "") || !/^[0-9a-f]{64}$/.test(parts[2] ?? "")) throw new Error("/boss unfreeze requires: <run> <expected-freeze-revision> <expected-fingerprint-sha256>.");
+    const expectedFreezeRevision = Number(parts[1]);
+    if (!Number.isSafeInteger(expectedFreezeRevision) || expectedFreezeRevision < 1) throw new Error("/boss unfreeze revision must be a positive safe integer.");
+    return { action, bossRunId: id, expectedFreezeRevision, expectedFingerprintSha256: parts[2] };
+  }
+  const note = parts.slice(1).join(" ");
   return { action, bossRunId: id, ...(note ? { note } : {}) };
 }
 

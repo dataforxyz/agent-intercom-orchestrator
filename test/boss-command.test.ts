@@ -24,9 +24,24 @@ test("Boss command parser is exact and defaults to status", () => {
     bossRunId: "boss-run_123",
     note: "insufficient proof",
   });
+  assert.deepEqual(parseBossCommand("freeze boss-run_123 4 7"), {
+    action: "freeze",
+    bossRunId: "boss-run_123",
+    expectedAcceptanceRevision: 4,
+    expectedDesignRevision: 7,
+  });
+  assert.deepEqual(parseBossCommand(`unfreeze boss-run_123 3 ${"a".repeat(64)}`), {
+    action: "unfreeze",
+    bossRunId: "boss-run_123",
+    expectedFreezeRevision: 3,
+    expectedFingerprintSha256: "a".repeat(64),
+  });
+  assert.throws(() => parseBossCommand("freeze boss-run_123 1"), /requires/);
+  assert.throws(() => parseBossCommand("freeze boss-run_123 0 1"), /positive/);
+  assert.throws(() => parseBossCommand("unfreeze boss-run_123 1 nope"), /requires/);
   assert.throws(() => parseBossCommand("create"), /requires one explicit goal/);
   assert.throws(() => parseBossCommand("resume short"), /8-128/);
-  for (const action of ["resume", "pause", "cancel", "proof", "approve", "reject"] as const) {
+  for (const action of ["resume", "pause", "freeze", "unfreeze", "cancel", "proof", "approve", "reject"] as const) {
     assert.throws(() => parseBossCommand(action), /Boss run id must be 8-128/, `${action} must require an exact run id`);
   }
   assert.throws(() => parseBossCommand("status boss-run_123 unexpected-detail-token"), /Boss run id must be 8-128/);

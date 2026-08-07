@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { parseBossCommand, type BossCommandRequest } from "../src/boss-command.ts";
-import { TRUSTED_LOCAL_BOSS_AUTHENTICATED_COMMUNICATION_DEADLINE_MS, TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, deterministicBossRunHandle, type TrustedLocalBossResult } from "../src/boss-trusted-local.ts";
+import { TRUSTED_LOCAL_BOSS_AUTHENTICATED_COMMUNICATION_DEADLINE_MS, TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, deterministicBossRunHandle, type TrustedLocalBossResource, type TrustedLocalBossResult } from "../src/boss-trusted-local.ts";
+import type { BossCandidateFingerprint } from "../src/boss-candidate-fingerprint.ts";
 import type { WorkerRecord } from "../src/types.ts";
 
 const testRunOwners = new Map<string, string>();
@@ -21,6 +23,46 @@ async function fixture() {
     return result;
   };
   return { dir, store };
+}
+
+function canonicalResource(bossRunId: string): TrustedLocalBossResource {
+  return {
+    version: "orc.boss-resource.v1",
+    resourceId: "resource-11111111-1111-4111-8111-111111111111",
+    revision: 1,
+    kind: "linked-worktree",
+    path: "/tmp/boss-freeze-worktree",
+    gitAdminDirectory: "/tmp/repo/.git/worktrees/boss-freeze-worktree",
+    gitCommonDirectory: "/tmp/repo/.git",
+    branch: "boss/run-test",
+    baseSha: "1".repeat(40),
+    headSha: "2".repeat(40),
+    existence: "verified",
+    leaseState: "active",
+    leaseOwnerBossRunId: bossRunId,
+    leaseAcquiredAt: "2023-11-14T22:13:20.000Z",
+    leaseExpiresAt: "2023-11-14T23:13:20.000Z",
+    capabilities: [{ capability: "worktree-identity", requested: "read", availability: "verified", evidence: "test fixture" }],
+  };
+}
+
+function candidateFingerprint(resource: TrustedLocalBossResource, headSha = resource.headSha): BossCandidateFingerprint {
+  const payload = {
+    version: "orc.boss-candidate-fingerprint.v1" as const,
+    resourceId: resource.resourceId,
+    resourceRevision: resource.revision,
+    cwd: resource.path,
+    gitAdminDirectory: resource.gitAdminDirectory,
+    gitCommonDirectory: resource.gitCommonDirectory,
+    branch: resource.branch,
+    baseSha: resource.baseSha,
+    headSha,
+    trackedDirtyBytes: 0,
+    trackedDirtySha256: "b".repeat(64),
+    untrackedBytes: 0,
+    untrackedManifest: [],
+  };
+  return { ...payload, aggregateSha256: createHash("sha256").update(JSON.stringify(payload)).digest("hex") };
 }
 
 function managerWorker(bossRunId: string, state: WorkerRecord["state"] = "ready"): WorkerRecord {
@@ -60,12 +102,51 @@ test("trusted-local Boss creates and reports an explicitly advisory run", async 
 
     const disk = JSON.parse(await readFile(join(dir, "runs.json"), "utf8"));
     assert.equal(disk.revision, 1);
-    assert.equal(disk.version, "orc.boss-trusted-local.v5");
-    assert.equal(disk.runs[0].version, "orc.boss-trusted-local.v3");
+    assert.equal(disk.version, "orc.boss-trusted-local.v6");
+    assert.equal(disk.runs[0].version, "orc.boss-trusted-local.v4");
     assert.equal(disk.runs[0].resource, null);
     assert.equal(disk.currentRunId, undefined);
     assert.equal(disk.runs[0].assignments[0].role, "manager");
     assert.equal(disk.runs[0].assignments[0].state, "requested");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss authorizes exact Controller freeze and unfreeze transitions", async () => {
+  const { dir, store } = await fixture();
+  const bossRunId = "boss-11111111-1111-4111-8111-111111111111";
+  try {
+    const resource = canonicalResource(bossRunId);
+    const fingerprint = candidateFingerprint(resource);
+    const created = await store.createProvisionedRun({ bossRunId, goal: "freeze exact candidate", managerSessionId: "controller-freeze", resource });
+    assert.equal(created.run?.acceptanceRevision, 1);
+    assert.equal(created.run?.designRevision, 1);
+
+    await assert.rejects(store.authorizeFreeze({ bossRunId, managerSessionId: "foreign-controller", expectedAcceptanceRevision: 1, expectedDesignRevision: 1, fingerprint }), /owning Controller/);
+    const stale = await store.authorizeFreeze({ bossRunId, managerSessionId: "controller-freeze", expectedAcceptanceRevision: 2, expectedDesignRevision: 1, fingerprint });
+    assert.equal(stale.freezeTransition?.outcome, "rejected");
+    assert.match(stale.freezeTransition?.reason ?? "", /superseded/);
+    assert.equal(stale.run?.currentFreeze, null);
+
+    const frozen = await store.authorizeFreeze({ bossRunId, managerSessionId: "controller-freeze", expectedAcceptanceRevision: 1, expectedDesignRevision: 1, fingerprint });
+    assert.equal(frozen.freezeTransition?.outcome, "accepted");
+    assert.equal(frozen.run?.currentFreeze?.freezeRevision, 1);
+    assert.match(frozen.message, /not process suspension/);
+    const repeated = await store.authorizeFreeze({ bossRunId, managerSessionId: "controller-freeze", expectedAcceptanceRevision: 1, expectedDesignRevision: 1, fingerprint });
+    assert.equal(repeated.run?.freezeTransitions.length, 2, "an identical current freeze is idempotent");
+
+    const paused = await store.execute(parseBossCommand(`pause ${bossRunId}`), "controller-freeze");
+    assert.equal(paused.run?.currentFreeze?.freezeRevision, 1, "pause does not authorize or retire freeze");
+    const moved = await store.authorizeUnfreeze({ bossRunId, managerSessionId: "controller-freeze", expectedFreezeRevision: 1, expectedFingerprintSha256: fingerprint.aggregateSha256, fingerprint: candidateFingerprint(resource, "3".repeat(40)) });
+    assert.equal(moved.freezeTransition?.outcome, "rejected");
+    assert.match(moved.freezeTransition?.reason ?? "", /moved/);
+    assert.equal(moved.run?.currentFreeze?.freezeRevision, 1);
+
+    const unfrozen = await store.authorizeUnfreeze({ bossRunId, managerSessionId: "controller-freeze", expectedFreezeRevision: 1, expectedFingerprintSha256: fingerprint.aggregateSha256, fingerprint });
+    assert.equal(unfrozen.freezeTransition?.outcome, "accepted");
+    assert.equal(unfrozen.run?.currentFreeze, null);
+    assert.deepEqual(unfrozen.run?.freezeTransitions.map((transition) => transition.revision), [1, 2, 3, 4]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -222,9 +303,9 @@ test("trusted-local Boss reads v1 state and migrates it on the next write", asyn
     assert.equal(JSON.parse(await readFile(path, "utf8")).version, "orc.boss-trusted-local.v1", "read-only status keeps the compatible v1 file intact");
     await reopened.execute(parseBossCommand("create migrated sibling run"), "controller-legacy");
     const migrated = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(migrated.version, "orc.boss-trusted-local.v5");
+    assert.equal(migrated.version, "orc.boss-trusted-local.v6");
     assert.equal(migrated.currentRunId, undefined);
-    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v3");
+    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v4");
     assert.equal(migrated.runs[0].resource, null);
     assert.equal(migrated.runs.length, 2);
     assert.deepEqual((await readdir(dir)).filter((entry) => entry.includes(".tmp-")), [], "atomic rename leaves no partial migration file");
@@ -254,9 +335,11 @@ test("trusted-local Boss reads v3 activity state and upgrades it without inventi
     const afterControl = await reopened.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "controller-v3-migration");
     assert.equal(afterControl.communication?.find((entry) => entry.role === "manager")?.communicationStatus, "deadline_unavailable", "Controller controls cannot mint or reset a legacy deadline");
     const migrated = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(migrated.version, "orc.boss-trusted-local.v5");
-    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v3");
+    assert.equal(migrated.version, "orc.boss-trusted-local.v6");
+    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v4");
     assert.equal(migrated.runs[0].resource, null, "migration does not invent a canonical resource");
+    assert.equal(migrated.runs[0].acceptanceRevision, null, "migration does not invent an acceptance revision");
+    assert.equal(migrated.runs[0].currentFreeze, null, "migration does not invent a freeze");
     assert.equal(migrated.runs[0].assignments[0].workerBoundAt, undefined, "migration does not invent a historical bind timestamp");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -273,6 +356,10 @@ test("trusted-local Boss assigns deterministic handles while migrating v2 run re
     legacy.runs[0].version = "orc.boss-trusted-local.v1";
     delete legacy.runs[0].handle;
     delete legacy.runs[0].resource;
+    delete legacy.runs[0].acceptanceRevision;
+    delete legacy.runs[0].designRevision;
+    delete legacy.runs[0].freezeTransitions;
+    delete legacy.runs[0].currentFreeze;
     for (const assignment of legacy.runs[0].assignments) delete assignment.resourceRevision;
     await writeFile(path, JSON.stringify(legacy));
 
@@ -281,8 +368,8 @@ test("trusted-local Boss assigns deterministic handles while migrating v2 run re
     assert.equal((await reopened.execute(parseBossCommand(`status ${migratedHandle}`), "controller-handle-migration")).run?.handle, migratedHandle);
     await reopened.execute(parseBossCommand("create migration writer"), "controller-handle-migration");
     const migrated = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(migrated.version, "orc.boss-trusted-local.v5");
-    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v3");
+    assert.equal(migrated.version, "orc.boss-trusted-local.v6");
+    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v4");
     assert.equal(migrated.runs[0].resource, null);
     assert.equal(migrated.runs[0].assignments[0].resourceRevision, null);
     assert.equal(migrated.runs[0].handle, migratedHandle);
