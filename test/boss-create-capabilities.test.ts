@@ -138,6 +138,8 @@ test("custom profile path and systemd modifiers that can alter cwd fail closed",
     [{ ...DEFAULT_PERMISSION_PROFILES["builder-restricted"], inaccessiblePaths: ["/tmp"] }, /inaccessiblePaths entry \/tmp intersects/],
     [{ ...DEFAULT_PERMISSION_PROFILES["builder-restricted"], writablePaths: ["relative-path"] }, /writablePaths contains a relative path.*cannot model/],
     [{ ...DEFAULT_PERMISSION_PROFILES["builder-restricted"], systemdProperties: { ReadWritePaths: "/some/custom/boundary" } }, /custom systemdProperties.*not modeled/],
+    [{ ...DEFAULT_PERMISSION_PROFILES["builder-restricted"], hardened: false }, /require a hardened permission profile/],
+    [{ ...DEFAULT_PERMISSION_PROFILES["builder-restricted"], environment: { ...(DEFAULT_PERMISSION_PROFILES["builder-restricted"].environment ?? {}), AGENT_INTERCOM_WORKSPACE_POLICY: "read-only" } }, /environment overrides AGENT_INTERCOM_WORKSPACE_POLICY=read-only/],
   ];
   for (const [custom, evidence] of variants) {
     const report = await inspectBossCreateCapabilities({
@@ -150,6 +152,17 @@ test("custom profile path and systemd modifiers that can alter cwd fail closed",
     assert.equal(report.gaps[0].capability, "edit");
     assert.match(report.gaps[0].evidence, evidence);
   }
+});
+
+test("an empty Pi tool list does not claim edit tools after Boss adds supervision-only tools", async () => {
+  const report = await inspectBossCreateCapabilities({
+    cwd: "/tmp",
+    requirements: { edit: true },
+    workerPermissionProfileName: "empty-tools-builder",
+    workerPermissionProfile: { ...DEFAULT_PERMISSION_PROFILES["builder-restricted"], piTools: [] },
+  });
+  assert.equal(report.status, "blocked");
+  assert.match(report.gaps[0].evidence, /does not configure both Pi edit and write tools/);
 });
 
 test("configured shell and Git inspection do not become verified tests or transport", async () => {

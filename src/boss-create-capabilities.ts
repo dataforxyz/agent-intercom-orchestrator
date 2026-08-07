@@ -67,7 +67,7 @@ async function verifyLinkedWorktree(cwd: string): Promise<LinkedWorktreeEvidence
 }
 
 function toolConfigured(profile: PermissionProfile, tool: string): boolean {
-  return profile.piTools === undefined || profile.piTools.length === 0 || profile.piTools.includes(tool);
+  return profile.piTools === undefined || profile.piTools.includes(tool);
 }
 
 function expandProfilePath(path: string): string | undefined {
@@ -83,6 +83,13 @@ function pathsIntersect(left: string, right: string): boolean {
 }
 
 function profileBoundaryGap(profile: PermissionProfile, target: string): string | undefined {
+  if (profile.hardened !== true) {
+    return "Boss participants require a hardened permission profile, but this profile is not hardened";
+  }
+  const environmentWorkspacePolicy = profile.environment?.AGENT_INTERCOM_WORKSPACE_POLICY;
+  if (environmentWorkspacePolicy !== undefined && environmentWorkspacePolicy !== profile.workspace) {
+    return `profile environment overrides AGENT_INTERCOM_WORKSPACE_POLICY=${environmentWorkspacePolicy} instead of declared workspace=${profile.workspace}`;
+  }
   if (profile.systemdProperties && Object.keys(profile.systemdProperties).length) {
     return "custom systemdProperties can change the Worker filesystem boundary and are not modeled by this create-time probe";
   }
