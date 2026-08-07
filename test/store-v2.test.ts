@@ -13,8 +13,15 @@ import {
   WorkerStoreUnsupportedVersionError,
   WorkerStoreValidationError,
 } from "../src/store.ts";
-import type { LegacyWorkerState, WorkerRecord, WorkerStateFileV3 } from "../src/types.ts";
+import type { LegacyWorkerState, WorkerRecord, WorkerRecordV2, WorkerRecordV3, WorkerStateFileV3 } from "../src/types.ts";
 import { acquireKernelFileLock } from "../src/file-lock.ts";
+
+type AssertTrue<T extends true> = T;
+type AssertFalse<T extends false> = T;
+type V2HasAuthenticatedActivity = "lastAuthenticatedIntercomActivityAt" extends keyof WorkerRecordV2 ? true : false;
+type V3HasAuthenticatedActivity = "lastAuthenticatedIntercomActivityAt" extends keyof WorkerRecordV3 ? true : false;
+type _V2EvidenceBoundary = AssertFalse<V2HasAuthenticatedActivity>;
+type _V3EvidenceBoundary = AssertTrue<V3HasAuthenticatedActivity>;
 
 function legacyWorker(id: string, state: LegacyWorkerState, runId = `run-${id}`): Record<string, unknown> {
   return {
@@ -346,6 +353,32 @@ test("unsupported active features refuse before exact nested parsing without qua
     assert.equal(await readFile(path, "utf8"), source);
     await assert.rejects(access(`${path}.poison.json`));
     assert.equal((await new WorkerStore(path, { supportedFeatures: ["future-worker-shape"] }).read().catch((error) => error)).code, "WORKER_STORE_CORRUPT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed activeFeatures remains corrupt and quarantined instead of being assumed unsupported", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-v3-malformed-feature-gate-"));
+  const path = join(root, "workers.json");
+  try {
+    await writeFile(path, JSON.stringify({
+      version: 3,
+      generation: 1,
+      activeFeatures: { 0: "future-worker-shape", length: 1 },
+      workers: [],
+      workerGenerations: [],
+    }));
+    let quarantinePath: string | undefined;
+    await assert.rejects(new WorkerStore(path).read(), (error: unknown) => {
+      assert.ok(error instanceof WorkerStoreCorruptError);
+      quarantinePath = error.quarantinePath;
+      assert.match(error.message, /activeFeatures.*plain array/);
+      return true;
+    });
+    assert.ok(quarantinePath);
+    await access(quarantinePath!);
+    await access(`${path}.poison.json`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
