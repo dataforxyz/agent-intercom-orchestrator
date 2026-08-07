@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { parseBossCommand, type BossCommandRequest } from "../src/boss-command.ts";
-import { TRUSTED_LOCAL_BOSS_FIRST_ACTION_DEADLINE_MS, TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, deterministicBossRunHandle, type TrustedLocalBossResult } from "../src/boss-trusted-local.ts";
+import { TRUSTED_LOCAL_BOSS_AUTHENTICATED_COMMUNICATION_DEADLINE_MS, TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, deterministicBossRunHandle, type TrustedLocalBossResult } from "../src/boss-trusted-local.ts";
 import type { WorkerRecord } from "../src/types.ts";
 
 const testRunOwners = new Map<string, string>();
@@ -60,7 +60,7 @@ test("trusted-local Boss creates and reports an explicitly advisory run", async 
 
     const disk = JSON.parse(await readFile(join(dir, "runs.json"), "utf8"));
     assert.equal(disk.revision, 1);
-    assert.equal(disk.version, "orc.boss-trusted-local.v3");
+    assert.equal(disk.version, "orc.boss-trusted-local.v4");
     assert.equal(disk.currentRunId, undefined);
     assert.equal(disk.runs[0].assignments[0].role, "manager");
     assert.equal(disk.runs[0].assignments[0].state, "requested");
@@ -220,10 +220,38 @@ test("trusted-local Boss reads v1 state and migrates it on the next write", asyn
     assert.equal(JSON.parse(await readFile(path, "utf8")).version, "orc.boss-trusted-local.v1", "read-only status keeps the compatible v1 file intact");
     await reopened.execute(parseBossCommand("create migrated sibling run"), "controller-legacy");
     const migrated = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(migrated.version, "orc.boss-trusted-local.v3");
+    assert.equal(migrated.version, "orc.boss-trusted-local.v4");
     assert.equal(migrated.currentRunId, undefined);
     assert.equal(migrated.runs.length, 2);
     assert.deepEqual((await readdir(dir)).filter((entry) => entry.includes(".tmp-")), [], "atomic rename leaves no partial migration file");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss reads v3 activity state and upgrades it without inventing a bind timestamp", async () => {
+  const { dir, store } = await fixture();
+  const path = join(dir, "runs.json");
+  try {
+    const created = await store.execute(parseBossCommand("create migrate pre-bind-anchor state"), "controller-v3-migration");
+    await store.recordManagerStarted(created.run!.bossRunId, { ...managerWorker(created.run!.bossRunId), managerSessionId: "controller-v3-migration" });
+    const legacy = JSON.parse(await readFile(path, "utf8"));
+    legacy.version = "orc.boss-trusted-local.v3";
+    delete legacy.runs[0].assignments[0].workerBoundAt;
+    await writeFile(path, JSON.stringify(legacy));
+
+    const reopened = new TrustedLocalBossStore(path);
+    const status = await reopened.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "controller-v3-migration");
+    const legacyCommunication = status.communication?.find((entry) => entry.role === "manager");
+    assert.equal(legacyCommunication?.authenticatedCommunicationDeadlineAt, null);
+    assert.equal(legacyCommunication?.communicationStatus, "deadline_unavailable", "legacy state does not invent a mutable deadline anchor");
+    assert.equal(JSON.parse(await readFile(path, "utf8")).version, "orc.boss-trusted-local.v3", "read-only status preserves compatible legacy state");
+    await reopened.recordControlDelivery(created.run!.bossRunId, "manager", "pause-notice");
+    const afterControl = await reopened.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "controller-v3-migration");
+    assert.equal(afterControl.communication?.find((entry) => entry.role === "manager")?.communicationStatus, "deadline_unavailable", "Controller controls cannot mint or reset a legacy deadline");
+    const migrated = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(migrated.version, "orc.boss-trusted-local.v4");
+    assert.equal(migrated.runs[0].assignments[0].workerBoundAt, undefined, "migration does not invent a historical bind timestamp");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -245,7 +273,7 @@ test("trusted-local Boss assigns deterministic handles while migrating v2 run re
     assert.equal((await reopened.execute(parseBossCommand(`status ${migratedHandle}`), "controller-handle-migration")).run?.handle, migratedHandle);
     await reopened.execute(parseBossCommand("create migration writer"), "controller-handle-migration");
     const migrated = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(migrated.version, "orc.boss-trusted-local.v3");
+    assert.equal(migrated.version, "orc.boss-trusted-local.v4");
     assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v2");
     assert.equal(migrated.runs[0].handle, migratedHandle);
   } finally {
@@ -275,12 +303,12 @@ test("trusted-local Boss records Manager staffing and lifecycle changes from ord
   }
 });
 
-test("trusted-local Boss separates transport readiness from observed activity and bounds first-action staleness", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "boss-trusted-local-activity-"));
+test("trusted-local Boss separates transport, acknowledgement, communication, and substantive checkpoints", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "boss-trusted-local-communication-"));
   let now = 1_700_000_000_000;
   const store = new TrustedLocalBossStore(join(dir, "runs.json"), () => new Date(now));
   try {
-    const created = await store.execute(parseBossCommand("create report real activity evidence"), "manager-activity");
+    const created = await store.execute(parseBossCommand("create report honest communication evidence"), "manager-activity");
     const worker: WorkerRecord = {
       ...managerWorker(created.run!.bossRunId),
       managerSessionId: "manager-activity",
@@ -292,35 +320,49 @@ test("trusted-local Boss separates transport readiness from observed activity an
     assert.equal(await store.synchronizeWorkers([worker]), true, "first fleet synchronization records the ordinary lifecycle detail change");
 
     const pending = await store.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "manager-activity");
-    const pendingManager = pending.activity?.find((entry) => entry.role === "manager");
+    const pendingManager = pending.communication?.find((entry) => entry.role === "manager");
     assert.equal(pendingManager?.workerState, "ready");
     assert.equal(pendingManager?.transportProcessReadiness, "observed");
-    assert.equal(pendingManager?.activityEvidence, "none_observed", "the launch-time worker timestamp is only a baseline");
-    assert.equal(pendingManager?.firstActionStatus, "awaiting_first_action");
+    assert.equal(pendingManager?.assignmentAcknowledgementEvidence, "unavailable");
+    assert.equal(pendingManager?.assignmentAcknowledgedAt, null);
+    assert.equal(pendingManager?.authenticatedCommunicationEvidence, "none_observed", "the launch-time worker timestamp is only a baseline");
+    assert.equal(pendingManager?.substantiveCheckpointEvidence, "unavailable");
+    assert.equal(pendingManager?.substantiveCheckpointObservedAt, null);
+    assert.equal(pendingManager?.communicationStatus, "awaiting_authenticated_communication");
     assert.match(pending.message, /process\/transport state only; it does not prove productive task activity/);
+    assert.match(pending.message, /assignment-acknowledgement=unavailable/);
+    assert.match(pending.message, /substantive-checkpoint=unavailable/);
+    const originalDeadline = pendingManager?.authenticatedCommunicationDeadlineAt;
+    now += 60_000;
+    await store.recordControlDelivery(created.run!.bossRunId, "manager", "pause-notice");
+    await store.recordControlDelivery(created.run!.bossRunId, "manager", "resume-notice");
+    const afterControls = await store.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "manager-activity");
+    assert.equal(afterControls.communication?.find((entry) => entry.role === "manager")?.authenticatedCommunicationDeadlineAt, originalDeadline, "Controller-side controls cannot reset the worker communication deadline");
 
-    now += TRUSTED_LOCAL_BOSS_FIRST_ACTION_DEADLINE_MS;
+    now += TRUSTED_LOCAL_BOSS_AUTHENTICATED_COMMUNICATION_DEADLINE_MS - 60_000;
     const stale = await store.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "manager-activity");
-    assert.equal(stale.activity?.find((entry) => entry.role === "manager")?.firstActionStatus, "first_action_stale");
-    assert.match(stale.message, /first-action=first-action-stale/);
+    assert.equal(stale.communication?.find((entry) => entry.role === "manager")?.communicationStatus, "authenticated_communication_stale");
+    assert.match(stale.message, /communication-status=authenticated-communication-stale/);
 
     // Manual renew/adopt paths advance only the general lease timestamp.
     worker.lastWorkerActivityAt = now + 1;
     assert.equal(await store.synchronizeWorkers([worker]), false);
     const stillStale = await store.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "manager-activity");
-    assert.equal(stillStale.activity?.find((entry) => entry.role === "manager")?.firstActionStatus, "first_action_stale");
+    assert.equal(stillStale.communication?.find((entry) => entry.role === "manager")?.communicationStatus, "authenticated_communication_stale");
 
     worker.lastAuthenticatedIntercomActivityAt = now + 2;
     assert.equal(await store.synchronizeWorkers([worker]), true);
     const active = await store.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "manager-activity");
-    const activeManager = active.activity?.find((entry) => entry.role === "manager");
-    assert.equal(activeManager?.activityEvidence, "authenticated_intercom");
-    assert.equal(activeManager?.activityObservedAt, new Date(now + 2).toISOString());
-    assert.equal(activeManager?.firstActionStatus, "activity_observed");
-    assert.match(active.message, /authenticated worker Intercom traffic only; Orc does not observe source edits or tool calls/);
+    const activeManager = active.communication?.find((entry) => entry.role === "manager");
+    assert.equal(activeManager?.authenticatedCommunicationEvidence, "authenticated_intercom");
+    assert.equal(activeManager?.authenticatedCommunicationObservedAt, new Date(now + 2).toISOString());
+    assert.equal(activeManager?.communicationStatus, "authenticated_communication_observed");
+    assert.equal(activeManager?.assignmentAcknowledgementEvidence, "unavailable", "authenticated traffic is not inferred to acknowledge an assignment");
+    assert.equal(activeManager?.substantiveCheckpointEvidence, "unavailable", "authenticated traffic is not inferred to be substantive");
+    assert.match(active.message, /authenticated worker Intercom traffic proves communication only/);
 
     const summary = await store.execute(parseBossCommand("status"), "manager-activity");
-    assert.match(summary.message, /first-action=activity_observed,not_assigned/);
+    assert.match(summary.message, /communication=authenticated_communication_observed,not_assigned/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -526,6 +568,9 @@ test("trusted-local Boss keeps late reviewer assignment live at lifecycle capaci
     }
     const full = await store.execute(parseBossCommand(`status ${created.run!.bossRunId}`), "manager-session-lifecycle-cap");
     assert.equal(full.run?.lifecycle.length, 256);
+    const managerCommunication = full.communication?.find((entry) => entry.role === "manager");
+    assert.equal(managerCommunication?.communicationStatus, "awaiting_authenticated_communication", "lifecycle pruning cannot erase the assignment's durable communication deadline anchor");
+    assert.ok(managerCommunication?.authenticatedCommunicationDeadlineAt);
     await store.execute(parseBossCommand(`proof ${created.run!.bossRunId}`), "manager-session-lifecycle-cap");
     const reviewer = { ...managerWorker(created.run!.bossRunId), id: `boss-adversary-${created.run!.bossRunId.slice(-12)}`, runId: "lifecycle-cap-reviewer-incarnation", workerIncarnationId: "lifecycle-cap-reviewer-incarnation", role: "challenger" };
     const staffed = await store.recordReviewerStarted(created.run!.bossRunId, reviewer);

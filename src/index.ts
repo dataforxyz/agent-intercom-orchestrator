@@ -2190,7 +2190,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const result = await executeTrustedLocalBoss(args, ctx);
       return {
         content: [{ type: "text", text: result.message }],
-        details: { title: result.title, run: result.run, runs: result.runs, activity: result.activity },
+        details: { title: result.title, run: result.run, runs: result.runs, communication: result.communication },
       };
     },
     renderCall(args, theme) {

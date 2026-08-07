@@ -7,10 +7,10 @@ import type { WorkerRecord, WorkerState } from "./types.ts";
 
 export const TRUSTED_LOCAL_BOSS_RUN_VERSION = "orc.boss-trusted-local.v2" as const;
 const LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSION = "orc.boss-trusted-local.v1" as const;
-export const TRUSTED_LOCAL_BOSS_STORE_VERSION = "orc.boss-trusted-local.v3" as const;
-const LEGACY_TRUSTED_LOCAL_BOSS_STORE_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2"]);
+export const TRUSTED_LOCAL_BOSS_STORE_VERSION = "orc.boss-trusted-local.v4" as const;
+const LEGACY_TRUSTED_LOCAL_BOSS_STORE_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3"]);
 export const TRUSTED_LOCAL_BOSS_WARNING = "TRUSTED LOCAL MODE — same-user agents and local files are trusted; evidence is advisory, not tamper-proof.";
-export const TRUSTED_LOCAL_BOSS_FIRST_ACTION_DEADLINE_MS = 10 * 60_000;
+export const TRUSTED_LOCAL_BOSS_AUTHENTICATED_COMMUNICATION_DEADLINE_MS = 10 * 60_000;
 
 export type TrustedLocalBossRunState = "active" | "paused" | "cancelled" | "failed" | "approved" | "rejected";
 export type TrustedLocalBossAssignmentState = "requested" | "assigned" | "failed" | "cancelled";
@@ -36,6 +36,7 @@ export interface TrustedLocalBossAssignment {
   workerIncarnationId: string | null;
   createdAt: string;
   updatedAt: string;
+  workerBoundAt?: string;
   lastError?: string;
 }
 
@@ -74,18 +75,22 @@ export interface TrustedLocalBossLifecycleObservation {
   detail?: string;
 }
 
-export type TrustedLocalBossFirstActionStatus = "not_assigned" | "deadline_unavailable" | "awaiting_first_action" | "first_action_stale" | "activity_observed" | "suspended";
+export type TrustedLocalBossCommunicationStatus = "not_assigned" | "deadline_unavailable" | "awaiting_authenticated_communication" | "authenticated_communication_stale" | "authenticated_communication_observed" | "suspended";
 
-export interface TrustedLocalBossAssignmentActivity {
+export interface TrustedLocalBossAssignmentCommunication {
   assignmentId: string;
   role: TrustedLocalBossAssignmentRole;
   workerId: string | null;
   workerState: WorkerState | null;
   transportProcessReadiness: "not_launched" | "observed" | "unavailable";
-  activityEvidence: "authenticated_intercom" | "none_observed" | "unavailable";
-  activityObservedAt: string | null;
-  firstActionDeadlineAt: string | null;
-  firstActionStatus: TrustedLocalBossFirstActionStatus;
+  assignmentAcknowledgementEvidence: "unavailable";
+  assignmentAcknowledgedAt: null;
+  authenticatedCommunicationEvidence: "authenticated_intercom" | "none_observed" | "unavailable";
+  authenticatedCommunicationObservedAt: string | null;
+  substantiveCheckpointEvidence: "unavailable";
+  substantiveCheckpointObservedAt: null;
+  authenticatedCommunicationDeadlineAt: string | null;
+  communicationStatus: TrustedLocalBossCommunicationStatus;
 }
 
 export interface TrustedLocalBossProofPacket {
@@ -149,7 +154,7 @@ export interface TrustedLocalBossResult {
   message: string;
   run?: TrustedLocalBossRun;
   runs?: TrustedLocalBossRun[];
-  activity?: TrustedLocalBossAssignmentActivity[];
+  communication?: TrustedLocalBossAssignmentCommunication[];
 }
 
 export interface TrustedLocalBossOrphanedWorker {
@@ -189,9 +194,9 @@ function parseTimestamp(value: unknown, field: string): string {
 function parseAssignment(value: unknown): TrustedLocalBossAssignment {
   if (!isPlainRecord(value)) throw new Error("Trusted-local Boss state contains an invalid assignment record");
   const required = ["assignmentId", "createdAt", "revision", "role", "state", "task", "updatedAt", "workerId", "workerIncarnationId"];
-  const expected = "lastError" in value ? [...required, "lastError"] : required;
+  const expected = [...required, ...(value.workerBoundAt !== undefined ? ["workerBoundAt"] : []), ...(value.lastError !== undefined ? ["lastError"] : [])];
   if (!exactKeys(value, expected)) throw new Error("Trusted-local Boss state contains an invalid assignment record");
-  const { assignmentId, createdAt, lastError, revision, role, state, task, updatedAt, workerId, workerIncarnationId } = value;
+  const { assignmentId, createdAt, lastError, revision, role, state, task, updatedAt, workerBoundAt, workerId, workerIncarnationId } = value;
   if (typeof assignmentId !== "string" || !/^assignment-[0-9a-f-]{36}$/.test(assignmentId)
     || (role !== "manager" && role !== "worker" && role !== "scout" && role !== "adversary")
     || !Number.isSafeInteger(revision) || (revision as number) < 1
@@ -199,12 +204,13 @@ function parseAssignment(value: unknown): TrustedLocalBossAssignment {
     || (state !== "requested" && state !== "assigned" && state !== "failed" && state !== "cancelled")
     || (workerId !== null && (typeof workerId !== "string" || workerId.length < 1 || workerId.length > 128))
     || (workerIncarnationId !== null && (typeof workerIncarnationId !== "string" || workerIncarnationId.length < 1 || workerIncarnationId.length > 128))
+    || (workerBoundAt !== undefined && typeof workerBoundAt !== "string")
     || (lastError !== undefined && (typeof lastError !== "string" || lastError.length < 1 || lastError.length > 4_096))) {
     throw new Error("Trusted-local Boss state contains invalid assignment fields");
   }
   if (state === "assigned" && (!workerId || !workerIncarnationId)) throw new Error("Trusted-local Boss assigned worker lacks identity");
-  if (state === "requested" && (workerId !== null || workerIncarnationId !== null || lastError !== undefined)) throw new Error("Trusted-local Boss requested assignment contains premature outcome fields");
-  return { assignmentId, role, task, revision: revision as number, state, workerId, workerIncarnationId, createdAt: parseTimestamp(createdAt, "assignment createdAt"), updatedAt: parseTimestamp(updatedAt, "assignment updatedAt"), ...(lastError !== undefined ? { lastError } : {}) };
+  if (state === "requested" && (workerId !== null || workerIncarnationId !== null || workerBoundAt !== undefined || lastError !== undefined)) throw new Error("Trusted-local Boss requested assignment contains premature outcome fields");
+  return { assignmentId, role, task, revision: revision as number, state, workerId, workerIncarnationId, createdAt: parseTimestamp(createdAt, "assignment createdAt"), updatedAt: parseTimestamp(updatedAt, "assignment updatedAt"), ...(workerBoundAt !== undefined ? { workerBoundAt: parseTimestamp(workerBoundAt, "assignment workerBoundAt") } : {}), ...(lastError !== undefined ? { lastError } : {}) };
 }
 
 function parseDelivery(value: unknown): TrustedLocalBossDelivery {
@@ -371,58 +377,63 @@ function compareRunsForOwnedSummary(left: TrustedLocalBossRun, right: TrustedLoc
   return right.createdAt.localeCompare(left.createdAt) || left.bossRunId.localeCompare(right.bossRunId);
 }
 
-function assignmentActivity(run: TrustedLocalBossRun, assignment: TrustedLocalBossAssignment, now: string): TrustedLocalBossAssignmentActivity {
+function assignmentCommunication(run: TrustedLocalBossRun, assignment: TrustedLocalBossAssignment, now: string): TrustedLocalBossAssignmentCommunication {
   const observations = run.lifecycle.filter((entry) => entry.assignmentId === assignment.assignmentId);
   const latest = observations.at(-1);
-  const observedActivity = [...observations].reverse().find((entry) => entry.authenticatedIntercomActivityAt)?.authenticatedIntercomActivityAt ?? null;
-  if (assignment.state !== "assigned" || !assignment.workerId) {
-    return {
-      assignmentId: assignment.assignmentId,
-      role: assignment.role,
-      workerId: assignment.workerId,
-      workerState: latest?.workerState ?? null,
-      transportProcessReadiness: latest ? "observed" : assignment.workerId ? "unavailable" : "not_launched",
-      activityEvidence: observedActivity ? "authenticated_intercom" : assignment.workerId ? "none_observed" : "unavailable",
-      activityObservedAt: observedActivity,
-      firstActionDeadlineAt: null,
-      firstActionStatus: "not_assigned",
-    };
-  }
-  const launchObservation = observations.find((entry) => entry.detail === `${assignment.role} launch recorded from ordinary agent_fleet state`);
-  const deadline = launchObservation ? new Date(Date.parse(launchObservation.observedAt) + TRUSTED_LOCAL_BOSS_FIRST_ACTION_DEADLINE_MS).toISOString() : null;
-  const active = run.state === "active";
-  return {
+  const observedCommunication = [...observations].reverse().find((entry) => entry.authenticatedIntercomActivityAt)?.authenticatedIntercomActivityAt ?? null;
+  const common = {
     assignmentId: assignment.assignmentId,
     role: assignment.role,
     workerId: assignment.workerId,
     workerState: latest?.workerState ?? null,
+    assignmentAcknowledgementEvidence: "unavailable" as const,
+    assignmentAcknowledgedAt: null,
+    substantiveCheckpointEvidence: "unavailable" as const,
+    substantiveCheckpointObservedAt: null,
+  };
+  if (assignment.state !== "assigned" || !assignment.workerId) {
+    return {
+      ...common,
+      transportProcessReadiness: latest ? "observed" : assignment.workerId ? "unavailable" : "not_launched",
+      authenticatedCommunicationEvidence: observedCommunication ? "authenticated_intercom" : assignment.workerId ? "none_observed" : "unavailable",
+      authenticatedCommunicationObservedAt: observedCommunication,
+      authenticatedCommunicationDeadlineAt: null,
+      communicationStatus: "not_assigned",
+    };
+  }
+  const deadline = assignment.workerBoundAt
+    ? new Date(Date.parse(assignment.workerBoundAt) + TRUSTED_LOCAL_BOSS_AUTHENTICATED_COMMUNICATION_DEADLINE_MS).toISOString()
+    : null;
+  const active = run.state === "active";
+  return {
+    ...common,
     transportProcessReadiness: latest ? "observed" : "unavailable",
-    activityEvidence: observedActivity ? "authenticated_intercom" : "none_observed",
-    activityObservedAt: observedActivity,
-    firstActionDeadlineAt: deadline,
-    firstActionStatus: observedActivity
-      ? "activity_observed"
+    authenticatedCommunicationEvidence: observedCommunication ? "authenticated_intercom" : "none_observed",
+    authenticatedCommunicationObservedAt: observedCommunication,
+    authenticatedCommunicationDeadlineAt: deadline,
+    communicationStatus: observedCommunication
+      ? "authenticated_communication_observed"
       : !active
         ? "suspended"
         : deadline === null
           ? "deadline_unavailable"
           : Date.parse(now) >= Date.parse(deadline)
-          ? "first_action_stale"
-          : "awaiting_first_action",
+          ? "authenticated_communication_stale"
+          : "awaiting_authenticated_communication",
   };
 }
 
-function runActivity(run: TrustedLocalBossRun, now: string): TrustedLocalBossAssignmentActivity[] {
-  return run.assignments.map((assignment) => assignmentActivity(run, assignment, now));
+function runCommunication(run: TrustedLocalBossRun, now: string): TrustedLocalBossAssignmentCommunication[] {
+  return run.assignments.map((assignment) => assignmentCommunication(run, assignment, now));
 }
 
 function formatRunList(runs: readonly TrustedLocalBossRun[], now: string): string {
   if (runs.length === 0) return `${TRUSTED_LOCAL_BOSS_WARNING}\n\nNo Boss runs are owned by this Controller.`;
   const entries = runs.map((run) => {
-    const activityStates = [...new Set(runActivity(run, now).map((entry) => entry.firstActionStatus))];
-    return `- ${run.handle} (${run.bossRunId}) [${run.state}; first-action=${activityStates.join(",")}] ${run.goal}`;
+    const communicationStates = [...new Set(runCommunication(run, now).map((entry) => entry.communicationStatus))];
+    return `- ${run.handle} (${run.bossRunId}) [${run.state}; communication=${communicationStates.join(",")}] ${run.goal}`;
   });
-  return `${TRUSTED_LOCAL_BOSS_WARNING}\n\nOwned Boss runs (${runs.length}):\n${entries.join("\n")}\n\nWorker lifecycle is process/transport evidence only. Use /boss status <handle-or-exact-run-id> for details, exact activity evidence, and deadlines; mutation results always include the exact run id.`;
+  return `${TRUSTED_LOCAL_BOSS_WARNING}\n\nOwned Boss runs (${runs.length}):\n${entries.join("\n")}\n\nWorker lifecycle is process/transport evidence only. Use /boss status <handle-or-exact-run-id> for details, including separate assignment acknowledgement, authenticated communication, substantive checkpoint, and unavailable telemetry fields; mutation results always include the exact run id.`;
 }
 
 function formatRun(run: TrustedLocalBossRun, now: string): string {
@@ -432,13 +443,13 @@ function formatRun(run: TrustedLocalBossRun, now: string): string {
   const latestDecision = run.decisions.at(-1);
   const lifecycle = run.lifecycle.length ? run.lifecycle.slice(-8).map((entry) => `- ${entry.observedAt} ${entry.workerId} ${entry.workerState}${entry.detail ? ` — ${entry.detail}` : ""}`).join("\n") : "- no worker lifecycle observations recorded";
   const staffing = run.assignments.map((assignment) => `- ${assignment.role} revision ${assignment.revision}: ${assignment.state}; worker=${assignment.workerId ?? "not launched"}${assignment.lastError ? `; error=${assignment.lastError}` : ""}`).join("\n");
-  const activity = runActivity(run, now).map((entry) => {
+  const communication = runCommunication(run, now).map((entry) => {
     const transport = entry.workerState === null ? entry.transportProcessReadiness : `${entry.transportProcessReadiness} (${entry.workerState})`;
-    const evidence = entry.activityObservedAt ? `authenticated Intercom activity at ${entry.activityObservedAt}` : entry.activityEvidence.replaceAll("_", " ");
-    return `- ${entry.role}: transport/process=${transport}; activity=${evidence}; first-action=${entry.firstActionStatus.replaceAll("_", "-")}${entry.firstActionDeadlineAt ? `; deadline=${entry.firstActionDeadlineAt}` : ""}`;
+    const authenticated = entry.authenticatedCommunicationObservedAt ? `authenticated Intercom communication at ${entry.authenticatedCommunicationObservedAt}` : entry.authenticatedCommunicationEvidence.replaceAll("_", " ");
+    return `- ${entry.role}: transport/process=${transport}; assignment-acknowledgement=${entry.assignmentAcknowledgementEvidence}; authenticated-communication=${authenticated}; substantive-checkpoint=${entry.substantiveCheckpointEvidence}; communication-status=${entry.communicationStatus.replaceAll("_", "-")}${entry.authenticatedCommunicationDeadlineAt ? `; communication-deadline=${entry.authenticatedCommunicationDeadlineAt}` : ""}`;
   }).join("\n");
   const latestDelivery = run.deliveries.at(-1);
-  return [TRUSTED_LOCAL_BOSS_WARNING, `handle: ${run.handle}`, `run: ${run.bossRunId}`, `state: ${run.state}`, `goal: ${run.goal}`, `manager session: ${run.managerSessionId}`, "readiness: WorkerStore lifecycle reports process/transport state only; it does not prove productive task activity.", "activity evidence: authenticated worker Intercom traffic only; Orc does not observe source edits or tool calls.", "staffing:", staffing, "activity:", activity, `adversary assignment: ${reviewer ? `${reviewer.assignmentId} (${reviewer.state})` : "not requested"}`, `assignment delivery: ${latestDelivery ? `${latestDelivery.kind} ${latestDelivery.state} to ${latestDelivery.targetWorkerId} at revision ${latestDelivery.assignmentRevision}` : "none"}`, `assignment results: ${run.assignmentResults.length}`, `latest proof: ${latestProof ? `${latestProof.proofPacketId} revision ${latestProof.revision} sha256:${latestProof.snapshotSha256}` : "none"}`, `latest decision: ${latestDecision ? `${latestDecision.outcome} on proof revision ${latestDecision.proofRevision} — ${latestDecision.note}` : "none"}`, `cancellation: ${run.cancellation ? `${run.cancellation.state}${run.cancellation.error ? ` — ${run.cancellation.error}` : ""}` : "not requested"}`, `created: ${run.createdAt}`, `updated: ${run.updatedAt}`, "lifecycle:", lifecycle].join("\n");
+  return [TRUSTED_LOCAL_BOSS_WARNING, `handle: ${run.handle}`, `run: ${run.bossRunId}`, `state: ${run.state}`, `goal: ${run.goal}`, `manager session: ${run.managerSessionId}`, "readiness: WorkerStore lifecycle reports process/transport state only; it does not prove productive task activity.", "communication evidence: authenticated worker Intercom traffic proves communication only; assignment acknowledgement and substantive typed checkpoint telemetry are unavailable unless explicitly reported as separate fields.", "staffing:", staffing, "communication:", communication, `adversary assignment: ${reviewer ? `${reviewer.assignmentId} (${reviewer.state})` : "not requested"}`, `assignment delivery: ${latestDelivery ? `${latestDelivery.kind} ${latestDelivery.state} to ${latestDelivery.targetWorkerId} at revision ${latestDelivery.assignmentRevision}` : "none"}`, `assignment results: ${run.assignmentResults.length}`, `latest proof: ${latestProof ? `${latestProof.proofPacketId} revision ${latestProof.revision} sha256:${latestProof.snapshotSha256}` : "none"}`, `latest decision: ${latestDecision ? `${latestDecision.outcome} on proof revision ${latestDecision.proofRevision} — ${latestDecision.note}` : "none"}`, `cancellation: ${run.cancellation ? `${run.cancellation.state}${run.cancellation.error ? ` — ${run.cancellation.error}` : ""}` : "not requested"}`, `created: ${run.createdAt}`, `updated: ${run.updatedAt}`, "lifecycle:", lifecycle].join("\n");
 }
 
 function workerIncarnation(worker: WorkerRecord): string { return worker.workerIncarnationId ?? worker.runId; }
@@ -487,6 +498,7 @@ export class TrustedLocalBossStore {
       assignment.state = "assigned";
       assignment.workerId = worker.id;
       assignment.workerIncarnationId = incarnation;
+      assignment.workerBoundAt = timestamp;
       assignment.updatedAt = timestamp;
       while (run.deliveries.length >= 256) pruneOldestDeliveryPair(run);
       const deliveryId = `delivery-${randomUUID()}`;
@@ -654,7 +666,7 @@ export class TrustedLocalBossStore {
         }
         if (!selected) throw new Error("No matching trusted-local Boss run exists.");
         assertOwningSession(selected, managerSessionId);
-        return { title: "Boss trusted-local status", message: formatRun(selected, timestamp), run: structuredClone(selected), activity: runActivity(selected, timestamp) };
+        return { title: "Boss trusted-local status", message: formatRun(selected, timestamp), run: structuredClone(selected), communication: runCommunication(selected, timestamp) };
       }
       if (request.action === "create") {
         if (request.goal.length > MAX_GOAL_LENGTH) throw new Error(`Trusted-local Boss goal exceeds ${MAX_GOAL_LENGTH} characters.`);
