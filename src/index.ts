@@ -11,7 +11,7 @@ import { DEFAULT_CONFIG, readConfig, resolveProfileCommand, writeConfigDefaults 
 import { observeBossCandidateFingerprint } from "./boss-candidate-fingerprint.ts";
 import { BOSS_CREATE_ACCESS_LEVELS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, type BossCommandRequest } from "./boss-command.ts";
 import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type BossCreateCapabilityReport } from "./boss-create-capabilities.ts";
-import { cleanupProvisionedBossResource, observeProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
+import { cleanupProvisionedBossResource, observeProvisionedBossResource, preserveProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
 import { formatBossReadinessReport, formatBossSetupReport, inspectBossSetup, inspectTrustedLocalBossReadiness } from "./boss-setup.ts";
 import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, trustedLocalBossParticipantTargets, type TrustedLocalBossTeamIdentity } from "./boss-team-environment.ts";
 import { TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, type TrustedLocalBossResult } from "./boss-trusted-local.ts";
@@ -1985,7 +1985,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   async function cleanupTerminalBossResource(result: TrustedLocalBossResult): Promise<TrustedLocalBossResult> {
     const current = result.run?.resource;
     if (!result.run || !current || current.leaseState === "released") return result;
-    const cleanup = await cleanupProvisionedBossResource(current);
+    const cleanup = result.run.currentFreeze
+      ? preserveProvisionedBossResource(current, `Controller-authorized freeze revision ${result.run.currentFreeze.freezeRevision} preserved at fingerprint ${result.run.currentFreeze.fingerprint.aggregateSha256}; terminal cleanup must not remove a frozen candidate.`)
+      : await cleanupProvisionedBossResource(current);
     const run = cleanup.resource.revision === current.revision
       ? result.run
       : await trustedLocalBossStore.recordResourceTransition(result.run.bossRunId, current.revision, cleanup.resource);
@@ -2077,6 +2079,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       result = request.action === "freeze"
         ? await trustedLocalBossStore.authorizeFreeze({ bossRunId: status.run.bossRunId, managerSessionId: ownerSessionId, expectedAcceptanceRevision: request.expectedAcceptanceRevision, expectedDesignRevision: request.expectedDesignRevision, fingerprint })
         : await trustedLocalBossStore.authorizeUnfreeze({ bossRunId: status.run.bossRunId, managerSessionId: ownerSessionId, expectedFreezeRevision: request.expectedFreezeRevision, expectedFingerprintSha256: request.expectedFingerprintSha256, fingerprint });
+    } else if (request.action === "proof" || request.action === "approve" || request.action === "reject") {
+      const ownerSessionId = managerSessionId(ctx);
+      const status = await trustedLocalBossStore.execute({ action: "status", bossRunId: request.bossRunId }, ownerSessionId);
+      if (!status.run?.resource || !status.run.currentFreeze) throw new Error(`Trusted-local Boss ${request.action} requires a current Controller-authorized freeze on a canonical resource.`);
+      const fingerprint = await observeBossCandidateFingerprint(status.run.resource);
+      result = await trustedLocalBossStore.execute(request, ownerSessionId, fingerprint);
     } else {
       result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
     }
@@ -2134,14 +2142,19 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           if (spawnedReviewer) await stopBossOrphanWorker(spawnedReviewer, managerSessionId(ctx)).catch(() => undefined);
           await trustedLocalBossStore.recordReviewerFailed(result.run.bossRunId, error);
         }
-        result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
+        if (!result.run.resource) throw new Error("Trusted-local Boss proof requires a canonical resource.");
+        const fingerprint = await observeBossCandidateFingerprint(result.run.resource);
+        result = await trustedLocalBossStore.execute(request, managerSessionId(ctx), fingerprint);
       }
       const deliveredProof = result.run?.proofPackets.at(-1);
       const assignedReviewer = result.run?.assignments.find((assignment) => assignment.role === "adversary");
       const priorProofDelivery = deliveredProof ? result.run?.deliveries.find((delivery) => delivery.kind === "proof-review" && delivery.proofPacketId === deliveredProof.proofPacketId) : undefined;
       if (deliveredProof && assignedReviewer?.workerId && (!priorProofDelivery || priorProofDelivery.state === "failed")) {
         let deliveryError: unknown;
+        let deliveryFingerprint: Awaited<ReturnType<typeof observeBossCandidateFingerprint>> | undefined;
         try {
+          if (!result.run!.resource) throw new Error("Trusted-local Boss proof delivery requires a canonical resource");
+          deliveryFingerprint = await observeBossCandidateFingerprint(result.run!.resource);
           const snapshot = await store.read();
           const reviewerWorker = snapshot.workers.find((candidate) => candidate.id === assignedReviewer.workerId && workerIncarnation(candidate) === assignedReviewer.workerIncarnationId && candidate.bossRunId === result.run!.bossRunId && candidate.managerSessionId === result.run!.managerSessionId);
           if (!reviewerWorker || !isLiveState(reviewerWorker.state)) throw new Error("Exact live Boss adversary is unavailable for proof delivery");
@@ -2152,7 +2165,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         } catch (error) {
           deliveryError = error;
         }
-        await trustedLocalBossStore.recordProofDelivery(result.run!.bossRunId, deliveredProof.proofPacketId, deliveryError);
+        if (!deliveryFingerprint) throw deliveryError instanceof Error ? deliveryError : new Error("Trusted-local Boss proof delivery candidate observation failed");
+        await trustedLocalBossStore.recordProofDelivery(result.run!.bossRunId, deliveredProof.proofPacketId, deliveryFingerprint, deliveryError);
         result = await trustedLocalBossStore.execute({ action: "status", bossRunId: result.run!.bossRunId }, managerSessionId(ctx));
         result.message += `\n\nProof revision ${deliveredProof.revision} is bound to sha256:${deliveredProof.snapshotSha256}; local review delivery ${deliveryError === undefined ? "succeeded" : "failed"}. No protected attestation is claimed.`;
       }

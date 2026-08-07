@@ -6,11 +6,11 @@ import type { BossCandidateFingerprint } from "./boss-candidate-fingerprint.ts";
 import type { BossCommandRequest } from "./boss-command.ts";
 import type { WorkerRecord, WorkerState } from "./types.ts";
 
-export const TRUSTED_LOCAL_BOSS_RUN_VERSION = "orc.boss-trusted-local.v4" as const;
-const LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3"]);
+export const TRUSTED_LOCAL_BOSS_RUN_VERSION = "orc.boss-trusted-local.v5" as const;
+const LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4"]);
 export const TRUSTED_LOCAL_BOSS_RESOURCE_VERSION = "orc.boss-resource.v1" as const;
-export const TRUSTED_LOCAL_BOSS_STORE_VERSION = "orc.boss-trusted-local.v6" as const;
-const LEGACY_TRUSTED_LOCAL_BOSS_STORE_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4", "orc.boss-trusted-local.v5"]);
+export const TRUSTED_LOCAL_BOSS_STORE_VERSION = "orc.boss-trusted-local.v7" as const;
+const LEGACY_TRUSTED_LOCAL_BOSS_STORE_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4", "orc.boss-trusted-local.v5", "orc.boss-trusted-local.v6"]);
 export const TRUSTED_LOCAL_BOSS_FREEZE_TRANSITION_VERSION = "orc.boss-freeze-transition.v1" as const;
 export const TRUSTED_LOCAL_BOSS_FREEZE_VERSION = "orc.boss-freeze.v1" as const;
 export const TRUSTED_LOCAL_BOSS_WARNING = "TRUSTED LOCAL MODE — same-user agents and local files are trusted; evidence is advisory, not tamper-proof.";
@@ -134,6 +134,11 @@ export interface TrustedLocalBossProofPacket {
   managerAssignmentId: string;
   reviewerAssignmentId: string;
   lifecycleCount: number;
+  freezeRevision: number;
+  acceptanceRevision: number;
+  designRevision: number;
+  resourceRevision: number;
+  fingerprintSha256: string;
   generatedAt: string;
   snapshotSha256: string;
 }
@@ -332,13 +337,15 @@ function parseLifecycleObservation(value: unknown): TrustedLocalBossLifecycleObs
 }
 
 function parseProofPacket(value: unknown): TrustedLocalBossProofPacket {
-  if (!isPlainRecord(value) || !exactKeys(value, ["bossRunId", "generatedAt", "lifecycleCount", "managerAssignmentId", "proofPacketId", "reviewerAssignmentId", "revision", "runState", "snapshotSha256"])) throw new Error("Trusted-local Boss state contains an invalid proof packet");
+  if (!isPlainRecord(value) || !exactKeys(value, ["acceptanceRevision", "bossRunId", "designRevision", "fingerprintSha256", "freezeRevision", "generatedAt", "lifecycleCount", "managerAssignmentId", "proofPacketId", "resourceRevision", "reviewerAssignmentId", "revision", "runState", "snapshotSha256"])) throw new Error("Trusted-local Boss state contains an invalid proof packet");
   const packet = value as unknown as TrustedLocalBossProofPacket;
   if (!/^proof-[0-9a-f-]{36}$/.test(packet.proofPacketId) || !Number.isSafeInteger(packet.revision) || packet.revision < 1
     || !/^boss-[0-9a-f-]{36}$/.test(packet.bossRunId) || !/^assignment-[0-9a-f-]{36}$/.test(packet.managerAssignmentId)
     || !/^assignment-[0-9a-f-]{36}$/.test(packet.reviewerAssignmentId) || !Number.isSafeInteger(packet.lifecycleCount) || packet.lifecycleCount < 0 || packet.lifecycleCount > 256
     || !TERMINAL_RUN_STATES.has(packet.runState) && packet.runState !== "active" && packet.runState !== "paused"
-    || !/^[0-9a-f]{64}$/.test(packet.snapshotSha256)) throw new Error("Trusted-local Boss state contains invalid proof packet fields");
+    || !Number.isSafeInteger(packet.freezeRevision) || packet.freezeRevision < 1 || !Number.isSafeInteger(packet.acceptanceRevision) || packet.acceptanceRevision < 1
+    || !Number.isSafeInteger(packet.designRevision) || packet.designRevision < 1 || !Number.isSafeInteger(packet.resourceRevision) || packet.resourceRevision < 1
+    || !/^[0-9a-f]{64}$/.test(packet.fingerprintSha256) || !/^[0-9a-f]{64}$/.test(packet.snapshotSha256)) throw new Error("Trusted-local Boss state contains invalid proof packet fields");
   return { ...packet, generatedAt: parseTimestamp(packet.generatedAt, "proof generatedAt") };
 }
 
@@ -498,7 +505,7 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const legacyVersion = typeof value.version === "string" && LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSIONS.has(value.version);
   const legacyHandle = value.version === "orc.boss-trusted-local.v1";
   const legacyResource = value.version === "orc.boss-trusted-local.v1" || value.version === "orc.boss-trusted-local.v2";
-  const legacyFreeze = legacyVersion;
+  const legacyFreeze = value.version === "orc.boss-trusted-local.v1" || value.version === "orc.boss-trusted-local.v2" || value.version === "orc.boss-trusted-local.v3";
   const keys = ["assignmentResults", "assignments", "bossRunId", "cancellation", "createdAt", "decisions", "deliveries", "goal", "lifecycle", "managerSessionId", "proofPackets", "state", "updatedAt", "version", ...(legacyHandle ? [] : ["handle"]), ...(legacyResource ? [] : ["resource"]), ...(legacyFreeze ? [] : ["acceptanceRevision", "currentFreeze", "designRevision", "freezeTransitions"])];
   if (!exactKeys(value, keys)) throw new Error("Trusted-local Boss state contains an invalid run record");
   const { assignmentResults, assignments, bossRunId, cancellation, createdAt, decisions, deliveries, goal, lifecycle, managerSessionId, proofPackets, state, updatedAt } = value;
@@ -657,10 +664,25 @@ function isTerminalWorkerState(state: WorkerState): boolean { return state === "
 function expectedWorkerId(run: TrustedLocalBossRun, role: TrustedLocalBossAssignmentRole): string { return `boss-${role === "adversary" ? "adversary" : role}-${run.bossRunId.slice(-12)}`; }
 function pruneOldestDeliveryPair(run: TrustedLocalBossRun): void { const removed = run.deliveries.shift(); if (!removed) return; const resultIndex = run.assignmentResults.findIndex((result) => result.deliveryId === removed.deliveryId); if (resultIndex >= 0) run.assignmentResults.splice(resultIndex, 1); }
 
+function assertExactCurrentFreeze(run: TrustedLocalBossRun, fingerprintValue: BossCandidateFingerprint | undefined, action: string): { freeze: TrustedLocalBossFreeze; fingerprint: BossCandidateFingerprint } {
+  if (!run.currentFreeze) throw new Error(`Trusted-local Boss ${action} requires a current Controller-authorized freeze.`);
+  const fingerprint = parseCandidateFingerprint(structuredClone(fingerprintValue));
+  const freeze = run.currentFreeze;
+  if (!run.resource || run.resource.leaseState !== "active" || run.resource.existence !== "verified"
+    || freeze.acceptanceRevision !== run.acceptanceRevision || freeze.designRevision !== run.designRevision || freeze.resourceRevision !== run.resource.revision
+    || fingerprint.resourceId !== run.resource.resourceId || fingerprint.resourceRevision !== run.resource.revision || fingerprint.cwd !== run.resource.path
+    || fingerprint.gitAdminDirectory !== run.resource.gitAdminDirectory || fingerprint.gitCommonDirectory !== run.resource.gitCommonDirectory
+    || fingerprint.branch !== run.resource.branch || fingerprint.baseSha !== run.resource.baseSha
+    || fingerprint.aggregateSha256 !== freeze.fingerprint.aggregateSha256) {
+    throw new Error(`Trusted-local Boss ${action} found a stale freeze because the canonical candidate or bound revisions moved; explicitly unfreeze and authorize a new freeze.`);
+  }
+  return { freeze, fingerprint };
+}
+
 function proofDigest(run: TrustedLocalBossRun, reviewer: TrustedLocalBossAssignment): string {
   const manager = assignmentForRole(run, "manager");
   const proofDeliveryIds = new Set(run.deliveries.filter((delivery) => delivery.kind === "proof-review").map((delivery) => delivery.deliveryId));
-  const snapshot = { bossRunId: run.bossRunId, goal: run.goal, state: run.state, assignments: run.assignments.map((assignment) => ({ ...assignment })), deliveries: run.deliveries.filter((delivery) => delivery.kind !== "proof-review").map((delivery) => ({ ...delivery })), assignmentResults: run.assignmentResults.filter((result) => !proofDeliveryIds.has(result.deliveryId)).map((result) => ({ ...result })), manager: { assignmentId: manager.assignmentId, state: manager.state, workerId: manager.workerId, workerIncarnationId: manager.workerIncarnationId, updatedAt: manager.updatedAt }, reviewer: { assignmentId: reviewer.assignmentId, state: reviewer.state, workerId: reviewer.workerId, workerIncarnationId: reviewer.workerIncarnationId, updatedAt: reviewer.updatedAt }, lifecycle: run.lifecycle.map((entry) => ({ ...entry })) };
+  const snapshot = { bossRunId: run.bossRunId, goal: run.goal, state: run.state, currentFreeze: run.currentFreeze, assignments: run.assignments.map((assignment) => ({ ...assignment })), deliveries: run.deliveries.filter((delivery) => delivery.kind !== "proof-review").map((delivery) => ({ ...delivery })), assignmentResults: run.assignmentResults.filter((result) => !proofDeliveryIds.has(result.deliveryId)).map((result) => ({ ...result })), manager: { assignmentId: manager.assignmentId, state: manager.state, workerId: manager.workerId, workerIncarnationId: manager.workerIncarnationId, updatedAt: manager.updatedAt }, reviewer: { assignmentId: reviewer.assignmentId, state: reviewer.state, workerId: reviewer.workerId, workerIncarnationId: reviewer.workerIncarnationId, updatedAt: reviewer.updatedAt }, lifecycle: run.lifecycle.map((entry) => ({ ...entry })) };
   return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 }
 
@@ -880,10 +902,12 @@ export class TrustedLocalBossStore {
     return this.mutate((state, timestamp) => { const run = state.runs.find((candidate) => candidate.bossRunId === bossRunId); if (!run) throw new Error(`Trusted-local Boss run not found: ${bossRunId}`); const assignment = assignmentForRole(run, role); if (assignment.state !== "assigned" || !assignment.workerId) throw new Error(`Trusted-local Boss ${role} assignment is not available for ${kind}`); assignment.revision += 1; assignment.updatedAt = timestamp; const deliveryId = `delivery-${randomUUID()}`; const failed = error !== undefined; const detail = failed ? (error instanceof Error ? error.message : String(error)).slice(0, 4_096) || `${kind} delivery failed` : `${kind} accepted by the local Agent Intercom event relay`; run.deliveries.push({ deliveryId, assignmentId: assignment.assignmentId, assignmentRevision: assignment.revision, kind, state: failed ? "failed" : "delivered", targetWorkerId: assignment.workerId, attemptedAt: timestamp, completedAt: timestamp, ...(failed ? { error: detail } : {}) }); run.assignmentResults.push({ resultId: `result-${randomUUID()}`, deliveryId, assignmentId: assignment.assignmentId, assignmentRevision: assignment.revision, outcome: failed ? "failed" : "accepted", observedAt: timestamp, detail }); while (run.deliveries.length > 256) pruneOldestDeliveryPair(run); run.updatedAt = timestamp; state.revision += 1; return structuredClone(run); });
   }
 
-  async recordProofDelivery(bossRunId: string, proofPacketId: string, error?: unknown): Promise<TrustedLocalBossRun> {
+  async recordProofDelivery(bossRunId: string, proofPacketId: string, fingerprintValue: BossCandidateFingerprint, error?: unknown): Promise<TrustedLocalBossRun> {
     return this.mutate((state, timestamp) => {
       const run = state.runs.find((candidate) => candidate.bossRunId === bossRunId); if (!run) throw new Error(`Trusted-local Boss run not found: ${bossRunId}`);
       const proof = run.proofPackets.find((candidate) => candidate.proofPacketId === proofPacketId); if (!proof) throw new Error("Trusted-local Boss proof packet is unavailable for delivery");
+      const { freeze } = assertExactCurrentFreeze(run, fingerprintValue, "proof delivery");
+      if (proof.freezeRevision !== freeze.freezeRevision || proof.acceptanceRevision !== freeze.acceptanceRevision || proof.designRevision !== freeze.designRevision || proof.resourceRevision !== freeze.resourceRevision || proof.fingerprintSha256 !== freeze.fingerprint.aggregateSha256) throw new Error("Trusted-local Boss proof delivery requires the exact current freeze and fingerprint revisions.");
       const reviewer = assignmentForRole(run, "adversary"); if (reviewer.assignmentId !== proof.reviewerAssignmentId || reviewer.state !== "assigned" || !reviewer.workerId) throw new Error("Trusted-local Boss proof reviewer is unavailable");
       const existing = run.deliveries.find((delivery) => delivery.kind === "proof-review" && delivery.proofPacketId === proofPacketId);
       if (existing?.state === "delivered") throw new Error("Trusted-local Boss proof delivery is already recorded");
@@ -984,7 +1008,7 @@ export class TrustedLocalBossStore {
     });
   }
 
-  async execute(request: BossCommandRequest, managerSessionId: string): Promise<TrustedLocalBossResult> {
+  async execute(request: BossCommandRequest, managerSessionId: string, fingerprintValue?: BossCandidateFingerprint): Promise<TrustedLocalBossResult> {
     return this.mutate((state, timestamp) => {
       const requestedId = "bossRunId" in request ? request.bossRunId : undefined;
       const selected = requestedId ? state.runs.find((run) => run.bossRunId === requestedId || run.handle === requestedId) : undefined;
@@ -1028,6 +1052,7 @@ export class TrustedLocalBossStore {
           return { title: "Boss adversary staffing retry requested", message: `${formatRun(selected, timestamp)}\n\nThe failed adversary assignment was advanced to a new requested revision for ordinary fleet retry.`, run: structuredClone(selected) };
         }
         if (reviewer.state !== "assigned" || !reviewer.workerId) return { title: "Boss adversary staffing pending", message: `${formatRun(selected, timestamp)}\n\nThe adversary must be assigned before an exact proof revision can be generated and delivered.`, run: structuredClone(selected) };
+        const { freeze } = assertExactCurrentFreeze(selected, fingerprintValue, "proof creation");
         const latestProof = selected.proofPackets.at(-1);
         if (latestProof && latestProof.snapshotSha256 === proofDigest(selected, reviewer)) {
           const latestDelivery = selected.deliveries.find((delivery) => delivery.kind === "proof-review" && delivery.proofPacketId === latestProof.proofPacketId);
@@ -1037,7 +1062,7 @@ export class TrustedLocalBossStore {
         while (selected.deliveries.length >= 256) pruneOldestDeliveryPair(selected);
         const manager = assignmentForRole(selected, "manager");
         const proofPacketId = `proof-${randomUUID()}`;
-        const packet: TrustedLocalBossProofPacket = { proofPacketId, revision: selected.proofPackets.length + 1, bossRunId: selected.bossRunId, runState: selected.state, managerAssignmentId: manager.assignmentId, reviewerAssignmentId: reviewer.assignmentId, lifecycleCount: selected.lifecycle.length, generatedAt: timestamp, snapshotSha256: proofDigest(selected, reviewer) };
+        const packet: TrustedLocalBossProofPacket = { proofPacketId, revision: selected.proofPackets.length + 1, bossRunId: selected.bossRunId, runState: selected.state, managerAssignmentId: manager.assignmentId, reviewerAssignmentId: reviewer.assignmentId, lifecycleCount: selected.lifecycle.length, freezeRevision: freeze.freezeRevision, acceptanceRevision: freeze.acceptanceRevision, designRevision: freeze.designRevision, resourceRevision: freeze.resourceRevision, fingerprintSha256: freeze.fingerprint.aggregateSha256, generatedAt: timestamp, snapshotSha256: proofDigest(selected, reviewer) };
         selected.proofPackets.push(packet); selected.updatedAt = timestamp; state.revision += 1;
         return { title: "Advisory proof packet", message: `${formatRun(selected, timestamp)}\n\nProof revision ${packet.revision} is bound to sha256:${packet.snapshotSha256} and awaits exact local review delivery. No protected attestation is claimed.`, run: structuredClone(selected) };
       }
@@ -1050,6 +1075,8 @@ export class TrustedLocalBossStore {
         }
         if (selected.state !== "active" && selected.state !== "paused") throw new Error(`Cannot ${request.action} Boss run from ${selected.state}.`);
         const proof = selected.proofPackets.at(-1); if (!proof) throw new Error(`Trusted-local ${request.action} requires an advisory proof packet.`);
+        const { freeze } = assertExactCurrentFreeze(selected, fingerprintValue, request.action);
+        if (proof.freezeRevision !== freeze.freezeRevision || proof.acceptanceRevision !== freeze.acceptanceRevision || proof.designRevision !== freeze.designRevision || proof.resourceRevision !== freeze.resourceRevision || proof.fingerprintSha256 !== freeze.fingerprint.aggregateSha256) throw new Error(`Trusted-local ${request.action} requires a proof bound to the exact current freeze and fingerprint revisions.`);
         const reviewer = assignmentForRole(selected, "adversary"); if (reviewer.state !== "assigned" || !reviewer.workerId) throw new Error(`Trusted-local ${request.action} requires an assigned adversary reviewer.`);
         const proofDelivery = selected.deliveries.find((delivery) => delivery.kind === "proof-review" && delivery.proofPacketId === proof.proofPacketId);
         const proofResult = proofDelivery ? selected.assignmentResults.find((result) => result.deliveryId === proofDelivery.deliveryId) : undefined;

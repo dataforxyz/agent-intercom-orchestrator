@@ -165,6 +165,13 @@ export async function refreshProvisionedBossResource(input: {
   });
 }
 
+/** Releases a canonical resource while deliberately preserving its candidate. */
+export function preserveProvisionedBossResource(resource: TrustedLocalBossResource, reason: string): BossResourceCleanupResult {
+  if (resource.leaseState === "released") return { resource, removed: false, dirty: true, dirtyStatus: reason };
+  if (resource.leaseState !== "active" && resource.leaseState !== "cleanup_failed") throw new Error(`Boss canonical resource cannot be preserved from ${resource.leaseState}`);
+  return { resource: nextResourceRevision(resource, { leaseState: "released" }), removed: false, dirty: true, dirtyStatus: reason };
+}
+
 /**
  * Explicit terminal cleanup. Dirty worktrees are released but preserved. Clean
  * worktrees are removed with their dedicated branch; failures are represented in

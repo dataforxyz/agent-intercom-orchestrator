@@ -301,6 +301,14 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     );
     const reviewableRunId = reviewable.details.run.bossRunId as string;
     const reviewableCwd = reviewable.details.run.resource.path as string;
+    const frozen = await tools.get("boss").execute(
+      "boss-review-freeze",
+      { action: "freeze", bossRunId: reviewableRunId, expectedAcceptanceRevision: 1, expectedDesignRevision: 1 },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    assert.equal(frozen.details.run.currentFreeze.freezeRevision, 1);
     const proof = await tools.get("boss").execute(
       "boss-review-cleanup-retry-proof",
       { action: "proof", bossRunId: reviewableRunId },
@@ -339,8 +347,9 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.equal(retriedApproval.details.run.state, "approved");
     assert.equal(retriedApproval.details.run.decisions.length, 1);
     assert.equal(retriedApproval.details.run.resource.leaseState, "released");
-    assert.equal(retriedApproval.details.run.resource.existence, "missing");
-    await assert.rejects(access(reviewableCwd));
+    assert.equal(retriedApproval.details.run.resource.existence, "verified");
+    assert.match(retriedApproval.content[0].text, /must not remove a frozen candidate/);
+    assert.equal(await access(reviewableCwd).then(() => true), true);
 
     const launchesBeforeManagerFailure = launches.length;
     failNextBossLaunch = true;
