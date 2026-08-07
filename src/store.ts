@@ -40,7 +40,7 @@ const MANAGER_CONTEXTS = new Set<ManagerOwnerKind>(["pi", "opencode", "headless_
 const LEGACY_WORKER_KEYS = new Set([
   "id", "runId", "harness", "backend", "role", "task", "cwd", "profile", "permissionProfile", "model", "effort", "instructions",
   "state", "owned", "managerSessionId", "intercomTarget", "unit", "mainPid", "externalSessionId", "healthPath", "runtimeStatePath",
-  "createdAt", "updatedAt", "leaseExpiresAt", "lastWorkerActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt",
+  "createdAt", "updatedAt", "leaseExpiresAt", "lastWorkerActivityAt", "lastAuthenticatedIntercomActivityAt", "idleDeadlineAt", "checkpointRequestedAt", "checkpointLastAttemptAt",
   "checkpointAttemptCount", "checkpointDeadlineAt", "stopRequestedAt", "stoppedAt", "stopReason", "dirtyAtStop", "dirtyStatusAtStop", "dirtyCheckErrorAtStop",
   "lastError", "backendDetails",
 ]);
@@ -667,8 +667,9 @@ function migrateLegacyWorker(worker: WorkerRecord, migratedAt: number, options: 
     managerOwnerInferredFromLegacySession: true,
     ...flags,
   };
+  const { lastAuthenticatedIntercomActivityAt: _untrustedCompatibilityClaim, ...canonicalLegacyWorker } = worker;
   return {
-    ...worker,
+    ...canonicalLegacyWorker,
     workerIncarnationId: worker.runId,
     workerGeneration: 1,
     state,
