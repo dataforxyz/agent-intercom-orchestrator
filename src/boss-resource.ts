@@ -174,18 +174,33 @@ export async function cleanupProvisionedBossResource(resource: TrustedLocalBossR
   if (resource.leaseState === "released" && resource.existence === "missing") return { resource, removed: true, dirty: false };
   if (resource.leaseState !== "active" && resource.leaseState !== "cleanup_failed") throw new Error(`Boss canonical resource cannot be cleaned from ${resource.leaseState}`);
   let dirtyStatus = "";
+  let currentHead = "";
   try {
-    dirtyStatus = (await gitResult(resource.path, ["status", "--porcelain=v1", "--untracked-files=all"])).stdout;
+    const path = await canonical(resource.path);
+    const topLevel = await canonical(await git(path, ["rev-parse", "--show-toplevel"]));
+    const gitAdminDirectory = await canonical(await git(path, ["rev-parse", "--absolute-git-dir"]));
+    const gitCommonDirectory = await canonical(await git(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+    const branch = await git(path, ["symbolic-ref", "--short", "HEAD"]);
+    currentHead = await git(path, ["rev-parse", "HEAD"]);
+    if (path !== resource.path || topLevel !== resource.path || gitAdminDirectory !== resource.gitAdminDirectory || gitCommonDirectory !== resource.gitCommonDirectory || branch !== resource.branch || !GIT_SHA.test(currentHead)) {
+      throw new Error("canonical worktree identity, branch, or HEAD changed before cleanup");
+    }
+    dirtyStatus = (await gitResult(path, ["status", "--porcelain=v1", "--untracked-files=all"])).stdout;
   } catch (error) {
-    const message = `Could not inspect Boss candidate dirtiness: ${error instanceof Error ? error.message : String(error)}`;
+    const message = `Boss canonical resource cleanup failed during safe candidate inspection: ${error instanceof Error ? error.message : String(error)}`;
     return { resource: nextResourceRevision(resource, { leaseState: "cleanup_failed" }), removed: false, dirty: false, error: message };
   }
-  if (dirtyStatus) {
+  const committedDivergence = currentHead !== resource.baseSha || resource.headSha !== resource.baseSha;
+  if (dirtyStatus || committedDivergence) {
+    const preservationStatus = [
+      dirtyStatus,
+      ...(committedDivergence ? [`committed candidate preserved: base ${resource.baseSha}, recorded HEAD ${resource.headSha}, current HEAD ${currentHead}`] : []),
+    ].filter(Boolean).join("\n");
     return {
-      resource: nextResourceRevision(resource, { leaseState: "released" }),
+      resource: nextResourceRevision(resource, { headSha: currentHead, leaseState: "released" }),
       removed: false,
       dirty: true,
-      dirtyStatus,
+      dirtyStatus: preservationStatus,
     };
   }
   try {

@@ -194,6 +194,25 @@ test("terminal cleanup preserves dirty candidates and records a released revisio
   assert.equal(await realpath(worktree), worktree);
 });
 
+test("terminal cleanup preserves clean committed candidate divergence", async (context) => {
+  const { repository, worktree, baseSha } = await fixture(context);
+  const bossRunId = "boss-77777777-7777-4777-8777-777777777777";
+  const resource = await observeProvisionedBossResource({ bossRunId, path: worktree, baseSha, capabilityReport: readyReport(worktree), leaseDurationMs: 60_000 });
+  await writeFile(join(worktree, "candidate.txt"), "committed candidate\n");
+  await git(worktree, "add", "candidate.txt");
+  await git(worktree, "commit", "-m", "candidate");
+  const candidateHead = await git(worktree, "rev-parse", "HEAD");
+
+  const cleanup = await cleanupProvisionedBossResource(resource);
+  assert.equal(cleanup.dirty, true);
+  assert.equal(cleanup.removed, false);
+  assert.match(cleanup.dirtyStatus ?? "", /committed candidate preserved/);
+  assert.equal(cleanup.resource.headSha, candidateHead);
+  assert.equal(cleanup.resource.leaseState, "released");
+  assert.equal(await realpath(worktree), worktree);
+  assert.match(await git(repository, "show-ref", "--verify", `refs/heads/${resource.branch}`), new RegExp(candidateHead));
+});
+
 test("terminal cleanup removes clean resources and reports failures honestly", async (context) => {
   const cleanFixture = await fixture(context);
   const cleanRunId = "boss-99999999-9999-4999-8999-999999999999";

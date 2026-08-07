@@ -117,6 +117,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     const stoppedUnits = new Set<string>();
     const intercomDeliveries: Array<{ to: string; message: string }> = [];
     let contextStale = false;
+    let failNextBossLaunch = false;
     const pi: any = {
       on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
       events: {
@@ -128,7 +129,13 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       registerTool(tool: any) { tools.set(tool.name, tool); },
       registerCommand() {},
       async exec(command: string, args: string[]) {
-        if (command === "systemd-run" && args.some((arg) => arg.startsWith("--unit=agent-intercom-worker-boss-"))) launches.push([...args]);
+        if (command === "systemd-run" && args.some((arg) => arg.startsWith("--unit=agent-intercom-worker-boss-"))) {
+          if (failNextBossLaunch) {
+            failNextBossLaunch = false;
+            return { ...commandResult(), code: 1, stderr: "injected Manager launch failure" };
+          }
+          launches.push([...args]);
+        }
         if (command === "systemd") return { ...commandResult(), stdout: "systemd 257\n" };
         if (command === "systemctl" && args.includes("stop")) {
           stoppedUnits.add(args.at(-1)!);
@@ -279,6 +286,24 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     assert.ok(defaultCreated.details.run?.bossRunId);
     assert.doesNotMatch(defaultCreated.content[0].text, /Boss create capability report/);
     assert.equal(launches.length, 6, "omitting requirements preserves ordinary three-role staffing");
+
+    failNextBossLaunch = true;
+    const managerFailed = await tools.get("boss").execute(
+      "boss-manager-failure-cleanup-test",
+      { action: "create", goal: "fail initial Manager launch safely", requirements: { worktree: "write" } },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    const failedCanonicalCwd = managerFailed.details.run.resource.path as string;
+    assert.equal(managerFailed.details.run.state, "failed");
+    assert.equal(managerFailed.details.run.assignments[0].state, "failed");
+    assert.equal(managerFailed.details.run.resource.revision, 2);
+    assert.equal(managerFailed.details.run.resource.leaseState, "released");
+    assert.equal(managerFailed.details.run.resource.existence, "missing");
+    assert.match(managerFailed.content[0].text, /clean worktree and branch were removed/);
+    await assert.rejects(access(failedCanonicalCwd));
+    assert.equal(launches.length, 6, "Manager launch failure must not continue staffing Worker or Scout");
 
     contextStale = true;
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);

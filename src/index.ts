@@ -1964,7 +1964,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       ? result.run
       : await trustedLocalBossStore.recordResourceTransition(result.run.bossRunId, current.revision, cleanup.resource);
     const detail = cleanup.dirty
-      ? `Canonical resource revision ${run.resource?.revision} was released but preserved because the candidate is dirty.\n${cleanup.dirtyStatus}`
+      ? `Canonical resource revision ${run.resource?.revision} was released but preserved because the candidate contains uncommitted or committed changes.\n${cleanup.dirtyStatus}`
       : cleanup.removed
         ? `Canonical resource revision ${run.resource?.revision} was released and its clean worktree and branch were removed.`
         : `Canonical resource cleanup failed safely at revision ${run.resource?.revision}: ${cleanup.error ?? "unknown cleanup error"}`;
@@ -2228,7 +2228,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         if (member.role === "manager") break;
       }
     }
-    const staffed = await trustedLocalBossStore.execute({ action: "status", bossRunId }, managerSessionId(ctx));
+    let staffed = await trustedLocalBossStore.execute({ action: "status", bossRunId }, managerSessionId(ctx));
+    if (staffed.run?.state === "failed") staffed = await cleanupTerminalBossResource(staffed);
     if (staffed.run) {
       const snapshot = await store.read();
       for (const assignment of staffed.run.assignments.filter((candidate) => candidate.state === "assigned" && candidate.workerId && candidate.workerIncarnationId)) {
