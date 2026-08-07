@@ -134,11 +134,11 @@ export interface TrustedLocalBossProofPacket {
   managerAssignmentId: string;
   reviewerAssignmentId: string;
   lifecycleCount: number;
-  freezeRevision: number;
-  acceptanceRevision: number;
-  designRevision: number;
-  resourceRevision: number;
-  fingerprintSha256: string;
+  freezeRevision: number | null;
+  acceptanceRevision: number | null;
+  designRevision: number | null;
+  resourceRevision: number | null;
+  fingerprintSha256: string | null;
   generatedAt: string;
   snapshotSha256: string;
 }
@@ -336,17 +336,27 @@ function parseLifecycleObservation(value: unknown): TrustedLocalBossLifecycleObs
   return { observationId, assignmentId, workerId, workerIncarnationId, workerState: workerState as WorkerState, observedAt: parseTimestamp(observedAt, "lifecycle observedAt"), ...(parsedBaseline ? { authenticatedIntercomBaselineAt: parsedBaseline } : {}), ...(parsedActivity ? { authenticatedIntercomActivityAt: parsedActivity } : {}), ...(detail !== undefined ? { detail } : {}) };
 }
 
-function parseProofPacket(value: unknown): TrustedLocalBossProofPacket {
-  if (!isPlainRecord(value) || !exactKeys(value, ["acceptanceRevision", "bossRunId", "designRevision", "fingerprintSha256", "freezeRevision", "generatedAt", "lifecycleCount", "managerAssignmentId", "proofPacketId", "resourceRevision", "reviewerAssignmentId", "revision", "runState", "snapshotSha256"])) throw new Error("Trusted-local Boss state contains an invalid proof packet");
+function parseProofPacket(value: unknown, legacyBinding = false): TrustedLocalBossProofPacket {
+  const legacyKeys = ["bossRunId", "generatedAt", "lifecycleCount", "managerAssignmentId", "proofPacketId", "reviewerAssignmentId", "revision", "runState", "snapshotSha256"];
+  const currentKeys = ["acceptanceRevision", ...legacyKeys, "designRevision", "fingerprintSha256", "freezeRevision", "resourceRevision"];
+  if (!isPlainRecord(value) || !exactKeys(value, legacyBinding ? legacyKeys : currentKeys)) throw new Error("Trusted-local Boss state contains an invalid proof packet");
   const packet = value as unknown as TrustedLocalBossProofPacket;
+  const bindings = legacyBinding
+    ? { freezeRevision: null, acceptanceRevision: null, designRevision: null, resourceRevision: null, fingerprintSha256: null }
+    : { freezeRevision: packet.freezeRevision, acceptanceRevision: packet.acceptanceRevision, designRevision: packet.designRevision, resourceRevision: packet.resourceRevision, fingerprintSha256: packet.fingerprintSha256 };
+  const allBindingsUnavailable = Object.values(bindings).every((binding) => binding === null);
+  const allBindingsCurrent = Number.isSafeInteger(bindings.freezeRevision) && (bindings.freezeRevision as number) >= 1
+    && Number.isSafeInteger(bindings.acceptanceRevision) && (bindings.acceptanceRevision as number) >= 1
+    && Number.isSafeInteger(bindings.designRevision) && (bindings.designRevision as number) >= 1
+    && Number.isSafeInteger(bindings.resourceRevision) && (bindings.resourceRevision as number) >= 1
+    && typeof bindings.fingerprintSha256 === "string" && /^[0-9a-f]{64}$/.test(bindings.fingerprintSha256);
   if (!/^proof-[0-9a-f-]{36}$/.test(packet.proofPacketId) || !Number.isSafeInteger(packet.revision) || packet.revision < 1
     || !/^boss-[0-9a-f-]{36}$/.test(packet.bossRunId) || !/^assignment-[0-9a-f-]{36}$/.test(packet.managerAssignmentId)
     || !/^assignment-[0-9a-f-]{36}$/.test(packet.reviewerAssignmentId) || !Number.isSafeInteger(packet.lifecycleCount) || packet.lifecycleCount < 0 || packet.lifecycleCount > 256
     || !TERMINAL_RUN_STATES.has(packet.runState) && packet.runState !== "active" && packet.runState !== "paused"
-    || !Number.isSafeInteger(packet.freezeRevision) || packet.freezeRevision < 1 || !Number.isSafeInteger(packet.acceptanceRevision) || packet.acceptanceRevision < 1
-    || !Number.isSafeInteger(packet.designRevision) || packet.designRevision < 1 || !Number.isSafeInteger(packet.resourceRevision) || packet.resourceRevision < 1
-    || !/^[0-9a-f]{64}$/.test(packet.fingerprintSha256) || !/^[0-9a-f]{64}$/.test(packet.snapshotSha256)) throw new Error("Trusted-local Boss state contains invalid proof packet fields");
-  return { ...packet, generatedAt: parseTimestamp(packet.generatedAt, "proof generatedAt") };
+    || (!allBindingsUnavailable && !allBindingsCurrent)
+    || !/^[0-9a-f]{64}$/.test(packet.snapshotSha256)) throw new Error("Trusted-local Boss state contains invalid proof packet fields");
+  return { ...packet, ...bindings, generatedAt: parseTimestamp(packet.generatedAt, "proof generatedAt") };
 }
 
 function parseDecision(value: unknown): TrustedLocalBossReviewDecision {
@@ -519,7 +529,7 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const parsedDeliveries = deliveries.map(parseDelivery);
   const parsedResults = assignmentResults.map(parseAssignmentResult);
   const parsedLifecycle = lifecycle.map(parseLifecycleObservation);
-  const parsedProofs = proofPackets.map(parseProofPacket);
+  const parsedProofs = proofPackets.map((packet) => parseProofPacket(packet, value.version === "orc.boss-trusted-local.v4"));
   const parsedDecisions = decisions.map(parseDecision);
   const assignmentIds = new Set(parsedAssignments.map((assignment) => assignment.assignmentId));
   if (assignmentIds.size !== parsedAssignments.length || parsedLifecycle.some((entry) => !assignmentIds.has(entry.assignmentId))) throw new Error("Trusted-local Boss state contains invalid assignment correlation");
@@ -540,10 +550,21 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const freezeTransitions = legacyFreeze ? [] : Array.isArray(value.freezeTransitions) ? value.freezeTransitions.map(parseFreezeTransition) : (() => { throw new Error("Trusted-local Boss state contains invalid freeze transitions"); })();
   if (freezeTransitions.some((transition, index) => transition.revision !== index + 1)) throw new Error("Trusted-local Boss freeze transition revisions must be monotonic");
   const currentFreeze = legacyFreeze ? null : parseCurrentFreeze(value.currentFreeze);
-  if (currentFreeze) {
-    const transition = freezeTransitions[currentFreeze.transitionRevision - 1];
-    if (!transition || transition.outcome !== "accepted" || transition.action !== "freeze" || transition.freezeRevision !== currentFreeze.freezeRevision || transition.fingerprint.aggregateSha256 !== currentFreeze.fingerprint.aggregateSha256) throw new Error("Trusted-local Boss current freeze does not match its accepted transition");
+  let derivedFreeze: TrustedLocalBossFreeze | null = null;
+  let nextFreezeRevision = 1;
+  for (const transition of freezeTransitions) {
+    if (transition.fingerprint.resourceRevision !== transition.resourceRevision) throw new Error("Trusted-local Boss freeze transition fingerprint revision does not match its resource revision");
+    if (transition.outcome === "rejected") continue;
+    if (transition.action === "freeze") {
+      if (derivedFreeze || transition.freezeRevision !== nextFreezeRevision) throw new Error("Trusted-local Boss accepted freeze transition is not a valid monotonic projection");
+      derivedFreeze = { version: TRUSTED_LOCAL_BOSS_FREEZE_VERSION, freezeRevision: transition.freezeRevision, transitionRevision: transition.revision, acceptanceRevision: transition.acceptanceRevision, designRevision: transition.designRevision, resourceRevision: transition.resourceRevision, fingerprint: transition.fingerprint, authorizedBySessionId: transition.authorizedBySessionId, authorizedAt: transition.occurredAt };
+      nextFreezeRevision += 1;
+    } else {
+      if (!derivedFreeze || transition.freezeRevision !== derivedFreeze.freezeRevision || transition.acceptanceRevision !== derivedFreeze.acceptanceRevision || transition.designRevision !== derivedFreeze.designRevision || transition.resourceRevision !== derivedFreeze.resourceRevision || transition.fingerprint.aggregateSha256 !== derivedFreeze.fingerprint.aggregateSha256) throw new Error("Trusted-local Boss accepted unfreeze transition does not match the current freeze");
+      derivedFreeze = null;
+    }
   }
+  if (JSON.stringify(currentFreeze) !== JSON.stringify(derivedFreeze)) throw new Error("Trusted-local Boss current freeze is not derived from accepted Controller transitions");
   return { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId, handle, goal, state: state as TrustedLocalBossRunState, managerSessionId, resource, acceptanceRevision, designRevision, freezeTransitions, currentFreeze, assignments: parsedAssignments, deliveries: parsedDeliveries, assignmentResults: parsedResults, lifecycle: parsedLifecycle, proofPackets: parsedProofs, decisions: parsedDecisions, cancellation: parseCancellation(cancellation), createdAt: parseTimestamp(createdAt, "run createdAt"), updatedAt: parseTimestamp(updatedAt, "run updatedAt") };
 }
 

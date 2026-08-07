@@ -357,6 +357,68 @@ test("trusted-local Boss reads v3 activity state and upgrades it without inventi
   }
 });
 
+test("trusted-local Boss migrates v6/v4 proof packets with explicit unavailable bindings", async () => {
+  const { dir, store } = await fixture();
+  const path = join(dir, "runs.json");
+  try {
+    const { created, fingerprint } = await createFrozenRun(store, "controller-v4-proof-migration", "preserve legacy proof honestly");
+    const bossRunId = created.run!.bossRunId;
+    await store.recordManagerStarted(bossRunId, managerWorker(bossRunId));
+    await store.execute(parseBossCommand(`proof ${bossRunId}`), "controller-v4-proof-migration");
+    const reviewer = { ...managerWorker(bossRunId), id: `boss-adversary-${bossRunId.slice(-12)}`, runId: "legacy-reviewer", workerIncarnationId: "legacy-reviewer", role: "challenger" };
+    await store.recordReviewerStarted(bossRunId, reviewer);
+    await store.execute(parseBossCommand(`proof ${bossRunId}`), "controller-v4-proof-migration", fingerprint);
+
+    const legacy = JSON.parse(await readFile(path, "utf8"));
+    legacy.version = "orc.boss-trusted-local.v6";
+    legacy.runs[0].version = "orc.boss-trusted-local.v4";
+    for (const field of ["freezeRevision", "acceptanceRevision", "designRevision", "resourceRevision", "fingerprintSha256"]) delete legacy.runs[0].proofPackets[0][field];
+    await writeFile(path, JSON.stringify(legacy));
+
+    const reopened = new TrustedLocalBossStore(path);
+    const status = await reopened.execute(parseBossCommand(`status ${bossRunId}`), "controller-v4-proof-migration");
+    assert.deepEqual(
+      [status.run!.proofPackets[0].freezeRevision, status.run!.proofPackets[0].acceptanceRevision, status.run!.proofPackets[0].designRevision, status.run!.proofPackets[0].resourceRevision, status.run!.proofPackets[0].fingerprintSha256],
+      [null, null, null, null, null],
+      "migration must not invent bindings for pre-binding proof evidence",
+    );
+    await assert.rejects(reopened.recordProofDelivery(bossRunId, status.run!.proofPackets[0].proofPacketId, fingerprint), /exact current freeze and fingerprint revisions/);
+    await reopened.execute(parseBossCommand(`pause ${bossRunId}`), "controller-v4-proof-migration");
+    const migrated = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(migrated.version, "orc.boss-trusted-local.v7");
+    assert.equal(migrated.runs[0].version, "orc.boss-trusted-local.v5");
+    assert.equal(migrated.runs[0].proofPackets[0].fingerprintSha256, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss refuses future schemas and freeze projections not derived from the audit ledger", async () => {
+  const first = await fixture();
+  try {
+    await first.store.execute(parseBossCommand("create reject future schema"), "controller-schema-gate");
+    const path = join(first.dir, "runs.json");
+    const future = JSON.parse(await readFile(path, "utf8"));
+    future.version = "orc.boss-trusted-local.v999";
+    await writeFile(path, JSON.stringify(future));
+    await assert.rejects(new TrustedLocalBossStore(path).execute(parseBossCommand("status"), "controller-schema-gate"), /invalid metadata/);
+  } finally {
+    await rm(first.dir, { recursive: true, force: true });
+  }
+
+  const second = await fixture();
+  try {
+    const { created } = await createFrozenRun(second.store, "controller-ledger-gate", "derive freeze from ledger");
+    const path = join(second.dir, "runs.json");
+    const malformed = JSON.parse(await readFile(path, "utf8"));
+    malformed.runs[0].currentFreeze.authorizedBySessionId = "participant-self-declaration";
+    await writeFile(path, JSON.stringify(malformed));
+    await assert.rejects(new TrustedLocalBossStore(path).execute(parseBossCommand(`status ${created.run!.bossRunId}`), "controller-ledger-gate"), /not derived from accepted Controller transitions/);
+  } finally {
+    await rm(second.dir, { recursive: true, force: true });
+  }
+});
+
 test("trusted-local Boss assigns deterministic handles while migrating v2 run records", async () => {
   const { dir, store } = await fixture();
   const path = join(dir, "runs.json");
@@ -555,6 +617,44 @@ test("trusted-local Boss stales proof creation, delivery, and decision when the 
     assert.equal((await store.execute(parseBossCommand(`approve ${bossRunId} exact candidate`), "controller-stale-proof", fingerprint)).run?.state, "approved");
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss stales frozen evidence when resource, acceptance, or design revisions advance", async () => {
+  const staffReviewer = async (store: TrustedLocalBossStore, bossRunId: string, controller: string) => {
+    await store.recordManagerStarted(bossRunId, managerWorker(bossRunId));
+    await store.execute(parseBossCommand(`proof ${bossRunId}`), controller);
+    await store.recordReviewerStarted(bossRunId, { ...managerWorker(bossRunId), id: `boss-adversary-${bossRunId.slice(-12)}`, runId: `reviewer-${controller}`, workerIncarnationId: `reviewer-${controller}`, role: "challenger" });
+  };
+
+  const resourceCase = await fixture();
+  try {
+    const controller = "controller-resource-stale";
+    const { created, fingerprint } = await createFrozenRun(resourceCase.store, controller, "stale on resource revision");
+    await staffReviewer(resourceCase.store, created.run!.bossRunId, controller);
+    const advanced = { ...created.run!.resource!, revision: 2, leaseExpiresAt: "2023-11-15T00:13:20.000Z" };
+    await resourceCase.store.recordResourceTransition(created.run!.bossRunId, 1, advanced);
+    await assert.rejects(resourceCase.store.execute(parseBossCommand(`proof ${created.run!.bossRunId}`), controller, fingerprint), /stale freeze/);
+  } finally {
+    await rm(resourceCase.dir, { recursive: true, force: true });
+  }
+
+  for (const revisionField of ["acceptanceRevision", "designRevision"] as const) {
+    const revisionCase = await fixture();
+    try {
+      const controller = `controller-${revisionField}-stale`;
+      const { created, fingerprint } = await createFrozenRun(revisionCase.store, controller, `stale on ${revisionField}`);
+      await staffReviewer(revisionCase.store, created.run!.bossRunId, controller);
+      const path = join(revisionCase.dir, "runs.json");
+      const state = JSON.parse(await readFile(path, "utf8"));
+      state.runs[0][revisionField] = 2;
+      state.revision += 1;
+      await writeFile(path, JSON.stringify(state));
+      const reopened = new TrustedLocalBossStore(path);
+      await assert.rejects(reopened.execute(parseBossCommand(`proof ${created.run!.bossRunId}`), controller, fingerprint), /stale freeze/);
+    } finally {
+      await rm(revisionCase.dir, { recursive: true, force: true });
+    }
   }
 });
 
