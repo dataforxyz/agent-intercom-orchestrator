@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `/agents-config` harness enable/disable controls backed by `disabledHarnesses`; disabled harnesses are removed from interactive choices and excluded from automatic routing, explicit profile/model/harness selection, model browsing, and variant lookup.
 - Defer heavy orchestration startup for known-empty RPC discovery sessions, then initialize exactly once for the stable Pi session identity before the first real turn even though Pi creates fresh lifecycle context objects.
 - Keep `agent_fleet status` process ownership diagnostics compact and context-safe: report bounded PID/executable summaries while omitting full command arguments, worker prompts, and multiline shell snapshots; retain the complete PID set internally for cgroup cleanup verification.
 - Restore strict-schema Boss compatibility by accepting `requirements: null` as explicit absence for non-create actions, pin every Boss role to the structurally verified persistent `pi-peer` profile, report the fixed independent-Pi-peer role topology and configured role model/effort in `doctor`, clarify that native harness subagents/per-run overrides are unavailable, and expose the additive `pendingDecision` through tool details.

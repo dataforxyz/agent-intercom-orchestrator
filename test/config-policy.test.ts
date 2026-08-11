@@ -8,6 +8,7 @@ import { configMigrationDiagnostics, DEFAULT_CONFIG, isBossOnboardingComplete, m
 test("policy config merges partial values without dropping typed defaults", () => {
   assert.equal(mergeConfig({}).routing.modelRouting.unmatchedHarness, null);
   const config = mergeConfig({
+    disabledHarnesses: ["opencode", "opencode", "not-a-harness"],
     routing: {
       explicitOnly: [],
       profilePreferences: { codex: ["custom", "custom", "codex-safe"] },
@@ -21,6 +22,7 @@ test("policy config merges partial values without dropping typed defaults", () =
     },
     supervision: { futureGuidance: "ignored by normalized policy" },
   });
+  assert.deepEqual(config.disabledHarnesses, ["opencode"]);
   assert.deepEqual(config.routing.explicitOnly, ["opencode"]);
   assert.deepEqual(config.routing.profilePreferences.codex, ["custom", "codex-safe"]);
   assert.deepEqual(config.routing.roleRequirements.builder, { requiresSubagents: true });
@@ -92,6 +94,7 @@ test("default-policy writes preserve unknown config and round-trip policy deltas
       boss: { futureBossField: { keep: true } },
     }), { mode: 0o644 });
     const config = await readConfig(path);
+    config.disabledHarnesses = ["opencode"];
     config.routing.explicitOnly = [];
     config.routing.profilePreferences.codex = ["codex-minimal", "codex-safe"];
     config.routing.roleRequirements.builder = { requiresSubagents: true };
@@ -106,6 +109,7 @@ test("default-policy writes preserve unknown config and round-trip policy deltas
 
     const raw = JSON.parse(await readFile(path, "utf8"));
     assert.equal(raw.futureTopLevel, true);
+    assert.deepEqual(raw.disabledHarnesses, ["opencode"]);
     assert.deepEqual(raw.routing.futureRouting, { keep: true });
     assert.deepEqual(raw.routing.profilePreferences.futureHarness, ["keep"]);
     assert.equal(Object.hasOwn(raw.routing, "explicitOnly"), false);
@@ -129,6 +133,7 @@ test("default-policy writes preserve unknown config and round-trip policy deltas
     assert.equal((await stat(path)).mode & 0o777, 0o600);
 
     const roundTrip = await readConfig(path);
+    assert.deepEqual(roundTrip.disabledHarnesses, config.disabledHarnesses);
     assert.deepEqual(roundTrip.routing.modelRouting, config.routing.modelRouting);
     assert.deepEqual(roundTrip.routing.profilePreferences, config.routing.profilePreferences);
     assert.deepEqual(roundTrip.routing.roleRequirements, config.routing.roleRequirements);

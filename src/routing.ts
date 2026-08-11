@@ -111,6 +111,8 @@ export function bossSymbolicRolePresets(): Record<BossSymbolicProfileName, RoleP
 
 export interface HarnessAvailability {
   harness: Harness;
+  /** False when configuration disables this harness regardless of installation state. */
+  enabled?: boolean;
   available: boolean;
   profile?: string;
   executable?: string;
@@ -252,6 +254,17 @@ export function detectHarnessAvailability(
   const supportsSubagents = new Set(config.routing.capabilities.requiresSubagents);
   return Object.fromEntries(ROUTABLE_HARNESSES.map((harness) => {
     const profileCandidates = profileCandidatesForHarness(config, harness, options);
+    if (config.disabledHarnesses.includes(harness)) {
+      return [harness, {
+        harness,
+        enabled: false,
+        available: false,
+        supportsSubagents: supportsSubagents.has(harness),
+        ...(options.supportedEfforts?.[harness] ? { supportedEfforts: [...options.supportedEfforts[harness]!] } : {}),
+        profileCandidates,
+        reasons: ["disabled by configuration"],
+      }];
+    }
     const attempts = profileCandidates.map((profileName) => inspectHarnessProfile(
         harness,
         profileName,
@@ -265,6 +278,7 @@ export function detectHarnessAvailability(
       const available = attempts[availableIndex];
       return [harness, {
         ...available,
+        enabled: true,
         profileCandidates,
         reasons: [
           ...attempts.slice(0, availableIndex).flatMap((attempt) => attempt.reasons.map((reason) => `profile fallback: ${reason}`)),
@@ -278,9 +292,10 @@ export function detectHarnessAvailability(
       ...(options.supportedEfforts?.[harness] ? { supportedEfforts: [...options.supportedEfforts[harness]!] } : {}),
       profileCandidates,
     };
-    if (attempts.length === 0) return [harness, { ...shared, available: false, reasons: ["no launch profile is configured"] }];
+    if (attempts.length === 0) return [harness, { ...shared, enabled: true, available: false, reasons: ["no launch profile is configured"] }];
     return [harness, {
       ...shared,
+      enabled: true,
       available: false,
       profile: attempts[0].profile,
       mode: attempts[0].mode,
@@ -370,6 +385,25 @@ export function resolveHarnessRoute(request: RoutingRequest): RoutingDecision {
   if (request.explicitHarness) {
     const availability = request.availability[request.explicitHarness];
     const source = request.explicitSource ?? "harness";
+    if (availability?.enabled === false) {
+      const reasons = [`explicit ${source} requested ${request.explicitHarness}`, "excluded because the harness is disabled by configuration"];
+      return {
+        automatic: false,
+        explicitSource: source,
+        role,
+        requiresSubagents,
+        ...(requestedEffort ? { requestedEffort } : {}),
+        reasons,
+        candidates: [{
+          harness: request.explicitHarness,
+          rank: 1,
+          source: `explicit ${source}`,
+          eligible: false,
+          selected: false,
+          reasons,
+        }],
+      };
+    }
     const effectiveEffort = request.candidateEfforts?.[request.explicitHarness] ?? requestedEffort;
     const warnings = [
       ...(!availability?.available ? availability?.reasons.map((reason) => `availability warning: ${reason}`) ?? ["availability warning: availability was not detected"] : availability.reasons),
@@ -469,7 +503,7 @@ export function resolveHarnessRoute(request: RoutingRequest): RoutingDecision {
 export function formatRoutingDecision(decision: RoutingDecision): string {
   const heading = decision.selected
     ? `${decision.automatic ? "Recommended" : "Explicit"} harness: ${decision.selected}`
-    : "Recommended harness: none";
+    : `${decision.automatic ? "Recommended" : "Explicit"} harness: none`;
   const requirements = `role=${decision.role} requiresSubagents=${decision.requiresSubagents}${decision.requestedEffort ? ` effort=${decision.requestedEffort}` : ""}`;
   const candidates = decision.candidates.map((candidate) => {
     const state = candidate.selected ? "selected" : candidate.eligible ? "eligible" : "excluded";

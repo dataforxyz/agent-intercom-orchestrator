@@ -1691,7 +1691,7 @@ test("extension registers discovery tools and interactive configuration commands
     const lifecycle = new Map<string, (...args: any[]) => any>();
     const tools = new Map<string, any>();
     const commands = new Map<string, any>();
-    const selections = ["Save and close"];
+    const selections = ["Harnesses", "opencode", "disabled", "Save and close"];
     const pi: any = {
       on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
       events: { on() { return () => {}; }, emit() {} },
@@ -1778,8 +1778,15 @@ test("extension registers discovery tools and interactive configuration commands
     await commands.get("agents-config").handler("", ctx);
     const saved = JSON.parse(await readFile(join(agentDir, "intercom", "orchestrator", "config.json"), "utf8"));
     assert.equal(saved.defaultHarness, "pi");
+    assert.deepEqual(saved.disabledHarnesses, ["opencode"]);
     assert.equal(saved.defaultProfiles.pi, undefined);
     assert.equal(saved.roles.advisor, undefined);
+
+    const disabledCapabilities = await tools.get("agent_fleet").execute("disabled-capabilities-test", { action: "capabilities" }, new AbortController().signal, () => {}, ctx);
+    assert.match(disabledCapabilities.content[0].text, /opencode: .*enabled=false available=false.*disabled by configuration/);
+    const disabledRoute = await tools.get("agent_fleet").execute("disabled-route-test", { action: "route", harness: "opencode" }, new AbortController().signal, () => {}, ctx);
+    assert.match(disabledRoute.content[0].text, /Explicit harness: none/);
+    assert.match(disabledRoute.content[0].text, /disabled by configuration/);
 
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
   } finally {

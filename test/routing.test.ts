@@ -20,6 +20,7 @@ import type { Harness } from "../src/types.ts";
 function availability(overrides: Partial<Record<Harness, Partial<HarnessAvailability>>> = {}): Record<Harness, HarnessAvailability> {
   return Object.fromEntries((["pi", "codex", "claude", "opencode"] as Harness[]).map((harness) => [harness, {
     harness,
+    enabled: true,
     available: true,
     profile: `${harness}-profile`,
     executable: `/bin/${harness}`,
@@ -114,6 +115,40 @@ test("OpenCode remains explicit-only and explicit overrides win", () => {
   });
   assert.equal(configuredAutomatic.selected, undefined);
   assert.match(configuredAutomatic.candidates.find((candidate) => candidate.harness === "opencode")?.reasons.join(" ") ?? "", /explicit-only/);
+});
+
+test("disabled harnesses are excluded from automatic and explicit routing", () => {
+  const config = mergeConfig({ disabledHarnesses: ["opencode"] });
+  const detected = detectHarnessAvailability(config, {
+    supportedEfforts: {},
+    resolveCommand: () => "/bin/true",
+  });
+  assert.equal(detected.opencode.enabled, false);
+  assert.equal(detected.opencode.available, false);
+  assert.deepEqual(detected.opencode.reasons, ["disabled by configuration"]);
+
+  const automatic = resolveHarnessRoute({
+    role: "custom",
+    defaultHarness: "opencode",
+    routing: { ...config.routing, preference: ["opencode"] },
+    availability: detected,
+  });
+  assert.equal(automatic.selected, undefined);
+  assert.match(formatRoutingDecision(automatic), /disabled by configuration/);
+
+  const explicit = resolveHarnessRoute({
+    role: "custom",
+    defaultHarness: "pi",
+    routing: config.routing,
+    availability: detected,
+    explicitHarness: "opencode",
+    explicitSource: "harness",
+  });
+  assert.equal(explicit.selected, undefined);
+  assert.equal(explicit.automatic, false);
+  assert.equal(explicit.candidates[0].eligible, false);
+  assert.match(formatRoutingDecision(explicit), /Explicit harness: none/);
+  assert.match(formatRoutingDecision(explicit), /disabled by configuration/);
 });
 
 test("configured routing preference outranks the legacy default fallback", () => {

@@ -527,6 +527,17 @@ function preferredFirst<T extends string>(items: T[], preferred?: T): T[] {
   return preferred && items.includes(preferred) ? [preferred, ...items.filter((item) => item !== preferred)] : items;
 }
 
+function enabledHarnesses(config: Pick<OrchestratorConfig, "disabledHarnesses">): Harness[] {
+  const disabled = new Set(config.disabledHarnesses);
+  return HARNESSES.filter((harness) => !disabled.has(harness));
+}
+
+function assertHarnessEnabled(config: Pick<OrchestratorConfig, "disabledHarnesses">, harness: Harness): void {
+  if (config.disabledHarnesses.includes(harness)) {
+    throw new Error(`Harness ${harness} is disabled in /agents-config.`);
+  }
+}
+
 function configuredModels(config: OrchestratorConfig, harness: Harness): string[] {
   const models = new Set<string>();
   const direct = normalizeModelForHarness(harness, config.defaultModels[harness], config.routing.modelRouting);
@@ -539,7 +550,13 @@ function configuredModels(config: OrchestratorConfig, harness: Harness): string[
 }
 
 function formatConfig(config: OrchestratorConfig, configPath: string): string {
-  const lines = [`config: ${configPath}`, `default harness: ${config.defaultHarness}`];
+  const enabled = enabledHarnesses(config);
+  const lines = [
+    `config: ${configPath}`,
+    `enabled harnesses: ${enabled.join(", ") || "(none)"}`,
+    `disabled harnesses: ${config.disabledHarnesses.join(", ") || "(none)"}`,
+    `default harness: ${config.defaultHarness}${config.disabledHarnesses.includes(config.defaultHarness) ? " (disabled)" : ""}`,
+  ];
   for (const harness of HARNESSES) {
     lines.push(
       `${harness}: profile=${config.defaultProfiles[harness] ?? "(none)"} model=${config.defaultModels[harness] ?? "(harness default)"} effort=${config.defaultEfforts[harness] ?? "(harness default)"}`,
@@ -565,6 +582,9 @@ function formatConfig(config: OrchestratorConfig, configPath: string): string {
 }
 
 function fleetPromptGuidelines(config: OrchestratorConfig): string[] {
+  const disabled = config.disabledHarnesses.length
+    ? ` Disabled harnesses cannot be routed or explicitly spawned: ${config.disabledHarnesses.join(", ")}.`
+    : " All configured harnesses are enabled.";
   const explicitOnly = config.routing.explicitOnly.length
     ? ` Harnesses configured as explicit-only: ${config.routing.explicitOnly.join(", ")}.`
     : " No harness is currently configured as explicit-only.";
@@ -575,7 +595,7 @@ function fleetPromptGuidelines(config: OrchestratorConfig): string[] {
     "Use capabilities, profiles, permissions, models, variants, versions, or config before guessing models, permission policy, effort levels, package state, or defaults.",
     "For UI or browser assignments, treat live browser automation, screenshot capture, and artifact write access as explicit requirements. Fleet capabilities do not currently verify them. Probe them before delegation or split the work into a read-only coworker audit plus manager-side capture. If Playwright's bundled browser is missing, probe an installed Chromium/Chrome executable and pass its explicit executablePath; if capture is still unavailable, report that honestly rather than substituting code inspection for visual evidence.",
     "For read-only test or audit assignments, package runners such as `uv run` may attempt cache or environment writes. When a trusted pinned `.venv` already exists and no dependency sync is needed, tell the worker to use direct immutable entry points such as `.venv/bin/python` or `.venv/bin/pytest`, and to disclose the bypass. Do not widen permissions or claim the package runner passed; if the pinned environment is missing or stale, report the test blocked.",
-    `When the caller did not explicitly choose routing fields, pass harness=auto, effort=auto, and subagents=auto (or omit them when the client preserves optional fields); never invent pi/off/false placeholders. Capability-aware routing then chooses an installed eligible harness. Use action=route with the same explicit constraints to preview the selection. Explicit harness/profile choices always win; explicit model identifiers use the configured model-routing rules and unmatched-model harness.${explicitOnly}`,
+    `When the caller did not explicitly choose routing fields, pass harness=auto, effort=auto, and subagents=auto (or omit them when the client preserves optional fields); never invent pi/off/false placeholders. Capability-aware routing then chooses an installed eligible harness. Use action=route with the same explicit constraints to preview the selection. Explicit harness/profile choices win among enabled harnesses; explicit model identifiers use the configured model-routing rules and unmatched-model harness.${explicitOnly}${disabled}`,
     "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
     "Persistent workers expire after an activity-bounded idle budget. Worker messages to the manager or explicit renew extend it; manager heartbeat alone does not. Default list output hides older terminal history; use history when needed. Stop completed workers promptly, rely on configured retention cleanup, and use forget or bulk prune with acknowledge=true only after deliberate closure.",
   ];
@@ -1198,7 +1218,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
 
     const piFallbackReasons: string[] = [];
-    for (const piProfileName of availability.pi.profileCandidates ?? []) {
+    for (const piProfileName of availability.pi.enabled === false ? [] : availability.pi.profileCandidates ?? []) {
       const piProfile = config.profiles[piProfileName];
       if (!piProfile) {
         piFallbackReasons.push(`profile fallback: profile '${piProfileName}' does not exist`);
@@ -1571,7 +1591,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const profiles = matching.map(([name]) => name);
       const modes = [...new Set(matching.map(([, profile]) => profile.mode ?? "persistent"))];
         const detected = availability[harness];
-        return `${harness}: modes=${modes.join(",") || "(none)"} efforts=${HARNESS_EFFORTS[harness].join(",")} profiles=${profiles.join(",") || "(none)"} available=${detected.available} subagents=${detected.supportsSubagents}${detected.available ? "" : ` reason=${detected.reasons.join("; ")}`}`;
+        return `${harness}: modes=${modes.join(",") || "(none)"} efforts=${HARNESS_EFFORTS[harness].join(",")} profiles=${profiles.join(",") || "(none)"} enabled=${detected.enabled !== false} available=${detected.available} subagents=${detected.supportsSubagents}${detected.available ? "" : ` reason=${detected.reasons.join("; ")}`}`;
       }),
       `permissions: ${Object.keys(config.permissionProfiles).sort().join(",") || "(none)"}`,
       "visual/browser capture: unmodeled; verify browser tooling, executable availability, and artifact write access before assignment",
@@ -1919,6 +1939,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "models") {
         const harness = params.harness && params.harness !== "auto" ? params.harness : config.defaultHarness;
+        assertHarnessEnabled(config, harness);
         if (harness === "opencode") {
           const info = await enumerateOpenCodeModelInfo();
           const text = info.length
@@ -1931,6 +1952,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
 
       if (params.action === "variants") {
+        assertHarnessEnabled(config, "opencode");
         if (!params.model) throw new Error("variants requires model");
         const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === params.model);
         if (!info) throw new Error(`OpenCode model not found: ${params.model}`);
@@ -2606,6 +2628,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (!config) await loadConfig();
       const requested = args.trim();
       const harness = HARNESSES.includes(requested as Harness) ? requested as Harness : config.defaultHarness;
+      if (config.disabledHarnesses.includes(harness)) {
+        ctx.ui.notify(`Harness ${harness} is disabled in /agents-config.`, "error");
+        return;
+      }
       const models = await enumerateModels(harness);
       const text = harness === "opencode"
         ? (await enumerateOpenCodeModelInfo()).map((model) => `${model.id}${model.variants.length ? ` [${model.variants.join(", ")}]` : " [no variants]"}`).join("\n")
@@ -2629,7 +2655,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (!roleChoice) return;
       const role = roleChoice === "custom" ? (await ctx.ui.input("Custom role", "reviewer"))?.trim() || "worker" : roleChoice;
       const preset = config.roles[role];
-      const harness = await ctx.ui.select("Harness", preferredFirst([...HARNESSES], preset?.harness || config.defaultHarness)) as Harness | undefined;
+      const availableHarnesses = enabledHarnesses(config);
+      if (availableHarnesses.length === 0) {
+        ctx.ui.notify("No harnesses are enabled. Enable one in /agents-config first.", "error");
+        return;
+      }
+      const harness = await ctx.ui.select("Harness", preferredFirst(availableHarnesses, preset?.harness || config.defaultHarness)) as Harness | undefined;
       if (!harness) return;
       const profiles = Object.entries(config.profiles).filter(([, profile]) => profile.harness === harness).map(([name]) => name);
       const profile = await ctx.ui.select("Launch profile", preferredFirst(profiles, preset?.profile || config.defaultProfiles[harness]));
@@ -2684,6 +2715,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const draft = structuredClone(config);
       while (true) {
         const choice = await ctx.ui.select("Agent Fleet defaults", [
+          "Harnesses",
           "Default harness",
           "Pi defaults",
           "Codex defaults",
@@ -2703,8 +2735,25 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           ctx.ui.notify(`Saved Agent Fleet defaults to ${configPath}`, "info");
           return;
         }
+        if (choice === "Harnesses") {
+          const harness = await ctx.ui.select("Harness", [...HARNESSES]) as Harness | undefined;
+          if (!harness) continue;
+          const currentlyEnabled = !draft.disabledHarnesses.includes(harness);
+          const state = await ctx.ui.select(
+            `${harness} harness`,
+            preferredFirst(["enabled", "disabled"], currentlyEnabled ? "enabled" : "disabled"),
+          );
+          if (state === "enabled") draft.disabledHarnesses = draft.disabledHarnesses.filter((candidate) => candidate !== harness);
+          if (state === "disabled" && currentlyEnabled) draft.disabledHarnesses.push(harness);
+          continue;
+        }
         if (choice === "Default harness") {
-          const harness = await ctx.ui.select("Default harness", preferredFirst([...HARNESSES], draft.defaultHarness)) as Harness | undefined;
+          const availableHarnesses = enabledHarnesses(draft);
+          if (availableHarnesses.length === 0) {
+            ctx.ui.notify("Enable at least one harness before choosing a default.", "error");
+            continue;
+          }
+          const harness = await ctx.ui.select("Default harness", preferredFirst(availableHarnesses, draft.defaultHarness)) as Harness | undefined;
           if (harness) draft.defaultHarness = harness;
           continue;
         }
@@ -2759,7 +2808,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const roleName = await ctx.ui.select("Role preset", Object.keys(draft.roles).sort());
           if (!roleName) continue;
           const role = draft.roles[roleName];
-          const harness = await ctx.ui.select("Role harness", preferredFirst([...HARNESSES], role.harness || draft.defaultHarness)) as Harness | undefined;
+          const availableHarnesses = enabledHarnesses(draft);
+          if (availableHarnesses.length === 0) {
+            ctx.ui.notify("Enable at least one harness before editing role presets.", "error");
+            continue;
+          }
+          const harness = await ctx.ui.select("Role harness", preferredFirst(availableHarnesses, role.harness || draft.defaultHarness)) as Harness | undefined;
           if (!harness) continue;
           const profiles = Object.entries(draft.profiles).filter(([, profile]) => profile.harness === harness).map(([name]) => name);
           const profile = await ctx.ui.select("Role profile", preferredFirst(profiles, role.profile || draft.defaultProfiles[harness]));

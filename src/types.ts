@@ -190,6 +190,8 @@ export interface RoutingConfig {
 export type SupervisionConfig = Record<string, never>;
 
 export interface OrchestratorConfig {
+  /** Harnesses excluded from automatic routing and explicit worker creation. */
+  disabledHarnesses: Harness[];
   defaultHarness: Harness;
   defaultProfiles: Partial<Record<Harness, string>>;
   defaultModels: Partial<Record<Harness, string>>;
