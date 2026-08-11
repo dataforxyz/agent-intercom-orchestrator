@@ -27,6 +27,19 @@ test("empty RPC bootstrap detection defers only known-empty discovery sessions",
   assert.equal(isEmptyRpcBootstrapSession(context("rpc")), false, "partial older hosts must preserve eager initialization");
 });
 
+test("harness configuration warnings cover unusable defaults and role presets", async () => {
+  const { harnessConfigurationWarnings } = await import("../src/index.ts");
+  const { DEFAULT_CONFIG } = await import("../src/config.ts");
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.disabledHarnesses = ["pi", "codex", "claude", "opencode"];
+  const warnings = harnessConfigurationWarnings(config);
+  assert.match(warnings.join("\n"), /No harnesses will be enabled/);
+  assert.match(warnings.join("\n"), /default harness 'pi' will be disabled/);
+  assert.match(warnings.join("\n"), /Role presets will reference disabled harnesses/);
+  assert.match(warnings.join("\n"), /advisor \(pi\)/);
+  assert.match(warnings.join("\n"), /builder \(codex\)/);
+});
+
 test("empty RPC provider probes register tools without starting reconciliation", async () => {
   const lifecycle = new Map<string, (...args: any[]) => any>();
   let execCalls = 0;
@@ -1691,6 +1704,7 @@ test("extension registers discovery tools and interactive configuration commands
     const lifecycle = new Map<string, (...args: any[]) => any>();
     const tools = new Map<string, any>();
     const commands = new Map<string, any>();
+    const notifications: Array<{ message: string; level?: string }> = [];
     const selections = ["Harnesses", "opencode", "disabled", "Save and close"];
     const pi: any = {
       on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
@@ -1706,7 +1720,7 @@ test("extension registers discovery tools and interactive configuration commands
       sessionManager: { getSessionId: () => "extension-test", getSessionFile: () => undefined },
       ui: {
         setStatus() {},
-        notify() {},
+        notify(message: string, level?: string) { notifications.push({ message, level }); },
         async select() { return selections.shift(); },
         async input() { return undefined; },
         async editor() { return undefined; },
@@ -1787,6 +1801,16 @@ test("extension registers discovery tools and interactive configuration commands
     const disabledRoute = await tools.get("agent_fleet").execute("disabled-route-test", { action: "route", harness: "opencode" }, new AbortController().signal, () => {}, ctx);
     assert.match(disabledRoute.content[0].text, /Explicit harness: none/);
     assert.match(disabledRoute.content[0].text, /disabled by configuration/);
+    await assert.rejects(
+      tools.get("agent_fleet").execute("disabled-spawn-test", { action: "spawn", harness: "opencode", task: "must not launch" }, new AbortController().signal, () => {}, ctx),
+      /excluded because the harness is disabled by configuration.*enable the requested harness in \/agents-config/,
+    );
+    await assert.rejects(
+      tools.get("agent_fleet").execute("disabled-models-test", { action: "models", harness: "opencode" }, new AbortController().signal, () => {}, ctx),
+      /Harness opencode is disabled in \/agents-config/,
+    );
+    await commands.get("agents-models").handler("opencode", ctx);
+    assert.deepEqual(notifications.at(-1), { message: "Harness opencode is disabled in /agents-config.", level: "error" });
 
     await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
   } finally {

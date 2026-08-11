@@ -163,6 +163,23 @@ test("default writes preserve an explicit default-valued profile order with a cu
   }
 });
 
+test("re-enabling every harness removes disabledHarnesses from the saved defaults", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "orchestrator-policy-reenable-harnesses-"));
+  const path = join(directory, "config.json");
+  try {
+    await writeFile(path, JSON.stringify({ disabledHarnesses: ["opencode"], futureTopLevel: true }));
+    const config = await readConfig(path);
+    config.disabledHarnesses = [];
+    await writeConfigDefaults(path, config);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(Object.hasOwn(raw, "disabledHarnesses"), false);
+    assert.equal(raw.futureTopLevel, true);
+    assert.deepEqual((await readConfig(path)).disabledHarnesses, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("full config writes round-trip all policy fields", async () => {
   const directory = await mkdtemp(join(tmpdir(), "orchestrator-policy-full-write-"));
   const path = join(directory, "config.json");

@@ -538,6 +538,21 @@ function assertHarnessEnabled(config: Pick<OrchestratorConfig, "disabledHarnesse
   }
 }
 
+export function harnessConfigurationWarnings(
+  config: Pick<OrchestratorConfig, "disabledHarnesses" | "defaultHarness" | "roles" | "profiles">,
+): string[] {
+  const disabled = new Set(config.disabledHarnesses);
+  const warnings: string[] = [];
+  if (enabledHarnesses(config).length === 0) warnings.push("No harnesses will be enabled; new coworkers cannot be created.");
+  if (disabled.has(config.defaultHarness)) warnings.push(`The default harness '${config.defaultHarness}' will be disabled.`);
+  const disabledRoles = Object.entries(config.roles).flatMap(([name, role]) => {
+    const harness = role.harness ?? (role.profile ? config.profiles[role.profile]?.harness : undefined);
+    return harness && disabled.has(harness) ? [`${name} (${harness})`] : [];
+  });
+  if (disabledRoles.length) warnings.push(`Role presets will reference disabled harnesses: ${disabledRoles.join(", ")}.`);
+  return warnings;
+}
+
 function configuredModels(config: OrchestratorConfig, harness: Harness): string[] {
   const models = new Set<string>();
   const direct = normalizeModelForHarness(harness, config.defaultModels[harness], config.routing.modelRouting);
@@ -1295,7 +1310,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const resolveSpawn = async (params: FleetParams, ctx: ExtensionContext): Promise<ResolvedSpawn> => {
     const routed = await resolveRouting(params);
     const { role, harness, profileName, permissionProfileName } = routed;
-    if (!harness) throw new Error(`${routed.decision.reasons[0]}. Use action=route to inspect exclusions or pass an explicit harness/profile/model.`);
+    if (!harness) {
+      const reason = routed.decision.reasons.join("; ");
+      const hint = routed.decision.automatic
+        ? "Use action=route to inspect exclusions or pass an explicit enabled harness/profile/model."
+        : "Use action=route to inspect exclusions or enable the requested harness in /agents-config.";
+      throw new Error(`${reason}. ${hint}`);
+    }
     const task = params.task?.trim();
     if (!task) throw new Error("spawn requires task");
     if (!profileName) throw new Error(`No default profile configured for ${harness}`);
@@ -2728,6 +2749,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         ]);
         if (!choice || choice === "Cancel") return;
         if (choice === "Save and close") {
+          const warnings = harnessConfigurationWarnings(draft);
+          if (warnings.length && !(await ctx.ui.confirm("Save potentially unusable harness configuration?", warnings.join("\n")))) continue;
           await writeConfigDefaults(configPath, draft);
           config = draft;
           modelCache.clear();
