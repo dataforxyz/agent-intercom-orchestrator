@@ -662,6 +662,32 @@ test("the mutation guard serializes lock creation and normal release", async (co
   await assert.rejects(access(`${path}.lock`), { code: "ENOENT" });
 });
 
+test("owned lock release outwaits the normal acquisition timeout", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "boss-store-lock-release-"));
+  context.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const path = join(root, "controller.json");
+  const guardPath = `${path}.lock.reclaim`;
+  const store = new BossStore(path, { now: () => LATER, lockPollMs: 2, lockTimeoutMs: 25 });
+  await store.create(baseState());
+
+  let entered!: () => void;
+  const callbackEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let releaseExternalGuard!: () => Promise<void>;
+  let settled = false;
+  const transaction = store.transaction(1, async (draft) => {
+    appendAudit(draft, "audit-delayed-release");
+    releaseExternalGuard = await acquireKernelFileLock(guardPath, 1_000);
+    entered();
+  }).finally(() => { settled = true; });
+  await callbackEntered;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(settled, false);
+  await access(`${path}.lock`);
+  await releaseExternalGuard();
+  await transaction;
+  await assert.rejects(access(`${path}.lock`), { code: "ENOENT" });
+});
+
 test("corrupt state is copied to deterministic quarantine, preserved, and poisoned read-only", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "boss-store-corrupt-"));
   context.after(async () => { await import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })); });

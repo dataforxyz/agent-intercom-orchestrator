@@ -27,6 +27,27 @@ function waitForLine(stream: NodeJS.ReadableStream, expected: string): Promise<v
   });
 }
 
+test("kernel mutation lock can wait without a timeout for correctness-critical release", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kernel-file-lock-unbounded-"));
+  const path = join(root, "store.lock.reclaim");
+  try {
+    const releaseHolder = await acquireKernelFileLock(path, 1_000);
+    let acquired = false;
+    const waiting = acquireKernelFileLock(path).then((release) => {
+      acquired = true;
+      return release;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(acquired, false);
+    await releaseHolder();
+    const releaseWaiting = await waiting;
+    assert.equal(acquired, true);
+    await releaseWaiting();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("kernel mutation lock survives a stale on-disk file and releases after holder SIGKILL", async () => {
   const root = await mkdtemp(join(tmpdir(), "kernel-file-lock-"));
   const path = join(root, "store.lock.reclaim");

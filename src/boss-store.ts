@@ -423,9 +423,9 @@ export class BossStore {
     return detachedBossSnapshot(loaded.state);
   }
 
-  private async acquireLockMutationGuard(startedAt: number): Promise<() => Promise<void>> {
-    const remainingMs = this.lockTimeoutMs - (Date.now() - startedAt);
-    if (remainingMs <= 0) throw new BossStoreError(`Timed out waiting for Boss Controller lock mutation guard ${this.lockPath}.reclaim`);
+  private async acquireLockMutationGuard(startedAt?: number): Promise<() => Promise<void>> {
+    const remainingMs = startedAt === undefined ? undefined : this.lockTimeoutMs - (Date.now() - startedAt);
+    if (remainingMs !== undefined && remainingMs <= 0) throw new BossStoreError(`Timed out waiting for Boss Controller lock mutation guard ${this.lockPath}.reclaim`);
     try {
       return await acquireKernelFileLock(`${this.lockPath}.reclaim`, remainingMs);
     } catch (error) {
@@ -487,7 +487,9 @@ export class BossStore {
         return {
           token,
           release: async () => {
-            const releaseMutationGuard = await this.acquireLockMutationGuard(Date.now());
+            // Releasing an owned lock must not time out: abandoning it while this
+            // process remains alive would make every future caller treat it as live.
+            const releaseMutationGuard = await this.acquireLockMutationGuard();
             try {
               let current: { token?: unknown };
               try {

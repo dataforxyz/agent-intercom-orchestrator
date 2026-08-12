@@ -427,6 +427,28 @@ test("CAS fences stale writers and a new incarnation advances workerGeneration",
   }
 });
 
+test("owned worker lock release uses an unbounded mutation guard wait", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-v2-release-guard-"));
+  const path = join(root, "workers.json");
+  try {
+    const store = new WorkerStore(path);
+    const instrumented = store as unknown as {
+      acquireLockMutationGuard(lockPath: string, timeoutMs?: number): Promise<() => Promise<void>>;
+    };
+    const original = instrumented.acquireLockMutationGuard.bind(store);
+    const timeouts: Array<number | undefined> = [];
+    instrumented.acquireLockMutationGuard = async (lockPath, timeoutMs) => {
+      timeouts.push(timeoutMs);
+      return await original(lockPath, timeoutMs);
+    };
+    await store.compareAndSwap(0, () => undefined);
+    assert.deepEqual(timeouts, [10_000, undefined]);
+    await assert.rejects(access(`${path}.lock`), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("concurrent stores reclaim one dead directory lock without deleting a replacement", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-store-v2-stale-lock-"));
   const path = join(root, "workers.json");
