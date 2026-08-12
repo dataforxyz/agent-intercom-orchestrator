@@ -26,7 +26,9 @@ import { acquireKernelFileLock } from "./file-lock.ts";
 const CURRENT_VERSION = 3 as const;
 const DEFAULT_LEGACY_STOPPING_SETTLE_MS = 120_000;
 const LOCK_STALE_MS = 120_000;
-const LOCK_ATTEMPTS = 500;
+const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
+const LOCK_RETRY_MIN_MS = 20;
+const LOCK_RETRY_JITTER_MS = 20;
 
 const LEGACY_STATES = new Set<LegacyWorkerState>([
   "provisioning", "running", "idle", "needs_attention", "completed", "failed", "stopping", "stopped", "lost",
@@ -85,6 +87,7 @@ export interface WorkerStoreOptions {
   resolveLegacyManagerOwner?: (worker: Readonly<WorkerRecord>) => ManagerOwnerBinding;
   now?: () => number;
   faultInjector?: (point: WorkerStoreFaultPoint, context: WorkerStoreFaultContext) => void | Promise<void>;
+  lockTimeoutMs?: number;
 }
 
 export interface WorkerStoreCommit<T> {
@@ -765,7 +768,7 @@ interface HeldWriteContext {
 export class WorkerStore {
   private queue: Promise<unknown> = Promise.resolve();
   private poisoned?: WorkerStoreQuarantine;
-  private readonly options: Required<Pick<WorkerStoreOptions, "legacyStoppingSettleMs" | "legacyManagerContext" | "now">> & WorkerStoreOptions;
+  private readonly options: Required<Pick<WorkerStoreOptions, "legacyStoppingSettleMs" | "legacyManagerContext" | "now" | "lockTimeoutMs">> & WorkerStoreOptions;
   private readonly supportedFeatures: Set<string>;
   readonly path: string;
 
@@ -776,9 +779,13 @@ export class WorkerStore {
       legacyStoppingSettleMs: options.legacyStoppingSettleMs ?? DEFAULT_LEGACY_STOPPING_SETTLE_MS,
       legacyManagerContext: options.legacyManagerContext ?? "pi",
       now: options.now ?? Date.now,
+      lockTimeoutMs: options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
     };
     if (!Number.isSafeInteger(this.options.legacyStoppingSettleMs) || this.options.legacyStoppingSettleMs < 0) {
       throw new TypeError("legacyStoppingSettleMs must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(this.options.lockTimeoutMs) || this.options.lockTimeoutMs < 1) {
+      throw new TypeError("lockTimeoutMs must be a positive safe integer");
     }
     if (!MANAGER_CONTEXTS.has(this.options.legacyManagerContext)) throw new TypeError("legacyManagerContext must be pi, opencode, or headless_cli");
     for (const feature of options.supportedFeatures ?? []) {
@@ -979,8 +986,20 @@ export class WorkerStore {
     const lockPath = `${this.path}.lock`;
     const ownerPath = `${lockPath}/owner.json`;
     const token = randomUUID();
-    for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
-      const releaseGuard = await this.acquireLockMutationGuard(lockPath, LOCK_ATTEMPTS * 20);
+    const startedAt = Date.now();
+    let lastOwnerPid: number | undefined;
+    let lastOwnerAlive: boolean | undefined;
+    let lastLockAgeMs: number | undefined;
+    while (Date.now() - startedAt < this.options.lockTimeoutMs) {
+      const remainingMs = this.options.lockTimeoutMs - (Date.now() - startedAt);
+      if (remainingMs <= 0) break;
+      let releaseGuard: () => Promise<void>;
+      try {
+        releaseGuard = await this.acquireLockMutationGuard(lockPath, remainingMs);
+      } catch (error) {
+        if (Date.now() - startedAt >= this.options.lockTimeoutMs) break;
+        throw error;
+      }
       let acquired = false;
       try {
         try {
@@ -1005,9 +1024,12 @@ export class WorkerStore {
             } catch {
               // No creator can be writing while this mutation guard is held; age is the fail-closed fallback for a prior crash.
             }
+            lastOwnerPid = ownerPid;
+            lastOwnerAlive = ownerPid === undefined ? undefined : isProcessAlive(ownerPid);
+            lastLockAgeMs = Math.max(0, this.options.now() - lockStat.mtimeMs);
             const stale = ownerPid !== undefined
-              ? !isProcessAlive(ownerPid)
-              : this.options.now() - lockStat.mtimeMs > LOCK_STALE_MS;
+              ? !lastOwnerAlive
+              : lastLockAgeMs > LOCK_STALE_MS;
             if (stale) {
               await rm(lockPath, { recursive: true, force: true });
               await this.syncDirectory(lockPath);
@@ -1034,9 +1056,18 @@ export class WorkerStore {
           }
         };
       }
-      await delay(20);
+      const retryBudgetMs = this.options.lockTimeoutMs - (Date.now() - startedAt);
+      if (retryBudgetMs <= 0) break;
+      const retryMs = LOCK_RETRY_MIN_MS + Math.floor(Math.random() * (LOCK_RETRY_JITTER_MS + 1));
+      await delay(Math.min(retryMs, retryBudgetMs));
     }
-    throw new WorkerStoreError(`Timed out waiting for worker state lock ${lockPath}`, "WORKER_STORE_LOCK_TIMEOUT");
+    const diagnostics = [
+      `timeoutMs=${this.options.lockTimeoutMs}`,
+      lastOwnerPid === undefined ? "ownerPid=unknown" : `ownerPid=${lastOwnerPid}`,
+      lastOwnerAlive === undefined ? "ownerAlive=unknown" : `ownerAlive=${String(lastOwnerAlive)}`,
+      lastLockAgeMs === undefined ? "lockAgeMs=unknown" : `lockAgeMs=${Math.round(lastLockAgeMs)}`,
+    ].join(", ");
+    throw new WorkerStoreError(`Timed out waiting for worker state lock ${lockPath} (${diagnostics})`, "WORKER_STORE_LOCK_TIMEOUT");
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {

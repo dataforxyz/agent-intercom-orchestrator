@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add an explicit absolute Boss create `sourcePath` for worktree-provisioned runs, so a stable umbrella-level Controller can select and Git-verify the intended clean source repository while Boss creates a fresh run-owned canonical worktree and never implicitly attaches the source or another existing worktree.
+- Make typed Boss action dispatch ignore strict-schema placeholders that are irrelevant to `doctor`, `plan`, and status-all, rather than reconstructing interactive command arguments from every populated field; action-specific authority fields remain validated only for their owning action.
+- Make the global worker registry more resilient under many concurrent Pi managers: extend bounded acquisition from 10 to 30 seconds, add randomized retry jitter to reduce synchronized contention, and include the last observed owner PID, liveness, and lock age in timeout errors.
 - Prevent live-process worker and Boss state lock leaks when the short-lived mutation guard is contended: normal acquisition remains bounded, while correctness-critical owned-lock release now waits for the kernel guard instead of abandoning a lock that stale recovery cannot reclaim.
 - Improve harness-toggle follow-through: disabled explicit spawns now explain the actual exclusion, `/agents-config` warns before saving no-enabled/disabled-default/disabled-role configurations, the bundled Agent Skill documents `disabledHarnesses`, and tests cover re-enabling, model browsing, spawn errors, and non-OpenCode automatic exclusion.
 - Add `/agents-config` harness enable/disable controls backed by `disabledHarnesses`; disabled harnesses are removed from interactive choices and excluded from automatic routing, explicit profile/model/harness selection, model browsing, and variant lookup.

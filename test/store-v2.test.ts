@@ -442,11 +442,41 @@ test("owned worker lock release uses an unbounded mutation guard wait", async ()
       return await original(lockPath, timeoutMs);
     };
     await store.compareAndSwap(0, () => undefined);
-    assert.deepEqual(timeouts, [10_000, undefined]);
+    assert.deepEqual(timeouts, [30_000, undefined]);
     await assert.rejects(access(`${path}.lock`), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("worker lock acquisition timeout reports the live owner and lock age", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-v2-timeout-diagnostics-"));
+  const path = join(root, "workers.json");
+  const lockPath = `${path}.lock`;
+  try {
+    await mkdir(lockPath, { mode: 0o700 });
+    await writeFile(`${lockPath}/owner.json`, `${JSON.stringify({ pid: process.pid, token: "live-owner", createdAt: Date.now() })}\n`);
+    const store = new WorkerStore(path, { lockTimeoutMs: 50 });
+    await assert.rejects(
+      store.compareAndSwap(0, () => undefined),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Timed out waiting for worker state lock/);
+        assert.match(error.message, /timeoutMs=50/);
+        assert.match(error.message, new RegExp(`ownerPid=${process.pid}`));
+        assert.match(error.message, /ownerAlive=true/);
+        assert.match(error.message, /lockAgeMs=\d+/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("worker lock timeout must be a positive safe integer", () => {
+  assert.throws(() => new WorkerStore("/tmp/workers.json", { lockTimeoutMs: 0 }), /lockTimeoutMs must be a positive safe integer/);
+  assert.throws(() => new WorkerStore("/tmp/workers.json", { lockTimeoutMs: 1.5 }), /lockTimeoutMs must be a positive safe integer/);
 });
 
 test("concurrent stores reclaim one dead directory lock without deleting a replacement", async () => {
