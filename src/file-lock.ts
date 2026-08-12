@@ -23,11 +23,11 @@ function waitForExit(child: ChildProcessWithoutNullStreams): Promise<{ code: num
  * this process keeps the helper's stdin pipe open. Parent exit closes the last
  * writer, `cat` observes EOF, and flock exits.
  */
-export async function acquireKernelFileLock(path: string, timeoutMs: number): Promise<() => Promise<void>> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new KernelFileLockError("Kernel file lock timeout must be positive");
+export async function acquireKernelFileLock(path: string, timeoutMs?: number): Promise<() => Promise<void>> {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw new KernelFileLockError("Kernel file lock timeout must be positive");
   const child = spawn(FLOCK_PATH, [
     "--exclusive",
-    "--wait", (timeoutMs / 1_000).toFixed(3),
+    ...(timeoutMs === undefined ? [] : ["--wait", (timeoutMs / 1_000).toFixed(3)]),
     path,
     SHELL_PATH,
     "-c", `printf 'READY\\n'; exec ${CAT_PATH}`,

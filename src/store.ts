@@ -966,9 +966,9 @@ export class WorkerStore {
     }
   }
 
-  private async acquireLockMutationGuard(lockPath: string): Promise<() => Promise<void>> {
+  private async acquireLockMutationGuard(lockPath: string, timeoutMs?: number): Promise<() => Promise<void>> {
     try {
-      return await acquireKernelFileLock(`${lockPath}.reclaim`, LOCK_ATTEMPTS * 20);
+      return await acquireKernelFileLock(`${lockPath}.reclaim`, timeoutMs);
     } catch (error) {
       throw new WorkerStoreError(`Could not acquire worker state lock mutation guard ${lockPath}.reclaim: ${errorText(error)}`, "WORKER_STORE_LOCK_TIMEOUT");
     }
@@ -980,7 +980,7 @@ export class WorkerStore {
     const ownerPath = `${lockPath}/owner.json`;
     const token = randomUUID();
     for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
-      const releaseGuard = await this.acquireLockMutationGuard(lockPath);
+      const releaseGuard = await this.acquireLockMutationGuard(lockPath, LOCK_ATTEMPTS * 20);
       let acquired = false;
       try {
         try {
@@ -1021,6 +1021,8 @@ export class WorkerStore {
       }
       if (acquired) {
         return async () => {
+          // Releasing an owned lock must not time out: abandoning it while this
+          // process remains alive would make every future caller treat it as live.
           const releaseMutationGuard = await this.acquireLockMutationGuard(lockPath);
           try {
             const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { token?: unknown };
