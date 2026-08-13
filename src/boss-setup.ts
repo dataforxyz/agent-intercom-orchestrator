@@ -17,13 +17,15 @@ interface BossResourceDefinition {
   packageName: string;
   source: string;
   repositoryPath: string;
+  legacyPackageNames?: readonly string[];
+  legacyRepositoryPaths?: readonly string[];
   extensionPath: string;
   unpublished?: boolean;
 }
 
 const REQUIRED_RESOURCES: readonly BossResourceDefinition[] = [
   { id: "intercom-pi", packageName: "@dataforxyz/agent-intercom-pi", source: "git:github.com/dataforxyz/agent-intercom-pi", repositoryPath: "dataforxyz/agent-intercom-pi", extensionPath: "index.ts" },
-  { id: "orchestrator", packageName: "@dataforxyz/agent-intercom-orchestrator", source: "git:github.com/dataforxyz/agent-intercom-orchestrator", repositoryPath: "dataforxyz/agent-intercom-orchestrator", extensionPath: "src/index.ts" },
+  { id: "orchestrator", packageName: "@dataforxyz/orcboss", source: "git:github.com/dataforxyz/orcboss", repositoryPath: "dataforxyz/orcboss", legacyPackageNames: ["@dataforxyz/agent-intercom-orchestrator"], legacyRepositoryPaths: ["dataforxyz/agent-intercom-orchestrator"], extensionPath: "src/index.ts" },
   { id: "ralph", packageName: "pi-extensions", source: "git:github.com/dataforxyz/pi-extensions", repositoryPath: "dataforxyz/pi-extensions", extensionPath: "pi-ralph-wiggum/index.ts" },
   { id: "return-on", packageName: "pi-return-on", source: "git:github.com/dataforxyz/pi-return-on", repositoryPath: "dataforxyz/pi-return-on", extensionPath: "src/index.ts", unpublished: true },
 ] as const;
@@ -148,8 +150,9 @@ function sourceRepository(source: string): string | undefined {
 }
 
 function sourceMatches(entry: BossPackageSetting, definition: BossResourceDefinition): boolean {
-  if (sourceRepository(entry.source) === definition.repositoryPath) return true;
-  return entry.source.includes(definition.packageName);
+  const repository = sourceRepository(entry.source);
+  if (repository === definition.repositoryPath || definition.legacyRepositoryPaths?.includes(repository ?? "")) return true;
+  return [definition.packageName, ...(definition.legacyPackageNames ?? [])].some((name) => entry.source.includes(name));
 }
 
 function sourcePinned(source: string): boolean {

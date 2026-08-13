@@ -1,6 +1,6 @@
 {
-  "name": "@dataforxyz/agent-intercom-orchestrator",
-  "version": "0.10.0",
+  "name": "@dataforxyz/orcboss",
+  "version": "0.11.0",
   "description": "Pi extension for creating and managing independent Agent Intercom coworkers across Pi, Codex, Claude Code, and OpenCode",
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -12,9 +12,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dataforxyz/agent-intercom-orchestrator.git"
+    "url": "git+https://github.com/dataforxyz/orcboss.git"
   },
-  "homepage": "https://github.com/dataforxyz/agent-intercom-orchestrator#readme",
+  "homepage": "https://github.com/dataforxyz/orcboss#readme",
   "keywords": [
     "pi-package",
     "pi",

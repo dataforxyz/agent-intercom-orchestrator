@@ -4,7 +4,7 @@ Status: implementation-ready after independent `claude/claude-fable-5` max revie
 
 ## Release target
 
-Ship trusted-local Boss as a supported surface of the public `@dataforxyz/agent-intercom-orchestrator` Pi package, using only Pi's public package, extension, command, tool, model-registry, UI, and settings surfaces. No Pi internal patch is required.
+Ship trusted-local Boss as a supported surface of the public `@dataforxyz/orcboss` Pi package, using only Pi's public package, extension, command, tool, model-registry, UI, and settings surfaces. No Pi internal patch is required.
 
 Every setup, diagnostic, status, proof, and documentation surface must retain this statement:
 

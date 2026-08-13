@@ -38,13 +38,13 @@ test("Boss inventory recognizes the global four-resource stack and monorepo Ralp
   try {
     await Promise.all([
       resource(agentDir, "agent-intercom-pi", "@dataforxyz/agent-intercom-pi", "index.ts"),
-      resource(agentDir, "agent-intercom-orchestrator", "@dataforxyz/agent-intercom-orchestrator", "src/index.ts"),
+      resource(agentDir, "orcboss", "@dataforxyz/orcboss", "src/index.ts"),
       resource(agentDir, "pi-extensions", "pi-extensions", "pi-ralph-wiggum/index.ts"),
       resource(agentDir, "pi-return-on", "pi-return-on", "src/index.ts"),
     ]);
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [
       "git:github.com/dataforxyz/agent-intercom-pi",
-      "git:github.com/dataforxyz/agent-intercom-orchestrator",
+      "git:github.com/dataforxyz/orcboss",
       { source: "git:github.com/dataforxyz/pi-extensions", extensions: ["pi-ralph-wiggum/index.ts"] },
       "git:github.com/dataforxyz/pi-return-on",
     ] }));
@@ -123,7 +123,7 @@ test("Boss setup apply installs only missing resources and preserves unrelated c
     await writeFile(configPath, JSON.stringify({ custom: { keep: true }, boss: { future: "keep" } }));
     const definitions = {
       "git:github.com/dataforxyz/agent-intercom-pi": ["agent-intercom-pi", "@dataforxyz/agent-intercom-pi", "index.ts"],
-      "git:github.com/dataforxyz/agent-intercom-orchestrator": ["agent-intercom-orchestrator", "@dataforxyz/agent-intercom-orchestrator", "src/index.ts"],
+      "git:github.com/dataforxyz/orcboss": ["orcboss", "@dataforxyz/orcboss", "src/index.ts"],
       "git:github.com/dataforxyz/pi-extensions": ["pi-extensions", "pi-extensions", "pi-ralph-wiggum/index.ts"],
       "git:github.com/dataforxyz/pi-return-on": ["pi-return-on", "pi-return-on", "src/index.ts"],
     } as const;
@@ -271,7 +271,7 @@ test("packed-style setup launcher emits stable JSON and apply requires onboardin
     assert.equal(applied.status, 3);
     assert.match(applied.stderr, /BOSS_SETUP_ONBOARDING_REQUIRED/);
 
-    const installedRoot = join(root, "project", "node_modules", "@dataforxyz", "agent-intercom-orchestrator");
+    const installedRoot = join(root, "project", "node_modules", "@dataforxyz", "orcboss");
     await mkdir(installedRoot, { recursive: true });
     await cp(new URL("../src", import.meta.url), join(installedRoot, "src"), { recursive: true });
     const installedLauncher = join(installedRoot, "src", "boss-setup-cli.mjs");

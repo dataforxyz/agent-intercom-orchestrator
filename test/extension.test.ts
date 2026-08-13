@@ -122,7 +122,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     const returnOnExtension = join(agentDir, "git", "github.com", "dataforxyz", "pi-return-on", "src", "index.ts");
     const resources = [
       [dirname(intercomExtension), "@dataforxyz/agent-intercom-pi"],
-      [join(agentDir, "git", "github.com", "dataforxyz", "agent-intercom-orchestrator"), "@dataforxyz/agent-intercom-orchestrator"],
+      [join(agentDir, "git", "github.com", "dataforxyz", "orcboss"), "@dataforxyz/orcboss"],
       [join(agentDir, "git", "github.com", "dataforxyz", "pi-extensions"), "pi-extensions"],
       [join(agentDir, "git", "github.com", "dataforxyz", "pi-return-on"), "pi-return-on"],
     ] as const;
@@ -145,7 +145,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     }
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [
       "git:github.com/dataforxyz/agent-intercom-pi",
-      "git:github.com/dataforxyz/agent-intercom-orchestrator",
+      "git:github.com/dataforxyz/orcboss",
       { source: "git:github.com/dataforxyz/pi-extensions", extensions: ["pi-ralph-wiggum/index.ts"] },
       "git:github.com/dataforxyz/pi-return-on",
     ] }));

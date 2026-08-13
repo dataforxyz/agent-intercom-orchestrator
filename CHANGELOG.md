@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 - 2026-08-13
 
 - Treat a verified live WorkerStore owner PID as authoritative regardless of lock-directory age, with bounded exponential contender backoff, so long-lived owners never churn through the reclaim guard or risk live-lock recovery attempts.
 - Keep high-volume WorkerStore timing telemetry opt-in behind `AGENT_INTERCOM_ORCHESTRATOR_METRICS=1` instead of writing every operation to the interactive Pi terminal by default.

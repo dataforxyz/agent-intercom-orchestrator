@@ -16,7 +16,7 @@ The orchestrator is a Pi package containing both the `agent_fleet` extension and
 
 ```bash
 pi install npm:@dataforxyz/agent-intercom-pi
-pi install npm:@dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/orcboss
 ```
 
 Use release tags matching the version you intend to run for Git-pinned installs; do not copy the obsolete `v0.9.3` pins from older documentation. Dirty or explicitly pinned Git installs are never replaced automatically.
@@ -134,7 +134,7 @@ The [worker guide](docs/creating-and-supervising-worker-agents.md#install-the-ad
 Pi and OpenCode now use the same worker store and lifecycle implementation. Pi exposes it through the extension tool, scoped footer, and `/agents*` commands. OpenCode exposes it through an opt-in native tool that invokes the packaged `agent-intercom-fleet` CLI.
 
 ```bash
-npm install -g @dataforxyz/agent-intercom-orchestrator
+npm install -g @dataforxyz/orcboss
 
 OPENCODE_INTERCOM_FLEET=1 \
 OPENCODE_INTERCOM_NAME=opencode-manager \

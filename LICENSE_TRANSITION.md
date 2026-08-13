@@ -5,10 +5,10 @@ Public License v3.0 or later (`AGPL-3.0-or-later`) on 2026-07-14.
 
 ## Boundary
 
-- Final MIT commit: [`c6076ee`](https://github.com/dataforxyz/agent-intercom-orchestrator/commit/c6076ee)
-- Final MIT tag: [`mit-final`](https://github.com/dataforxyz/agent-intercom-orchestrator/tree/mit-final)
-- First AGPL commit: [`2785266`](https://github.com/dataforxyz/agent-intercom-orchestrator/commit/2785266)
-- First AGPL tag: [`agpl-transition`](https://github.com/dataforxyz/agent-intercom-orchestrator/tree/agpl-transition)
+- Final MIT commit: [`c6076ee`](https://github.com/dataforxyz/orcboss/commit/c6076ee)
+- Final MIT tag: [`mit-final`](https://github.com/dataforxyz/orcboss/tree/mit-final)
+- First AGPL commit: [`2785266`](https://github.com/dataforxyz/orcboss/commit/2785266)
+- First AGPL tag: [`agpl-transition`](https://github.com/dataforxyz/orcboss/tree/agpl-transition)
 - First versioned AGPL release: `v0.2.0`
 
 The transition is prospective. It does not revoke or alter rights granted for copies

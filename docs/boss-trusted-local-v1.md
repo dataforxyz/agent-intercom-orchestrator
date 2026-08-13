@@ -1,6 +1,6 @@
 # `/boss` V1 — trusted-local orchestration
 
-Status: implementation track approved by the user. Hardened protected authority is deferred to GitHub issue [#29](https://github.com/dataforxyz/agent-intercom-orchestrator/issues/29).
+Status: implementation track approved by the user. Hardened protected authority is deferred to GitHub issue [#29](https://github.com/dataforxyz/orcboss/issues/29).
 
 ## Purpose
 

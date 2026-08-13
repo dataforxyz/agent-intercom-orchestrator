@@ -108,7 +108,7 @@ intercom_list({})
 Install the orchestrator as a Pi package after `agent-intercom-pi`:
 
 ```bash
-pi install npm:@dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/orcboss
 ```
 
 This package loads two resources automatically:
@@ -149,7 +149,7 @@ The important pieces are:
 | Package | Purpose |
 |---|---|
 | [`agent-intercom-pi`](https://github.com/dataforxyz/agent-intercom-pi) | Native Intercom tools, inbound turns, status, and UI |
-| [`agent-intercom-orchestrator`](https://github.com/dataforxyz/agent-intercom-orchestrator) | Owned cross-harness coworker lifecycle, models, effort, defaults, and cleanup |
+| [`agent-intercom-orchestrator`](https://github.com/dataforxyz/orcboss) | Owned cross-harness coworker lifecycle, models, effort, defaults, and cleanup |
 | [`pi-extensions`](https://github.com/dataforxyz/pi-extensions) | Ralph loop plus the selected UI, guidance, recap, and usage extensions |
 | [`pi-return-on`](https://github.com/dataforxyz/pi-return-on) | Wake the manager when a timer, process, file, port, URL, or other condition is ready |
 | [`phone-pi`](https://github.com/a2ajinkya/phone-pi) | Provides the `mobile-persona.ts` extension with `/mobile` and `/default` |
@@ -185,7 +185,7 @@ The following is a portable copy of the package and Return On portion of the man
     "git:github.com/dataforxyz/pi-spend",
     "npm:pi-prompt-template-model",
     "npm:@dataforxyz/agent-intercom-pi",
-    "npm:@dataforxyz/agent-intercom-orchestrator",
+    "npm:@dataforxyz/orcboss",
     "npm:pi-safe-compact",
     "npm:pi-mcp-adapter",
     "git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19",
@@ -217,7 +217,7 @@ pi install git:github.com/dataforxyz/pi-extensions
 pi install git:github.com/dataforxyz/pi-spend
 pi install npm:pi-prompt-template-model
 pi install npm:@dataforxyz/agent-intercom-pi
-pi install npm:@dataforxyz/agent-intercom-orchestrator
+pi install npm:@dataforxyz/orcboss
 pi install npm:pi-safe-compact
 pi install npm:pi-mcp-adapter
 pi install git:github.com/dataforxyz/pi-openai-fast@e0917469c325afceba93fc15e363721539cb9f19
@@ -296,7 +296,7 @@ No wrapper alias is required for ordinary worker sessions. Once both plugins are
 To make one OpenCode session the primary fleet manager, install the orchestrator CLI:
 
 ```bash
-npm install -g @dataforxyz/agent-intercom-orchestrator
+npm install -g @dataforxyz/orcboss
 ```
 
 Start the manager with a stable Intercom identity and explicit fleet opt-in:

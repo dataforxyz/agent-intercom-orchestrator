@@ -38,12 +38,12 @@ export interface HarnessRuntime {
   version?: string;
 }
 
-const ADAPTERS: Array<{ id: AdapterId; packageName: string; repo: string; binary?: "coi" | "cci" }> = [
+const ADAPTERS: Array<{ id: AdapterId; packageName: string; repo: string; legacyPackageNames?: string[]; legacyRepos?: string[]; binary?: "coi" | "cci" }> = [
   { id: "pi", packageName: "@dataforxyz/agent-intercom-pi", repo: "agent-intercom-pi" },
   { id: "codex", packageName: "@dataforxyz/agent-intercom-codex", repo: "agent-intercom-codex", binary: "coi" },
   { id: "claude", packageName: "@dataforxyz/agent-intercom-claude", repo: "agent-intercom-claude", binary: "cci" },
   { id: "opencode", packageName: "@dataforxyz/agent-intercom-opencode", repo: "agent-intercom-opencode" },
-  { id: "orchestrator", packageName: "@dataforxyz/agent-intercom-orchestrator", repo: "agent-intercom-orchestrator" },
+  { id: "orchestrator", packageName: "@dataforxyz/orcboss", repo: "orcboss", legacyPackageNames: ["@dataforxyz/agent-intercom-orchestrator"], legacyRepos: ["agent-intercom-orchestrator"] },
 ];
 
 function shellQuote(value: string): string {
@@ -107,13 +107,21 @@ async function piPackageSources(agentDir: string): Promise<string[]> {
   return Array.isArray(settings?.packages) ? settings.packages.filter((entry: unknown): entry is string => typeof entry === "string") : [];
 }
 
-function sourceMatches(source: string, adapter: { packageName: string; repo: string }): boolean {
-  return source.includes(adapter.packageName) || source.includes(`dataforxyz/${adapter.repo}`);
+function sourceMatches(source: string, adapter: { packageName: string; repo: string; legacyPackageNames?: string[]; legacyRepos?: string[] }): boolean {
+  return [adapter.packageName, ...(adapter.legacyPackageNames ?? [])].some((name) => source.includes(name))
+    || [adapter.repo, ...(adapter.legacyRepos ?? [])].some((repo) => source.includes(`dataforxyz/${repo}`));
 }
 
-function rootFromPiSource(agentDir: string, source: string, adapter: { packageName: string; repo: string }): string | undefined {
-  if (source.startsWith("git:github.com/")) return join(agentDir, "git", "github.com", "dataforxyz", adapter.repo);
-  if (source.startsWith("npm:")) return join(agentDir, "npm", "node_modules", "@dataforxyz", adapter.repo);
+function rootFromPiSource(agentDir: string, source: string, adapter: { packageName: string; repo: string; legacyPackageNames?: string[]; legacyRepos?: string[] }): string | undefined {
+  if (source.startsWith("git:github.com/")) {
+    const repo = [adapter.repo, ...(adapter.legacyRepos ?? [])].find((candidate) => source.includes(`dataforxyz/${candidate}`)) ?? adapter.repo;
+    return join(agentDir, "git", "github.com", "dataforxyz", repo);
+  }
+  if (source.startsWith("npm:")) {
+    const packageName = [adapter.packageName, ...(adapter.legacyPackageNames ?? [])].find((candidate) => source.includes(candidate)) ?? adapter.packageName;
+    const [, scope, name] = /^(?:@([^/]+)\/)?(.+)$/.exec(packageName) ?? [];
+    return scope && name ? join(agentDir, "npm", "node_modules", `@${scope}`, name) : undefined;
+  }
   return undefined;
 }
 

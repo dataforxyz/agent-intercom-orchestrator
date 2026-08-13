@@ -20,11 +20,11 @@ test("adapter inspection preserves Pi and npm-global update sources", async () =
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [
       "git:github.com/dataforxyz/agent-intercom-pi",
-      "npm:@dataforxyz/agent-intercom-orchestrator",
+      "npm:@dataforxyz/orcboss",
     ] }));
     await packageRoot(join(agentDir, "git", "github.com", "dataforxyz", "agent-intercom-pi"), "@dataforxyz/agent-intercom-pi");
-    const orchestratorRoot = join(agentDir, "npm", "node_modules", "@dataforxyz", "agent-intercom-orchestrator");
-    await packageRoot(orchestratorRoot, "@dataforxyz/agent-intercom-orchestrator");
+    const orchestratorRoot = join(agentDir, "npm", "node_modules", "@dataforxyz", "orcboss");
+    await packageRoot(orchestratorRoot, "@dataforxyz/orcboss");
     for (const id of ["codex", "claude", "opencode"]) {
       await packageRoot(join(globalRoot, "@dataforxyz", `agent-intercom-${id}`), `@dataforxyz/agent-intercom-${id}`);
     }
