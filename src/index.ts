@@ -9,7 +9,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_CONFIG, readConfig, resolveProfileCommand, writeConfigDefaults } from "./config.ts";
 import { observeBossCandidateFingerprint } from "./boss-candidate-fingerprint.ts";
-import { BOSS_CREATE_ACCESS_LEVELS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, parseBossRunId, type BossCommandRequest } from "./boss-command.ts";
+import { BOSS_CREATE_ACCESS_LEVELS, BOSS_GIT_TRANSPORT_LEVELS, assertDirectInteractiveBossCommand, bossCreateRequest, parseBossCommand, parseBossRunId, type BossCommandRequest } from "./boss-command.ts";
 import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type BossCreateCapabilityReport } from "./boss-create-capabilities.ts";
 import { cleanupProvisionedBossResource, observeProvisionedBossResource, preserveProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
 import { formatBossReadinessReport, formatBossSetupReport, inspectBossSetup, inspectTrustedLocalBossReadiness } from "./boss-setup.ts";
@@ -2617,7 +2617,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use boss when the user asks the top-level Pi Controller to create or manage a Boss run; do not ask the user to type /boss.",
       "Boss runs use trusted-local advisory scoping, not protected or tamper-proof authority.",
-      "Pass structured create requirements only when the user explicitly requested those worktree, edit, test, or Git transport needs; never infer them from goal text. Strict-schema clients may pass `requirements: null` for non-create actions; null means absent authority and is never a create requirement. When the Controller cwd is not the intended repository, create may use an explicit absolute `sourcePath` only together with a worktree requirement; Boss validates its canonical Git identity and still provisions a fresh run-owned worktree rather than attaching an existing one.",
+      "Pass structured create requirements only when the user explicitly requested those worktree, edit, test, or Git transport needs; never infer them from goal text. Strict-schema clients may pass `requirements: null` for non-create actions, `gitTransport: none` when no remote Git authority is requested, and `testCommand: []` when tests are not requested. When tests are requested, pass the exact authorized project test argv. Null and placeholder values never grant authority. When the Controller cwd is not the intended repository, create may use an explicit absolute `sourcePath` only together with a worktree requirement; Boss validates its canonical Git identity and still provisions a fresh run-owned worktree rather than attaching an existing one.",
       "Boss participants are independent Pi peers using the pre-onboarded Manager, Worker, Scout, and Adversary model/effort choices. Do not describe Boss as a Codex/Claude/OpenCode harness with native subagents, and do not imply per-run model overrides exist.",
       "Use exact bossRunId values returned by boss for status, pause, resume, freeze, unfreeze, proof, approval, rejection, and cancellation.",
     ],
@@ -2631,7 +2631,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           worktree: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required configured access to a Git-verified exact linked worktree." })),
           edit: Type.Optional(Type.Boolean({ description: "Require unambiguously configured Worker workspace edit access." })),
           tests: Type.Optional(Type.Boolean({ description: "Require a concretely probed project test command/toolchain; reports a gap when no exact probe exists." })),
-          gitTransport: Type.Optional(StringEnum(BOSS_CREATE_ACCESS_LEVELS, { description: "Required remote Git transport authority." })),
+          testCommand: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Exact project test argv to probe without executing at create time; requires tests=true. Use [] as a strict-schema placeholder." })),
+          gitTransport: Type.Optional(StringEnum(BOSS_GIT_TRANSPORT_LEVELS, { description: "Required remote Git transport authority. Use none when the run needs only its Controller-provisioned local worktree." })),
         }, { additionalProperties: false, description: "Explicit create-time requirements; identity, configuration, or probe gaps block before run creation." }),
       ])),
       bossRunId: Type.Optional(Type.String({ description: "Exact Boss run id; required except for create and status-all." })),

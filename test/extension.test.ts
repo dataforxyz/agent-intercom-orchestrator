@@ -241,7 +241,10 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     await lifecycle.get("before_agent_start")?.({}, { ...ctx, ui: { ...ctx.ui } });
     assert.equal(execCalls, initializedExecCalls, "fresh per-emission contexts for one session must not repeat orchestration initialization");
     await assert.rejects(lifecycle.get("before_agent_start")?.({}, { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionId: () => "different-controller" } }), /session changed .* before shutdown/);
-    assert.match(JSON.stringify(tools.get("boss").parameters.properties.requirements), /\"type\":\"null\"/, "strict-schema callers need an explicit absence placeholder");
+    const requirementsSchema = JSON.stringify(tools.get("boss").parameters.properties.requirements);
+    assert.match(requirementsSchema, /\"type\":\"null\"/, "strict-schema callers need an explicit absence placeholder");
+    assert.match(requirementsSchema, /\"none\"/, "strict-schema callers need an explicit no-remote Git transport value");
+    assert.match(requirementsSchema, /testCommand/, "test authority needs an exact project command probe");
     const strictPlaceholders = {
       goal: "strict-schema placeholder that must remain inert",
       requirements: null,
@@ -296,7 +299,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
     );
     const created = await tools.get("boss").execute(
       "boss-launch-test",
-      { action: "create", goal: "ship supervised Ralph loops", sourcePath: resources[1][0], requirements: { worktree: "write", edit: true } },
+      { action: "create", goal: "ship supervised Ralph loops", sourcePath: resources[1][0], requirements: { worktree: "write", edit: true, tests: true, testCommand: [process.execPath, "--test"], gitTransport: "none" } },
       new AbortController().signal,
       () => {},
       ctx,
@@ -308,6 +311,7 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       ["worktree-identity", "required", "verified"],
       ["worktree-write", "write", "configured"],
       ["edit", "required", "configured"],
+      ["tests", "required", "verified"],
     ]);
     assert.deepEqual(created.details.gaps, []);
     assert.match(created.content[0].text, /Boss create capability report: ready/);

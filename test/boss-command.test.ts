@@ -54,13 +54,17 @@ test("Boss tool create requirements use only explicit structured fields", () => 
     goal: "implement and verify",
     requirements: { worktree: "write", edit: true, tests: true },
   });
-  assert.deepEqual(bossCreateRequest("inspect only", { edit: false, tests: false }), { action: "create", goal: "inspect only" });
-  assert.deepEqual(bossCreateRequest("provision explicitly", { worktree: "write" }, "  /srv/source/repo  "), { action: "create", goal: "provision explicitly", requirements: { worktree: "write" }, sourcePath: "/srv/source/repo" });
+  assert.deepEqual(bossCreateRequest("inspect only", { edit: false, tests: false, testCommand: [], gitTransport: "none" }), { action: "create", goal: "inspect only" });
+  assert.deepEqual(bossCreateRequest("test explicitly", { tests: true, testCommand: [" npm ", " test "] }), { action: "create", goal: "test explicitly", requirements: { tests: true, testCommand: ["npm", "test"] } });
+  assert.deepEqual(bossCreateRequest("provision explicitly", { worktree: "write", gitTransport: "none" }, "  /srv/source/repo  "), { action: "create", goal: "provision explicitly", requirements: { worktree: "write" }, sourcePath: "/srv/source/repo" });
   assert.throws(() => bossCreateRequest("work", { worktree: "write" }, "relative/repo"), /sourcePath must be absolute/);
   assert.throws(() => bossCreateRequest("work", { edit: true }, "/srv/source/repo"), /sourcePath requires an explicit worktree/);
   assert.throws(() => bossCreateRequest("", { edit: true }), /requires one explicit goal/);
   assert.throws(() => bossCreateRequest("work", ["edit"] as any), /structured object/);
   assert.throws(() => bossCreateRequest("work", { worktree: "execute" } as any), /must be read or write/);
+  assert.throws(() => bossCreateRequest("work", { gitTransport: "execute" } as any), /must be none, read, or write/);
+  assert.throws(() => bossCreateRequest("work", { testCommand: ["npm", "test"] }), /requires tests=true/);
+  assert.throws(() => bossCreateRequest("work", { tests: true, testCommand: [""] }), /argv array of non-empty strings/);
   assert.throws(() => bossCreateRequest("work", { remoteShell: true } as any), /unknown field/);
 });
 
