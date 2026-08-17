@@ -56,23 +56,24 @@ export function buildTrustedLocalBossParticipantPrompt(identity: TrustedLocalBos
   const reporting = identity.role === "manager"
     ? [
       "At the start of every Ralph iteration, call intercom_team and verify the exact Worker and Scout are live and ready for this run.",
-      "Every iteration, send bounded progress nudges to both Worker and Scout with intercom_send; never passively wait for updates.",
-      "Escalation is bounded: after one missing or stale update, nudge the participant; after two consecutive stale checks, report the blocker to the Controller and reassign other unblocked work.",
-      "Integrate evidence, assign the next bounded work, and report a concise team summary to the Controller every iteration.",
+      "Assign bounded slices with a stable assignment token such as assignment:<slice-id>, and require the participant to acknowledge that exact token before treating later status as assignment-aware.",
+      "Send a participant nudge only when its exact assignment acknowledgement or requested evidence is overdue; do not send routine every-iteration nudges after acknowledgement.",
+      "Escalation is bounded: after one overdue acknowledgement or stale requested update, nudge once; after a second consecutive stale check, report one aggregated blocker to the Controller and reassign other unblocked work.",
+      "Do not report routine staffing, individual Scout findings, assignment sends, acknowledgements, or intermediate slice transitions separately to the Controller. Aggregate them into a concise milestone summary only when a bounded slice completes, a decision is required, a blocker changes safe progress, verification fails, or the run reaches a terminal handoff.",
       "After sending nudges, if the next useful step depends on Worker or Scout reports, stop the turn without calling ralph_done. Let the inbound Intercom report wake you, integrate it, then continue; never queue Ralph continuations merely to poll.",
     ]
     : identity.role === "adversary"
       ? [
         "At the start of every Ralph iteration, check exact team identity with intercom_team before reviewing any proof revision.",
-        "Report findings, blockers, and the exact proof revision to the Controller during every productive iteration.",
+        "Report one exact-revision advisory decision to the Controller when review completes, or report immediately only when a blocker or required Controller decision prevents that review; do not send routine iteration updates.",
       ]
       : [
         "At the start of every Ralph iteration, check exact team readiness with intercom_team.",
-        "Report concrete progress, verification evidence, and blockers to the Manager with intercom_send during every iteration.",
-        "Do not wait for a status request before reporting progress.",
+        "Acknowledge each new stable assignment token exactly once to the Manager with intercom_send before starting it, then report concrete completion evidence or a material blocker through the same channel.",
+        "Do not emit routine heartbeat or unchanged-progress messages; send an update when requested evidence is ready, the assignment materially changes state, or safe progress is blocked.",
       ];
   const checklist = identity.role === "manager"
-    ? ["Check exact team liveness and readiness", "Nudge Worker and Scout and review their latest evidence", "Assign or execute the next unblocked work and report to the Controller"]
+    ? ["Check exact team liveness and readiness", "Track exact assignment acknowledgements and review participant evidence", "Assign or execute the next unblocked work and report only milestone, decision, blocker, failure, or terminal summaries to the Controller"]
     : identity.role === "worker"
       ? ["Take the next bounded implementation item", "Verify the change with concrete evidence", "Report progress and blockers to the Manager"]
       : identity.role === "scout"
@@ -94,7 +95,11 @@ export function buildTrustedLocalBossParticipantPrompt(identity: TrustedLocalBos
   return [
     `Immediately start the isolated Ralph loop named ${loopName} with ralph_start.`,
     `Use taskContent exactly as follows: ${JSON.stringify(taskContent)}.`,
-    "Set itemsPerIteration=3, reflectEvery=5, maxIterations=100, and endInstructions to report final evidence and blockers to the Manager and Controller.",
+    identity.role === "manager"
+      ? "Set itemsPerIteration=3, reflectEvery=5, maxIterations=100, and endInstructions to send one aggregated final evidence/blocker handoff to the Controller."
+      : identity.role === "adversary"
+        ? "Set itemsPerIteration=3, reflectEvery=5, maxIterations=100, and endInstructions to send one exact-revision final advisory decision to the Controller."
+        : "Set itemsPerIteration=3, reflectEvery=5, maxIterations=100, and endInstructions to send final evidence and blockers to the Manager only.",
     ...reporting,
     identity.role === "manager"
       ? "After productive work, call ralph_done only when another unblocked iteration should start immediately. When awaiting Worker or Scout reports, stop without ralph_done so inbound Intercom can wake the idle Manager."

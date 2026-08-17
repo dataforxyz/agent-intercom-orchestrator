@@ -366,10 +366,12 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
 
     const managerPrompt = launches.find((args) => args.includes("--setenv=AGENT_INTERCOM_BOSS_ROLE=manager"))!.join("\n");
     assert.match(managerPrompt, /At the start of every Ralph iteration, call intercom_team/);
-    assert.match(managerPrompt, /Every iteration, send bounded progress nudges to both Worker and Scout/);
+    assert.match(managerPrompt, /stable assignment token such as assignment:<slice-id>/);
+    assert.match(managerPrompt, /Aggregate them into a concise milestone summary only when a bounded slice completes/);
     assert.match(managerPrompt, /stop without ralph_done so inbound Intercom can wake the idle Manager/);
     const workerPrompt = launches.find((args) => args.includes("--setenv=AGENT_INTERCOM_BOSS_ROLE=worker"))!.join("\n");
-    assert.match(workerPrompt, /Report concrete progress, verification evidence, and blockers to the Manager/);
+    assert.match(workerPrompt, /Acknowledge each new stable assignment token exactly once to the Manager with intercom_send/);
+    assert.match(workerPrompt, /Do not emit routine heartbeat or unchanged-progress messages/);
     assert.equal(intercomDeliveries.length, 3);
     assert.deepEqual(intercomDeliveries.map((delivery) => delivery.to).sort(), [
       `boss-manager-${suffix}`,

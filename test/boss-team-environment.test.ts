@@ -76,13 +76,21 @@ test("Boss Ralph prompts use deterministic role loops and active bounded supervi
   assert.equal(names.size, 4, "every role must have isolated deterministic loop state");
 
   const manager = buildTrustedLocalBossParticipantPrompt({ bossRunId, role: "manager", controllerTarget }, goal);
-  assert.match(manager, /Every iteration, send bounded progress nudges to both Worker and Scout with intercom_send/);
-  assert.match(manager, /after two consecutive stale checks, report the blocker to the Controller/);
-  assert.match(manager, /report a concise team summary to the Controller every iteration/);
+  assert.match(manager, /stable assignment token such as assignment:<slice-id>/);
+  assert.match(manager, /after a second consecutive stale check, report one aggregated blocker to the Controller/);
+  assert.match(manager, /Aggregate them into a concise milestone summary only when a bounded slice completes/);
+  assert.match(manager, /one aggregated final evidence\/blocker handoff to the Controller/);
+  assert.doesNotMatch(manager, /report a concise team summary to the Controller every iteration/);
+  assert.doesNotMatch(manager, /Every iteration, send bounded progress nudges/);
 
   for (const role of ["worker", "scout"] as const) {
     const prompt = buildTrustedLocalBossParticipantPrompt({ bossRunId, role, controllerTarget }, goal);
-    assert.match(prompt, /Report concrete progress, verification evidence, and blockers to the Manager with intercom_send during every iteration/);
-    assert.match(prompt, /Do not wait for a status request before reporting progress/);
+    assert.match(prompt, /Acknowledge each new stable assignment token exactly once to the Manager with intercom_send/);
+    assert.match(prompt, /Do not emit routine heartbeat or unchanged-progress messages/);
+    assert.match(prompt, /final evidence and blockers to the Manager only/);
   }
+
+  const adversary = buildTrustedLocalBossParticipantPrompt({ bossRunId, role: "adversary", controllerTarget }, goal);
+  assert.match(adversary, /one exact-revision advisory decision to the Controller when review completes/);
+  assert.doesNotMatch(adversary, /during every productive iteration/);
 });
