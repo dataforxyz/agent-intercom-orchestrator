@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { constants, realpathSync } from "node:fs";
-import { access, realpath } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { BossCreateRequirements } from "./boss-command.ts";
 import type { PermissionProfile } from "./types.ts";
@@ -52,6 +52,46 @@ async function canonicalPath(path: string): Promise<string | undefined> {
 
 async function hasAccess(path: string, mode: number): Promise<boolean> {
   return access(path, mode).then(() => true, () => false);
+}
+
+async function resolveExecutable(command: string): Promise<string | undefined> {
+  const candidates = isAbsolute(command)
+    ? [command]
+    : (process.env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join(directory, command));
+  for (const candidate of candidates) {
+    if (await hasAccess(candidate, constants.X_OK)) return canonicalPath(candidate);
+  }
+  return undefined;
+}
+
+async function packageScriptEvidence(cwd: string, command: string[]): Promise<string | undefined> {
+  const executable = command[0]?.split("/").pop();
+  if (!executable || !["npm", "pnpm", "yarn", "bun"].includes(executable)) return undefined;
+  const script = command[1] === "run" ? command[2] : command[1] === "test" ? "test" : undefined;
+  if (!script) return undefined;
+  try {
+    const manifest = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
+    return typeof manifest.scripts?.[script] === "string"
+      ? `package.json defines scripts.${script}`
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function probeTestCommand(cwd: string, command: string[] | undefined): Promise<{ availability: "verified" | "gap"; evidence: string }> {
+  if (!command?.length) return { availability: "gap", evidence: "no exact project test argv was supplied" };
+  const executable = await resolveExecutable(command[0]);
+  if (!executable) return { availability: "gap", evidence: `test executable ${command[0]} was not found as an executable on the Controller PATH` };
+  const packageManager = ["npm", "pnpm", "yarn", "bun"].includes(command[0].split("/").pop() ?? "");
+  const scriptEvidence = await packageScriptEvidence(cwd, command);
+  if (packageManager && !scriptEvidence) {
+    return { availability: "gap", evidence: `test argv ${JSON.stringify(command)} did not resolve to a matching package.json script in ${cwd}` };
+  }
+  return {
+    availability: "verified",
+    evidence: `Controller verified executable ${executable}${scriptEvidence ? ` and ${scriptEvidence}` : ""} for exact non-executed test argv ${JSON.stringify(command)} in ${cwd}`,
+  };
 }
 
 async function verifyLinkedWorktree(cwd: string): Promise<LinkedWorktreeEvidence | undefined> {
@@ -231,17 +271,19 @@ export async function inspectBossCreateCapabilities(input: {
   }
 
   if (input.requirements.tests) {
+    const testProbe = await probeTestCommand(cwd, input.requirements.testCommand);
+    const shellConfigured = toolConfigured(input.workerPermissionProfile, "bash");
     findings.push({
       capability: "tests",
       requested: "required",
-      availability: "gap",
-      evidence: toolConfigured(input.workerPermissionProfile, "bash")
-        ? `${input.workerPermissionProfileName} configures a shell, but no project-specific test command or toolchain was concretely probed at create time`
-        : `${input.workerPermissionProfileName} does not configure a shell and no project-specific test command was probed`,
+      availability: shellConfigured ? testProbe.availability : "gap",
+      evidence: shellConfigured
+        ? `${input.workerPermissionProfileName} configures a shell; ${testProbe.evidence}. This verifies the declared toolchain and project command, not successful test execution.`
+        : `${input.workerPermissionProfileName} does not configure a shell; ${testProbe.evidence}`,
     });
   }
 
-  if (input.requirements.gitTransport) {
+  if (input.requirements.gitTransport && input.requirements.gitTransport !== "none") {
     findings.push({
       capability: "git-transport",
       requested: input.requirements.gitTransport,

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Allow strict-schema Boss callers to declare `gitTransport: "none"` for Controller-provisioned local-worktree runs, without claiming or probing remote Git authority.
+- Add an explicit non-executed `testCommand` argv probe that verifies the configured shell, executable toolchain, and package script when applicable before admitting `tests: true`.
+
 ## 0.11.0 - 2026-08-13
 
 - Treat a verified live WorkerStore owner PID as authoritative regardless of lock-directory age, with bounded exponential contender backoff, so long-lived owners never churn through the reclaim guard or risk live-lock recovery attempts.

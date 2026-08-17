@@ -217,6 +217,47 @@ test("an empty Pi tool list does not claim edit tools after Boss adds supervisio
   assert.match(report.gaps[0].evidence, /does not configure both Pi edit and write tools/);
 });
 
+test("an exact executable test argv satisfies the create-time toolchain probe without running tests", async () => {
+  const report = await inspectBossCreateCapabilities({
+    cwd: "/tmp",
+    requirements: { tests: true, testCommand: [process.execPath, "--test"] },
+    workerPermissionProfileName: "builder-restricted",
+    workerPermissionProfile: DEFAULT_PERMISSION_PROFILES["builder-restricted"],
+  });
+  assert.equal(report.status, "ready");
+  assert.deepEqual(report.probes.map((finding) => [finding.capability, finding.requested, finding.availability]), [
+    ["tests", "required", "verified"],
+  ]);
+  assert.match(report.probes[0].evidence, /exact non-executed test argv/);
+  assert.match(report.probes[0].evidence, /not successful test execution/);
+});
+
+test("package-manager test probes require a matching project script", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "boss-test-command-"));
+  try {
+    await writeFile(join(dir, "package.json"), JSON.stringify({ scripts: { verify: "node --test" } }));
+    const verified = await inspectBossCreateCapabilities({
+      cwd: dir,
+      requirements: { tests: true, testCommand: ["npm", "run", "verify"] },
+      workerPermissionProfileName: "builder-restricted",
+      workerPermissionProfile: DEFAULT_PERMISSION_PROFILES["builder-restricted"],
+    });
+    assert.equal(verified.status, "ready");
+    assert.match(verified.probes[0].evidence, /package\.json defines scripts\.verify/);
+
+    const missing = await inspectBossCreateCapabilities({
+      cwd: dir,
+      requirements: { tests: true, testCommand: ["npm", "run", "missing"] },
+      workerPermissionProfileName: "builder-restricted",
+      workerPermissionProfile: DEFAULT_PERMISSION_PROFILES["builder-restricted"],
+    });
+    assert.equal(missing.status, "blocked");
+    assert.match(missing.gaps[0].evidence, /did not resolve to a matching package\.json script/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("configured shell and Git inspection do not become verified tests or transport", async () => {
   const report = await inspectBossCreateCapabilities({
     cwd: "/tmp",
@@ -231,6 +272,6 @@ test("configured shell and Git inspection do not become verified tests or transp
   ]);
   assert.deepEqual(report.gaps, report.probes);
   const formatted = formatBossCreateCapabilityReport(report);
-  assert.match(formatted, /configures a shell, but no project-specific test command or toolchain was concretely probed/);
+  assert.match(formatted, /configures a shell; no exact project test argv was supplied/);
   assert.match(formatted, /read-only Git inspection is not transport/);
 });
