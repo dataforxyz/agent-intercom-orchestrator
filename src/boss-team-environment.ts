@@ -69,7 +69,7 @@ export function buildTrustedLocalBossParticipantPrompt(identity: TrustedLocalBos
       ]
       : [
         "At the start of every Ralph iteration, check exact team readiness with intercom_team.",
-        "Acknowledge each new stable assignment token exactly once before starting it, then report concrete completion evidence or a material blocker to the Manager with intercom_send.",
+        "Acknowledge each new stable assignment token exactly once to the Manager with intercom_send before starting it, then report concrete completion evidence or a material blocker through the same channel.",
         "Do not emit routine heartbeat or unchanged-progress messages; send an update when requested evidence is ready, the assignment materially changes state, or safe progress is blocked.",
       ];
   const checklist = identity.role === "manager"

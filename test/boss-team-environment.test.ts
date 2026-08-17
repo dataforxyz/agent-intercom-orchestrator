@@ -85,7 +85,7 @@ test("Boss Ralph prompts use deterministic role loops and active bounded supervi
 
   for (const role of ["worker", "scout"] as const) {
     const prompt = buildTrustedLocalBossParticipantPrompt({ bossRunId, role, controllerTarget }, goal);
-    assert.match(prompt, /Acknowledge each new stable assignment token exactly once/);
+    assert.match(prompt, /Acknowledge each new stable assignment token exactly once to the Manager with intercom_send/);
     assert.match(prompt, /Do not emit routine heartbeat or unchanged-progress messages/);
     assert.match(prompt, /final evidence and blockers to the Manager only/);
   }
