@@ -6,10 +6,23 @@ export type WorkerRegistryRecoveryAssessment =
   | { status: "recoverable"; state: WorkerStateFileV3; units: string[] }
   | { status: "degraded"; units: string[]; reason: string };
 
+export function workerRegistryUnitLiveness(status: UnitStatus | undefined): "live" | "absent" | "indeterminate" {
+  if (!status || status.verified === false) return "indeterminate";
+  if (!status.exists) return "absent";
+  if (status.job) return "indeterminate";
+  if (status.activeState === "activating" || status.activeState === "reloading" || status.activeState === "deactivating") return "indeterminate";
+  if (status.activeState === "active" && status.subState !== "exited") {
+    return status.mainPid === undefined ? "indeterminate" : "live";
+  }
+  return "absent";
+}
+
 function live(status: UnitStatus): boolean {
-  return status.verified !== false && status.exists && !status.job
-    && status.activeState === "active" && status.subState !== "exited"
-    && status.mainPid !== undefined;
+  return workerRegistryUnitLiveness(status) === "live";
+}
+
+function indeterminate(status: UnitStatus | undefined): boolean {
+  return workerRegistryUnitLiveness(status) === "indeterminate";
 }
 
 function exactIdentity(worker: WorkerRecord, unit: string, status: UnitStatus): boolean {
@@ -38,10 +51,11 @@ export function assessWorkerRegistryRecovery(input: {
 }): WorkerRegistryRecoveryAssessment {
   if (input.current.workers.length !== 0) return { status: "healthy" };
   if (!input.inventory.verified) return { status: "unavailable", reason: input.inventory.reason ?? "worker unit inventory unavailable" };
-  const liveUnits = input.inventory.units.filter((unit) => {
-    const status = input.statuses.get(unit);
-    return status ? live(status) : false;
-  });
+  const indeterminateUnits = input.inventory.units.filter((unit) => indeterminate(input.statuses.get(unit)));
+  if (indeterminateUnits.length) {
+    return { status: "degraded", units: indeterminateUnits, reason: "managed worker units are transitional or their liveness is indeterminate" };
+  }
+  const liveUnits = input.inventory.units.filter((unit) => live(input.statuses.get(unit)!));
   if (liveUnits.length === 0) return { status: "healthy" };
   if (!input.recovery) return { status: "degraded", units: liveUnits, reason: "live managed units exist but no validated recovery snapshot is available" };
 

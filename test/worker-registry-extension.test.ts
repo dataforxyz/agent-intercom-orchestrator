@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,14 +19,14 @@ function commandResult(stdout = "", code = 0) {
   return { stdout, stderr: "", code, killed: false };
 }
 
-async function fixture(identityIncarnation = "inc-1") {
+async function fixture(identityIncarnation = "inc-1", unitStatus?: string, record: WorkerRecordV3 = worker) {
   const agentDir = await mkdtemp(join(tmpdir(), "orcboss-registry-extension-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const orchestratorDir = join(agentDir, "intercom", "orchestrator");
   await mkdir(orchestratorDir, { recursive: true });
   const store = new WorkerStore(join(orchestratorDir, "workers.json"));
-  await store.upsert(worker);
+  await store.upsert(record);
   await store.mutate((state) => { state.workers = []; });
 
   const lifecycle = new Map<string, (...args: any[]) => any>();
@@ -44,7 +44,7 @@ async function fixture(identityIncarnation = "inc-1") {
           `AGENT_INTERCOM_RUN_ID=${identityIncarnation}`, `AGENT_INTERCOM_SYSTEMD_UNIT=${unit}`,
           "AGENT_INTERCOM_MANAGER_SESSION_ID=registry-manager", "AGENT_INTERCOM_MANAGER_CONTEXT=pi",
         ].join(" ");
-        return commandResult(`LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4242\nResult=success\nExecMainStatus=0\nEnvironment=${environment}\n`);
+        return commandResult(unitStatus ?? `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4242\nResult=success\nExecMainStatus=0\nEnvironment=${environment}\n`);
       }
       return commandResult();
     },
@@ -72,6 +72,53 @@ test("extension startup exactly restores an overwritten empty registry", async (
     assert.equal(result.details.degraded, undefined);
     assert.deepEqual(result.details.workers.map((entry: any) => entry.id), ["recovered"]);
     assert.deepEqual((await setup.store.read()).workers.map((entry) => entry.id), ["recovered"]);
+  } finally { await setup.cleanup(); }
+});
+
+test("restored live workers receive a fresh cleanup grace window", async () => {
+  const expiredAt = Date.now() - 60_000;
+  const setup = await fixture("inc-1", undefined, {
+    ...worker,
+    updatedAt: expiredAt,
+    leaseExpiresAt: expiredAt,
+    lastWorkerActivityAt: expiredAt,
+    idleDeadlineAt: expiredAt,
+    checkpointDeadlineAt: expiredAt,
+  });
+  try {
+    const before = Date.now();
+    await setup.lifecycle.get("session_start")?.({}, setup.ctx);
+    const restored = (await setup.store.read()).workers[0];
+    assert.ok(restored.leaseExpiresAt > before);
+    assert.ok(restored.idleDeadlineAt! > before);
+    assert.ok(restored.checkpointDeadlineAt! > restored.idleDeadlineAt!);
+    assert.ok(restored.lastWorkerActivityAt! >= before);
+  } finally { await setup.cleanup(); }
+});
+
+test("healthy startup clears a stale degraded diagnostic left by a prior process", async () => {
+  const setup = await fixture();
+  const diagnosticPath = join(setup.agentDir, "intercom", "orchestrator", "worker-registry-diagnostic.json");
+  try {
+    const empty = await setup.store.read();
+    const snapshot = await setup.store.readRecoverySnapshot();
+    assert.ok(snapshot);
+    await setup.store.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest);
+    await writeFile(diagnosticPath, JSON.stringify({ version: 1, degraded: true, reason: "stale restart diagnostic", untrackedLiveUnits: [unit] }));
+
+    await setup.lifecycle.get("session_start")?.({}, setup.ctx);
+    await assert.rejects(() => readFile(diagnosticPath, "utf8"), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  } finally { await setup.cleanup(); }
+});
+
+test("transitional managed units degrade startup instead of appearing absent", async () => {
+  const setup = await fixture("inc-1", "LoadState=loaded\nActiveState=activating\nSubState=start\nMainPID=0\nJob=77/start\n");
+  try {
+    await setup.lifecycle.get("session_start")?.({}, setup.ctx);
+    const listed = await setup.tools.get("agent_fleet").execute("list-transitional", { action: "list" }, new AbortController().signal, () => {}, setup.ctx);
+    assert.equal(listed.details.degraded, true);
+    assert.deepEqual(listed.details.untrackedLiveUnits, [unit]);
+    assert.match(listed.details.reason, /transitional|indeterminate/);
   } finally { await setup.cleanup(); }
 });
 

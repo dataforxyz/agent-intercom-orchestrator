@@ -1012,6 +1012,64 @@ test("WorkerStore restores an exact validated predecessor only from the assessed
   }
 });
 
+test("WorkerStore restore preserves the populated snapshot across pre- and post-rename faults", async () => {
+  for (const faultPoint of ["after_file_fsync", "after_rename"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `worker-store-recovery-fault-${faultPoint}-`));
+    const path = join(root, "workers.json");
+    try {
+      const seed = new WorkerStore(path);
+      await seed.mutate((state) => { state.workers.push(apiWorker("recoverable", "run-recoverable", "ready")); });
+      await seed.mutate((state) => { state.workers = []; });
+      const empty = await seed.read();
+      const snapshot = await seed.readRecoverySnapshot();
+      assert.ok(snapshot);
+      let inject = true;
+      const restoring = new WorkerStore(path, {
+        async faultInjector(point) {
+          if (point === faultPoint && inject) {
+            inject = false;
+            throw new Error(`simulated ${faultPoint} restore failure`);
+          }
+        },
+      });
+
+      if (faultPoint === "after_file_fsync") {
+        await assert.rejects(() => restoring.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest), /simulated/);
+      } else {
+        const restored = await restoring.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest);
+        assert.deepEqual(restored.workers.map((entry) => entry.id), ["recoverable"]);
+      }
+      const preserved = await seed.readRecoverySnapshot();
+      assert.deepEqual(preserved?.state.workers.map((entry) => entry.id), ["recoverable"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("WorkerStore recurring empty overwrite remains recoverable after a restore", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-store-recurring-recovery-"));
+  const path = join(root, "workers.json");
+  try {
+    const store = new WorkerStore(path);
+    await store.mutate((state) => { state.workers.push(apiWorker("recoverable", "run-recoverable", "ready")); });
+    await store.mutate((state) => { state.workers = []; });
+    let empty = await store.read();
+    let snapshot = await store.readRecoverySnapshot();
+    assert.ok(snapshot);
+    await store.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest);
+
+    await store.mutate((state) => { state.workers = []; });
+    empty = await store.read();
+    snapshot = await store.readRecoverySnapshot();
+    assert.ok(snapshot);
+    const restoredAgain = await store.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest);
+    assert.deepEqual(restoredAgain.workers.map((entry) => entry.id), ["recoverable"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("WorkerStore recovery restore fails closed after canonical generation changes", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-store-recovery-conflict-"));
   const path = join(root, "workers.json");

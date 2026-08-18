@@ -26,7 +26,7 @@ import { boundedCleanupCandidates, captureCleanupUnitInventory, deleteOrphanRunt
 import { detectHarnessAvailability, formatRoutingDecision, inferHarnessFromModel, normalizeModelForHarness, roleInstructionsForHarness, roleRequiresSubagents, resolveHarnessRoute, type HarnessAvailability, type RoutingDecision } from "./routing.ts";
 import { tryAcquireKernelFileLock } from "./file-lock.ts";
 import { WorkerStore } from "./store.ts";
-import { assessWorkerRegistryRecovery, type WorkerRegistryRecoveryAssessment } from "./worker-registry-recovery.ts";
+import { assessWorkerRegistryRecovery, workerRegistryUnitLiveness, type WorkerRegistryRecoveryAssessment } from "./worker-registry-recovery.ts";
 import { formatUnitStatus, getUnitStatus, getUserManagerHealth, launchUnit, listWorkerUnits, listWorkerUnitsForVerification, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, sanitizeUnitPart, stopUnit, systemdAvailable, waitForUnitRunning, workerSubmissionRejection } from "./systemd.ts";
 import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerRecordV3, WorkerStateFile, WorkerStateFileV3 } from "./types.ts";
 import {
@@ -758,10 +758,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (currentCtx) publishStatus(currentCtx, (await store.read()).workers);
   };
 
-  const ensureWorkerRegistry = async (): Promise<WorkerStateFileV3> => {
+  const ensureWorkerRegistry = async (allowConflictReassessment = true): Promise<WorkerStateFileV3> => {
     const current = await store.read();
     if (current.workers.length !== 0) {
-      if (registryDegraded) await recordRegistryHealth();
+      // A diagnostic can survive a process restart while the in-memory flag
+      // cannot. Healthy reassessment must therefore clear it unconditionally.
+      await recordRegistryHealth();
       return current;
     }
     const inventory = await listWorkerUnitsForVerification(runner);
@@ -770,12 +772,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     try {
       recoverySnapshot = await store.readRecoverySnapshot();
     } catch (error) {
-      const liveUnits = inventory.units.filter((unit) => {
-        const status = statuses.get(unit);
-        return status?.verified !== false && status?.exists && status.activeState === "active" && status.mainPid !== undefined;
-      });
-      if (liveUnits.length) {
-        const degraded = { status: "degraded" as const, units: liveUnits, reason: `recovery snapshot validation failed: ${error instanceof Error ? error.message : String(error)}` };
+      const affectedUnits = inventory.units.filter((unit) => workerRegistryUnitLiveness(statuses.get(unit)) !== "absent");
+      if (affectedUnits.length) {
+        const degraded = { status: "degraded" as const, units: affectedUnits, reason: `recovery snapshot validation failed: ${error instanceof Error ? error.message : String(error)}` };
         await recordRegistryHealth(degraded);
         throw new WorkerRegistryDegradedError(degraded);
       }
@@ -783,9 +782,35 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
     const assessment = assessWorkerRegistryRecovery({ current, recovery: recoverySnapshot?.state, inventory, statuses });
     if (assessment.status === "recoverable") {
-      const restored = await store.restoreEmptyFromRecovery(current.generation, recoverySnapshot!.stateDigest);
+      try {
+        await store.restoreEmptyFromRecovery(current.generation, recoverySnapshot!.stateDigest);
+      } catch (error) {
+        const code = (error as { code?: string } | undefined)?.code;
+        if (allowConflictReassessment && (code === "WORKER_STORE_CAS_CONFLICT" || code === "WORKER_STORE_RECOVERY_CONFLICT")) {
+          // Another extension process may have completed the same recovery or
+          // advanced the canonical registry after our assessment. Re-read and
+          // reassess once instead of surfacing a benign restore race.
+          return ensureWorkerRegistry(false);
+        }
+        throw error;
+      }
+      const restored = await store.mutateConditionallyWithSnapshot((state) => {
+        let changed = false;
+        const recoveredUnits = new Set(assessment.units);
+        for (const worker of state.workers) {
+          if (worker.unit && recoveredUnits.has(worker.unit) && isLiveState(worker.state)) {
+            // Exact live identity verification is an authenticated recovery
+            // observation. Give restored workers one normal activity window so
+            // stale persisted lease/checkpoint deadlines cannot kill them in
+            // the cleanup pass immediately following startup.
+            recordWorkerActivity(worker, config);
+            changed = true;
+          }
+        }
+        return { value: undefined, changed };
+      });
       await recordRegistryHealth();
-      return restored;
+      return restored.state;
     }
     if (assessment.status === "degraded") {
       await recordRegistryHealth(assessment);
@@ -796,7 +821,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       await recordRegistryHealth(degraded);
       throw new WorkerRegistryDegradedError(degraded);
     }
-    if (registryDegraded) await recordRegistryHealth();
+    await recordRegistryHealth();
     return current;
   };
 
@@ -1615,15 +1640,18 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
       const unitEnvironment: Record<string, string> = {
         ...permissionEnvironment,
-        AGENT_INTERCOM_MANAGER_CONTEXT: managerOwnerContext,
         ...(runtime?.environment ?? {}),
+        ...buildOptionalTrustedLocalBossTeamEnvironment(params.bossTeam),
         ...buildWorkerEnvironment(harness, id, role, model, {
           runId,
           unit,
           managerSessionId: worker.managerSessionId,
           fresh: params.fresh,
         }),
-        ...buildOptionalTrustedLocalBossTeamEnvironment(params.bossTeam),
+        // Recovery identity is orchestrator-owned. Permission/runtime/profile
+        // and Boss metadata must not replace the manager context used to
+        // authenticate a live unit against the durable worker record.
+        AGENT_INTERCOM_MANAGER_CONTEXT: managerOwnerContext,
         ...(params.bossTeam ? buildTrustedLocalBossSupervisionEnvironment(params.bossTeam, runtimeWorkerRoot!) : {}),
         ...(persistentOpenCode ? {
           AGENT_INTERCOM_OPENCODE_HEALTH_PATH: workerHealthPath!,

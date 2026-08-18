@@ -78,10 +78,14 @@ test("launch is nonblocking and a killed submission is indeterminate", async () 
   const beforeLaunch = getWorkerUnitMutationGeneration();
   await launchUnit({ async exec(_command, args) { calls.push(args); return ok(); } }, {
     unit: "worker.service",
-    profile: { harness: "pi", command: "/usr/bin/true", mode: "persistent" },
+    profile: { harness: "pi", command: "/usr/bin/true", mode: "persistent", env: { AGENT_INTERCOM_MANAGER_CONTEXT: "profile-spoof", AGENT_INTERCOM_RUN_ID: "profile-spoof" } },
+    environment: { AGENT_INTERCOM_MANAGER_CONTEXT: "pi", AGENT_INTERCOM_RUN_ID: "owned-incarnation" },
     args: [], cwd: "/tmp", maxRuntime: "2h", stopTimeoutSeconds: 5,
   });
   assert.ok(calls[0].includes("--no-block"));
+  assert.ok(calls[0].includes("--setenv=AGENT_INTERCOM_MANAGER_CONTEXT=pi"));
+  assert.ok(calls[0].includes("--setenv=AGENT_INTERCOM_RUN_ID=owned-incarnation"));
+  assert.equal(calls[0].some((arg) => arg.includes("profile-spoof")), false);
   assert.ok(getWorkerUnitMutationGeneration() > beforeLaunch);
 
   await assert.rejects(launchUnit({ async exec() { return { stdout: "", stderr: "", code: 143, killed: true }; } }, {

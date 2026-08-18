@@ -44,6 +44,26 @@ test("missing identity evidence and identity mismatches fail closed as degraded"
   }).status, "degraded");
 });
 
+test("transitional and indeterminate managed units fail closed as degraded", () => {
+  const cases: Array<UnitStatus | undefined> = [
+    { verified: true, exists: true, activeState: "activating" },
+    { verified: true, exists: true, activeState: "inactive", job: "77/start" },
+    { verified: true, exists: true, activeState: "active", subState: "running" },
+    { verified: false, exists: true },
+    undefined,
+  ];
+  for (const status of cases) {
+    const result = assessWorkerRegistryRecovery({
+      current: empty,
+      recovery,
+      inventory: { verified: true, units: [unit] },
+      statuses: status ? new Map([[unit, status]]) : new Map(),
+    });
+    assert.equal(result.status, "degraded");
+    if (result.status === "degraded") assert.deepEqual(result.units, [unit]);
+  }
+});
+
 test("authoritative no-live-unit inventory is healthy and unavailable inventory is distinct", () => {
   const inactive = assessWorkerRegistryRecovery({
     current: empty,

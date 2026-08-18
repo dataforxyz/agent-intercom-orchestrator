@@ -1492,10 +1492,10 @@ export class WorkerStore {
     await this.options.faultInjector?.(point, { statePath: this.path, tempPath });
   }
 
-  private async durableCommit(text: string, previousRaw?: string): Promise<void> {
+  private async durableCommit(text: string, previousRaw?: string, preserveRecoverySnapshot = false): Promise<void> {
     const startedAt = this.options.instrumentation ? process.hrtime.bigint() : undefined;
     try {
-      if (previousRaw !== undefined) await this.writeRecoverySnapshot(previousRaw);
+      if (previousRaw !== undefined && !preserveRecoverySnapshot) await this.writeRecoverySnapshot(previousRaw);
       await this.durableCommitUnmeasured(text, previousRaw);
       this.metric("commit", startedAt, "ok", Buffer.byteLength(text));
     } catch (error) {
@@ -1661,7 +1661,10 @@ export class WorkerStore {
       const restored = cloneState(snapshot.state);
       restored.generation = loaded.state.generation + 1;
       const text = serializedState(restored);
-      await this.durableCommit(text, loaded.raw);
+      // The recovery snapshot is the independently validated populated copy.
+      // Do not rotate the empty canonical predecessor over it while restoring:
+      // a failure before or after rename must leave a populated recovery source.
+      await this.durableCommit(text, loaded.raw, true);
       return cloneState(restored);
     }));
   }
