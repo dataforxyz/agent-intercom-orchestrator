@@ -26,9 +26,6 @@ jobs:
           node-version: 22.19.0
           registry-url: https://registry.npmjs.org
 
-      - name: Use an npm version with trusted publishing support
-        run: npm install --global npm@11.16.0
-
       - name: Verify tag and package version
         shell: bash
         run: |
@@ -50,6 +47,13 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build --if-present
+
+      # Install with setup-node's bundled npm first. npm 11 handles the pinned
+      # bundled Git dependency differently under `npm ci --ignore-scripts` and
+      # can omit its prepared dist files, which breaks typechecking. Upgrade
+      # only after validation, immediately before trusted publishing.
+      - name: Use an npm version with trusted publishing support
+        run: npm install --global npm@11.16.0
 
       - name: Publish to npm
         shell: bash
