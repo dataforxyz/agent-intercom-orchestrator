@@ -1,6 +1,6 @@
 {
   "name": "@dataforxyz/orcboss",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Pi extension for creating and managing independent Agent Intercom coworkers across Pi, Codex, Claude Code, and OpenCode",
   "license": "AGPL-3.0-or-later",
   "type": "module",
