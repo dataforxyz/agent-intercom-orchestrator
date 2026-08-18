@@ -88,6 +88,22 @@ test("agents browser is manager-scoped, compact by default, and expands details 
     assert.match(expanded, /manager\s+manager-session-id/);
     assert.match(expanded, /enter collapse/);
     assert.ok(backgroundColors.includes("customMessageBg"));
+
+    await writeFile(join(stateDir, "worker-registry-diagnostic.json"), JSON.stringify({
+      version: 1,
+      degraded: true,
+      reason: "live unit identity does not match the recovery snapshot",
+      untrackedLiveUnits: ["agent-intercom-worker-untracked.service"],
+    }));
+    let notification = "";
+    await commands.get("agents").handler("", {
+      mode: "rpc",
+      sessionManager: ctx.sessionManager,
+      ui: { notify(text: string) { notification = text; } },
+    });
+    assert.match(notification, /DEGRADED worker registry/);
+    assert.match(notification, /agent-intercom-worker-untracked\.service/);
+    assert.match(notification, /mutations are blocked/);
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

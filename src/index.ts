@@ -26,7 +26,8 @@ import { boundedCleanupCandidates, captureCleanupUnitInventory, deleteOrphanRunt
 import { detectHarnessAvailability, formatRoutingDecision, inferHarnessFromModel, normalizeModelForHarness, roleInstructionsForHarness, roleRequiresSubagents, resolveHarnessRoute, type HarnessAvailability, type RoutingDecision } from "./routing.ts";
 import { tryAcquireKernelFileLock } from "./file-lock.ts";
 import { WorkerStore } from "./store.ts";
-import { formatUnitStatus, getUnitStatus, getUserManagerHealth, launchUnit, listWorkerUnits, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, sanitizeUnitPart, stopUnit, systemdAvailable, waitForUnitRunning, workerSubmissionRejection } from "./systemd.ts";
+import { assessWorkerRegistryRecovery, workerRegistryUnitLiveness, type WorkerRegistryRecoveryAssessment } from "./worker-registry-recovery.ts";
+import { formatUnitStatus, getUnitStatus, getUserManagerHealth, launchUnit, listWorkerUnits, listWorkerUnitsForVerification, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, sanitizeUnitPart, stopUnit, systemdAvailable, waitForUnitRunning, workerSubmissionRejection } from "./systemd.ts";
 import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerRecordV3, WorkerStateFile, WorkerStateFileV3 } from "./types.ts";
 import {
   boundedLeaseExpiry,
@@ -718,7 +719,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     });
   };
 
+  const registryDiagnosticPath = join(agentDir, "intercom", "orchestrator", "worker-registry-diagnostic.json");
+  let registryDegraded: Extract<WorkerRegistryRecoveryAssessment, { status: "degraded" }> | undefined;
+
   const publishStatus = (ctx: ExtensionContext, workers: WorkerRecord[]) => {
+    if (registryDegraded) {
+      ctx.ui.setStatus(STATUS_KEY, `agents READ-ONLY · ${registryDegraded.units.length} live unverified`);
+      return;
+    }
     const attached = workersAttachedToManager(workers, managerSessionId(ctx));
     const running = attached.filter((worker) => isLiveState(worker.state)).length;
     const stale = attached.filter((worker) => cleanupReason(worker)).length;
@@ -731,7 +739,97 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     publishStatus(ctx, state.workers);
   };
 
+  class WorkerRegistryDegradedError extends Error {
+    readonly assessment: Extract<WorkerRegistryRecoveryAssessment, { status: "degraded" }>;
+
+    constructor(assessment: Extract<WorkerRegistryRecoveryAssessment, { status: "degraded" }>) {
+      super(`Worker registry is degraded: ${assessment.reason}`);
+      this.assessment = assessment;
+    }
+  }
+
+  const recordRegistryHealth = async (assessment?: Extract<WorkerRegistryRecoveryAssessment, { status: "degraded" }>): Promise<void> => {
+    registryDegraded = assessment;
+    if (assessment) {
+      await mkdir(dirname(registryDiagnosticPath), { recursive: true, mode: 0o700 });
+      const temporary = `${registryDiagnosticPath}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, `${JSON.stringify({ version: 1, degraded: true, reason: assessment.reason, untrackedLiveUnits: assessment.units, observedAt: Date.now() })}\n`, { mode: 0o600, flag: "wx" });
+        await rename(temporary, registryDiagnosticPath);
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+    } else {
+      await rm(registryDiagnosticPath, { force: true });
+    }
+    if (currentCtx) publishStatus(currentCtx, (await store.read()).workers);
+  };
+
+  const ensureWorkerRegistry = async (allowConflictReassessment = true): Promise<WorkerStateFileV3> => {
+    const current = await store.read();
+    if (current.workers.length !== 0) {
+      // A diagnostic can survive a process restart while the in-memory flag
+      // cannot. Healthy reassessment must therefore clear it unconditionally.
+      await recordRegistryHealth();
+      return current;
+    }
+    const inventory = await listWorkerUnitsForVerification(runner);
+    const statuses = new Map(await Promise.all(inventory.units.map(async (unit) => [unit, await getUnitStatus(runner, unit)] as const)));
+    let recoverySnapshot: Awaited<ReturnType<WorkerStore["readRecoverySnapshot"]>>;
+    try {
+      recoverySnapshot = await store.readRecoverySnapshot();
+    } catch (error) {
+      const affectedUnits = inventory.units.filter((unit) => workerRegistryUnitLiveness(statuses.get(unit)) !== "absent");
+      const degraded = {
+        status: "degraded" as const,
+        units: affectedUnits,
+        reason: `recovery snapshot validation failed; worker mutations remain blocked until ${store.path}.recovery.json is repaired or quarantined after operator inspection: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      await recordRegistryHealth(degraded);
+      throw new WorkerRegistryDegradedError(degraded);
+    }
+    const assessment = assessWorkerRegistryRecovery({ current, recovery: recoverySnapshot?.state, inventory, statuses });
+    if (assessment.status === "recoverable") {
+      try {
+        await store.restoreEmptyFromRecovery(current.generation, recoverySnapshot!.stateDigest, (state) => {
+          const recoveredUnits = new Set(assessment.units);
+          for (const worker of state.workers) {
+            if (worker.unit && recoveredUnits.has(worker.unit) && isLiveState(worker.state)) {
+              // Commit exact-identity recovery and its cleanup grace atomically.
+              // A crash after rename must never expose restored expired leases.
+              recordWorkerActivity(worker, config);
+            }
+          }
+        });
+      } catch (error) {
+        const code = (error as { code?: string } | undefined)?.code;
+        if (allowConflictReassessment && (code === "WORKER_STORE_CAS_CONFLICT" || code === "WORKER_STORE_RECOVERY_CONFLICT")) {
+          // Another extension process may have completed the same recovery or
+          // advanced the canonical registry after our assessment. Re-read and
+          // reassess once instead of surfacing a benign restore race.
+          return ensureWorkerRegistry(false);
+        }
+        throw error;
+      }
+      const restored = await store.read();
+      await recordRegistryHealth();
+      return restored;
+    }
+    if (assessment.status === "degraded") {
+      await recordRegistryHealth(assessment);
+      throw new WorkerRegistryDegradedError(assessment);
+    }
+    if (assessment.status === "unavailable") {
+      const degraded = { status: "degraded" as const, units: [], reason: assessment.reason };
+      await recordRegistryHealth(degraded);
+      throw new WorkerRegistryDegradedError(degraded);
+    }
+    await recordRegistryHealth();
+    return current;
+  };
+
   const recoverCleanupClaims = async () => {
+    await ensureWorkerRegistry();
     const recovery = await recoverStaleRuntimeCleanupClaims({ store, runner, agentDir });
     for (const failure of recovery.errors) {
       console.error(`[agent-intercom-orchestrator] Runtime cleanup recovery ${failure.token} failed: ${failure.error}`);
@@ -741,7 +839,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
   const reconcile = async (managerId?: string, publish = true): Promise<WorkerRecord[]> => {
     const isInScope = (worker: WorkerRecord) => managerId === undefined || worker.managerSessionId === managerId;
-    let snapshot = await store.read();
+    let snapshot = await ensureWorkerRegistry();
     for (const pending of snapshot.workers.filter((worker) => worker.state === "migration_pending" && isInScope(worker))) {
       const status = pending.unit ? await getUnitStatus(runner, pending.unit) : { exists: false };
       let resolution: "stopped" | "failed" | "lost" | "unreachable" | undefined;
@@ -847,6 +945,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     reason?: string;
     expectedCheckpointDeadlineAt?: number;
   } = {}): Promise<WorkerRecord> => {
+    await ensureWorkerRegistry();
     const stoppedAt = Date.now();
     const worker = await store.mutate((state) => {
       const current = state.workers.find((candidate) => candidate.id === target.id && workerIncarnation(candidate) === workerIncarnation(target));
@@ -1410,6 +1509,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   };
 
   const spawnWorker = async (params: FleetParams, ctx: ExtensionContext, resolved: ResolvedSpawn): Promise<WorkerRecord> => {
+    await ensureWorkerRegistry();
     const { harness, role, task, cwd, profileName, permissionProfileName, permissionProfile, model, effort, instructions } = resolved;
     if (harness === "opencode" && model && effort && effort !== "off") {
       const info = (await enumerateOpenCodeModelInfo()).find((candidate) => candidate.id === model);
@@ -1544,13 +1644,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const unitEnvironment: Record<string, string> = {
         ...permissionEnvironment,
         ...(runtime?.environment ?? {}),
+        ...buildOptionalTrustedLocalBossTeamEnvironment(params.bossTeam),
         ...buildWorkerEnvironment(harness, id, role, model, {
           runId,
           unit,
           managerSessionId: worker.managerSessionId,
           fresh: params.fresh,
         }),
-        ...buildOptionalTrustedLocalBossTeamEnvironment(params.bossTeam),
+        // Recovery identity is orchestrator-owned. Permission/runtime/profile
+        // and Boss metadata must not replace the manager context used to
+        // authenticate a live unit against the durable worker record.
+        AGENT_INTERCOM_MANAGER_CONTEXT: managerOwnerContext,
         ...(params.bossTeam ? buildTrustedLocalBossSupervisionEnvironment(params.bossTeam, runtimeWorkerRoot!) : {}),
         ...(persistentOpenCode ? {
           AGENT_INTERCOM_OPENCODE_HEALTH_PATH: workerHealthPath!,
@@ -1680,6 +1784,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (!config) await loadConfig();
       if (signal?.aborted) throw new Error("Agent fleet action cancelled");
 
+      const mutatingActions = new Set(["spawn", "stop", "cleanup", "prune", "renew", "forget", "adopt"]);
+      if (mutatingActions.has(params.action) && !(params.action === "cleanup" && !params.execute)) await ensureWorkerRegistry();
+
       if (params.action === "_heartbeat") {
         const result = await runLifecycleHeartbeat(ctx);
         return textResult(`Lifecycle heartbeat: renewed=${result.renewed.length} checkpoint=${result.checkpointRequests.length}.`, result);
@@ -1724,24 +1831,43 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
 
       if (params.action === "list" || params.action === "history") {
-        const reconciled = await reconcile();
-        const scoped = params.all
-          ? reconciled
-          : workersAttachedToManager(reconciled, managerSessionId(ctx));
-        const workers = params.action === "history" || params.all
-          ? scoped
-          : scoped.filter((worker) => isLiveState(worker.state) || isRecentTerminalWorker(worker, config));
-        const hiddenHistory = scoped.length - workers.length;
-        return textResult(formatWorkers(workers, hiddenHistory), {
-          workers,
-          hiddenHistory,
-          scope: params.all ? "all" : "manager",
-          view: params.action,
-        });
+        try {
+          const reconciled = await reconcile();
+          const scoped = params.all
+            ? reconciled
+            : workersAttachedToManager(reconciled, managerSessionId(ctx));
+          const workers = params.action === "history" || params.all
+            ? scoped
+            : scoped.filter((worker) => isLiveState(worker.state) || isRecentTerminalWorker(worker, config));
+          const hiddenHistory = scoped.length - workers.length;
+          return textResult(formatWorkers(workers, hiddenHistory), {
+            workers,
+            hiddenHistory,
+            scope: params.all ? "all" : "manager",
+            view: params.action,
+          });
+        } catch (error) {
+          if (!(error instanceof WorkerRegistryDegradedError)) throw error;
+          const { units, reason } = error.assessment;
+          return textResult(
+            `DEGRADED worker registry: ${reason}\nVerified live but untracked units:\n${units.map((unit) => `- ${unit}`).join("\n")}\nUnsafe worker mutations are blocked until registry recovery is resolved.`,
+            { workers: [], hiddenHistory: 0, scope: params.all ? "all" : "manager", view: params.action, degraded: true, untrackedLiveUnits: units, reason },
+          );
+        }
       }
 
       if (params.action === "status") {
-        const reconciled = await reconcile();
+        let reconciled: WorkerRecord[];
+        try {
+          reconciled = await reconcile();
+        } catch (error) {
+          if (!(error instanceof WorkerRegistryDegradedError)) throw error;
+          const { units, reason } = error.assessment;
+          return textResult(
+            `READ-ONLY worker registry: ${reason}\nVerified live units whose registry identity cannot be trusted:\n${units.map((unit) => `- ${unit}`).join("\n") || "(none observed)"}\nWorker status is unavailable and unsafe mutations remain blocked until registry recovery is resolved.`,
+            { workers: [], degraded: true, untrackedLiveUnits: units, reason },
+          );
+        }
         const cleanup = await readCleanupRunDiagnostics(cleanupRunStatePath);
         const visible = params.all
           ? reconciled
@@ -2944,23 +3070,39 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       pi.events.emit(INTERCOM_CONTROL_REGISTER_EVENT, { type: WORKER_READINESS_ACK, version: 1 });
       registerOwnedWorkerReadinessProbeType(pi);
       await loadConfig();
-      await recoverCleanupClaims();
+      try {
+        await recoverCleanupClaims();
+        await reconcile();
+        await reconcileApplyingBossPauseControls();
+        await synchronizeTrustedLocalBossWorkers();
+        if (config.cleanupExpiredOnStart && process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP !== "1") await cleanupExpired(true);
+      } catch (error) {
+        if (!(error instanceof WorkerRegistryDegradedError)) throw error;
+        console.error(`[agent-intercom-orchestrator] ${error.message}; continuing in read-only degraded mode`);
+      }
       if (process.env.AGENT_INTERCOM_DISABLE_CLEANUP_TIMER !== "1") {
         void ensureCleanupTimer({ runner, config, cleanupScriptPath: FLEET_CLEANUP_SCRIPT, agentDir }).catch((error) => {
           console.error(`[agent-intercom-orchestrator] Could not configure cleanup timer: ${error instanceof Error ? error.message : String(error)}`);
         });
       }
-      await reconcile();
-      await reconcileApplyingBossPauseControls();
-      await synchronizeTrustedLocalBossWorkers();
-      if (config.cleanupExpiredOnStart && process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP !== "1") await cleanupExpired(true);
       clearInterval(heartbeat);
       heartbeatRunning = false;
       heartbeat = setInterval(() => {
         if (heartbeatRunning || !currentCtx || initializedSessionId !== sessionId) return;
         const heartbeatCtx = currentCtx;
         heartbeatRunning = true;
-        void runLifecycleHeartbeat(heartbeatCtx).then(async (result) => {
+        const reassess = registryDegraded
+          ? ensureWorkerRegistry().then(() => true).catch((error) => {
+            if (error instanceof WorkerRegistryDegradedError) return false;
+            throw error;
+          })
+          : Promise.resolve(true);
+        void reassess.then(async (healthy) => {
+          if (!healthy) return undefined;
+          return runLifecycleHeartbeat(heartbeatCtx);
+        }).then(async (result) => {
+          if (!result) return;
+
           if (!currentCtx || initializedSessionId !== sessionId) return;
           await reconcileApplyingBossPauseControls();
           await synchronizeTrustedLocalBossWorkers();

@@ -78,10 +78,14 @@ test("launch is nonblocking and a killed submission is indeterminate", async () 
   const beforeLaunch = getWorkerUnitMutationGeneration();
   await launchUnit({ async exec(_command, args) { calls.push(args); return ok(); } }, {
     unit: "worker.service",
-    profile: { harness: "pi", command: "/usr/bin/true", mode: "persistent" },
+    profile: { harness: "pi", command: "/usr/bin/true", mode: "persistent", env: { AGENT_INTERCOM_MANAGER_CONTEXT: "profile-spoof", AGENT_INTERCOM_RUN_ID: "profile-spoof" } },
+    environment: { AGENT_INTERCOM_MANAGER_CONTEXT: "pi", AGENT_INTERCOM_RUN_ID: "owned-incarnation" },
     args: [], cwd: "/tmp", maxRuntime: "2h", stopTimeoutSeconds: 5,
   });
   assert.ok(calls[0].includes("--no-block"));
+  assert.ok(calls[0].includes("--setenv=AGENT_INTERCOM_MANAGER_CONTEXT=pi"));
+  assert.ok(calls[0].includes("--setenv=AGENT_INTERCOM_RUN_ID=owned-incarnation"));
+  assert.equal(calls[0].some((arg) => arg.includes("profile-spoof")), false);
   assert.ok(getWorkerUnitMutationGeneration() > beforeLaunch);
 
   await assert.rejects(launchUnit({ async exec() { return { stdout: "", stderr: "", code: 143, killed: true }; } }, {
@@ -115,6 +119,20 @@ test("queued jobs and activation evidence survive status parsing", async () => {
   const timedOut = await getUnitStatus({ async exec() { return { stdout: "", stderr: "", code: 143, killed: true }; } }, "unknown.service");
   assert.equal(timedOut.verified, false);
   assert.equal(stateFromUnit(timedOut, "registering"), "registering");
+
+  const identityUnit = "agent-intercom-worker-builder-inc.service";
+  const identified = await getUnitStatus({ async exec() { return ok(
+    `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nJob=\nEnvironment=AGENT_INTERCOM_OWNED=1 AGENT_INTERCOM_WORKER_ID=builder AGENT_INTERCOM_RUN_ID=inc AGENT_INTERCOM_SYSTEMD_UNIT=${identityUnit} AGENT_INTERCOM_MANAGER_SESSION_ID=manager AGENT_INTERCOM_MANAGER_CONTEXT=pi\n`,
+  ); } }, identityUnit);
+  assert.deepEqual(identified.workerIdentity, {
+    workerId: "builder", workerIncarnationId: "inc", unit: identityUnit,
+    managerSessionId: "manager", managerContext: "pi", owned: true,
+  });
+
+  const reassigned = await getUnitStatus({ async exec() { return ok(
+    `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nJob=\nEnvironment=AGENT_INTERCOM_OWNED=0 AGENT_INTERCOM_WORKER_ID=stale AGENT_INTERCOM_RUN_ID=old AGENT_INTERCOM_OWNED=1 AGENT_INTERCOM_WORKER_ID=builder AGENT_INTERCOM_RUN_ID=inc AGENT_INTERCOM_SYSTEMD_UNIT=${identityUnit} AGENT_INTERCOM_MANAGER_SESSION_ID=manager AGENT_INTERCOM_MANAGER_CONTEXT=pi\n`,
+  ); } }, identityUnit);
+  assert.deepEqual(reassigned.workerIdentity, identified.workerIdentity, "systemd environment assignment semantics are last-assignment-wins");
 });
 
 test("running verification waits through a queue and rejects an early crash", async () => {

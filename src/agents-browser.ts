@@ -26,11 +26,24 @@ type Worker = {
 };
 
 type WorkerFile = { workers?: Worker[] };
+type RegistryDiagnostic = { degraded?: boolean; reason?: string; untrackedLiveUnits?: string[] };
 
-const STATE_PATH = join(getAgentDir(), "intercom", "orchestrator", "workers.json");
+const ORCHESTRATOR_DIR = join(getAgentDir(), "intercom", "orchestrator");
+const STATE_PATH = join(ORCHESTRATOR_DIR, "workers.json");
+const REGISTRY_DIAGNOSTIC_PATH = join(ORCHESTRATOR_DIR, "worker-registry-diagnostic.json");
 
 function isWorkerLive(worker: Worker): boolean {
   return isLiveState(worker.state as WorkerState);
+}
+
+async function readRegistryDiagnostic(): Promise<RegistryDiagnostic | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(REGISTRY_DIAGNOSTIC_PATH, "utf8")) as RegistryDiagnostic;
+    return parsed.degraded ? parsed : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 async function readWorkers(): Promise<Worker[]> {
@@ -64,7 +77,7 @@ export default function agentsBrowser(pi: ExtensionAPI) {
   pi.registerCommand("agents", {
     description: "Browse coworkers; use /agents history for retained history or /agents all for every manager",
     handler: async (args, ctx) => {
-      let workers = await readWorkers();
+      let [workers, registryDiagnostic] = await Promise.all([readWorkers(), readRegistryDiagnostic()]);
       const view = args.trim().toLowerCase();
       const crossManager = view === "all";
       const managerSession = ctx.sessionManager.getSessionId() || ctx.sessionManager.getSessionFile();
@@ -76,9 +89,12 @@ export default function agentsBrowser(pi: ExtensionAPI) {
       if (ctx.mode !== "tui") {
         const scoped = scopedWorkers();
         const visible = showAll ? scoped : scoped.filter(isWorkerLive);
-        const text = visible.length
+        const degraded = registryDiagnostic
+          ? `DEGRADED worker registry: ${registryDiagnostic.reason ?? "unresolved divergence"}\nVerified live but untracked units:\n${(registryDiagnostic.untrackedLiveUnits ?? []).map((unit) => `- ${unit}`).join("\n") || "- unavailable"}\nUnsafe worker mutations are blocked.`
+          : undefined;
+        const text = degraded ?? (visible.length
           ? visible.map((worker) => `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}`).join("\n")
-          : "No matching coworkers.";
+          : "No matching coworkers.");
         ctx.ui.notify(text, "info");
         return;
       }
@@ -103,7 +119,7 @@ export default function agentsBrowser(pi: ExtensionAPI) {
           refreshError = undefined;
           tui.requestRender();
           try {
-            workers = await readWorkers();
+            [workers, registryDiagnostic] = await Promise.all([readWorkers(), readRegistryDiagnostic()]);
             clampSelection();
           } catch (error) {
             refreshError = error instanceof Error ? error.message : String(error);
@@ -126,6 +142,17 @@ export default function agentsBrowser(pi: ExtensionAPI) {
             const scope = crossManager ? "all managers" : "this Pi";
             lines.push(truncateToWidth(`  ${theme.fg("accent", theme.bold("Agents"))}  ${theme.fg("muted", `${liveCount} live · ${scoped.length} total · ${scope} · ${mode}`)}`, width));
             lines.push(border);
+
+            if (registryDiagnostic) {
+              lines.push(truncateToWidth(`  ${theme.fg("error", theme.bold("DEGRADED worker registry"))}`, width));
+              for (const reasonLine of wrapTextWithAnsi(registryDiagnostic.reason ?? "unresolved divergence", inner - 2).slice(0, 3)) {
+                lines.push(truncateToWidth(`  ${theme.fg("warning", reasonLine)}`, width));
+              }
+              const units = registryDiagnostic.untrackedLiveUnits ?? [];
+              lines.push(truncateToWidth(`  ${theme.fg("error", `${units.length} verified live but untracked unit${units.length === 1 ? "" : "s"}; mutations blocked`)}`, width));
+              for (const unit of units.slice(0, 4)) lines.push(truncateToWidth(`  ${theme.fg("warning", `• ${unit}`)}`, width));
+              lines.push(border);
+            }
 
             if (visible.length === 0) {
               lines.push(truncateToWidth(`  ${theme.fg("muted", "No matching coworkers.")}`, width));
