@@ -2,7 +2,7 @@ import { access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { CommandRunner, LaunchProfile, UnitStatus } from "./types.ts";
+import type { CommandRunner, LaunchProfile, ManagerOwnerKind, UnitStatus } from "./types.ts";
 import { expandHome, resolveProfileCommand } from "./config.ts";
 
 let workerUnitMutationGeneration = 0;
@@ -236,6 +236,23 @@ export async function launchUnit(runner: CommandRunner, input: LaunchUnitInput):
   }
 }
 
+function parseWorkerUnitIdentity(environment: string | undefined, expectedUnit: string): UnitStatus["workerIdentity"] {
+  if (!environment) return undefined;
+  const field = (name: string): string | undefined => {
+    const match = environment.match(new RegExp(`(?:^|\\s)"?${name}=([^"\\s]*)"?(?=\\s|$)`));
+    return match?.[1];
+  };
+  const workerId = field("AGENT_INTERCOM_WORKER_ID");
+  const workerIncarnationId = field("AGENT_INTERCOM_RUN_ID");
+  const unit = field("AGENT_INTERCOM_SYSTEMD_UNIT");
+  const managerSessionId = field("AGENT_INTERCOM_MANAGER_SESSION_ID");
+  const managerContext = field("AGENT_INTERCOM_MANAGER_CONTEXT");
+  if (!workerId || !workerIncarnationId || unit !== expectedUnit || !managerSessionId
+    || (managerContext !== "pi" && managerContext !== "opencode" && managerContext !== "headless_cli")
+    || field("AGENT_INTERCOM_OWNED") !== "1") return undefined;
+  return { workerId, workerIncarnationId, unit, managerSessionId, managerContext: managerContext as ManagerOwnerKind, owned: true };
+}
+
 export async function getUnitStatus(runner: CommandRunner, unit: string): Promise<UnitStatus> {
   const result = await runner.exec(
     "systemctl",
@@ -244,7 +261,7 @@ export async function getUnitStatus(runner: CommandRunner, unit: string): Promis
       "show",
       unit,
       "--no-pager",
-      "--property=LoadState,ActiveState,SubState,MainPID,Result,ExecMainStatus,Job,FreezerState,ActiveEnterTimestampMonotonic,InactiveEnterTimestampMonotonic,ExecMainStartTimestampMonotonic",
+      "--property=LoadState,ActiveState,SubState,MainPID,Result,ExecMainStatus,Job,FreezerState,ActiveEnterTimestampMonotonic,InactiveEnterTimestampMonotonic,ExecMainStartTimestampMonotonic,Environment",
     ],
     { timeout: 5000 },
   );
@@ -278,6 +295,7 @@ export async function getUnitStatus(runner: CommandRunner, unit: string): Promis
     ...(numeric(values.ActiveEnterTimestampMonotonic) ? { activeEnterTimestampMonotonic: numeric(values.ActiveEnterTimestampMonotonic) } : {}),
     ...(numeric(values.InactiveEnterTimestampMonotonic) ? { inactiveEnterTimestampMonotonic: numeric(values.InactiveEnterTimestampMonotonic) } : {}),
     ...(numeric(values.ExecMainStartTimestampMonotonic) ? { execMainStartTimestampMonotonic: numeric(values.ExecMainStartTimestampMonotonic) } : {}),
+    ...(parseWorkerUnitIdentity(values.Environment, unit) ? { workerIdentity: parseWorkerUnitIdentity(values.Environment, unit) } : {}),
   };
 }
 

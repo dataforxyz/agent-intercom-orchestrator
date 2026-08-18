@@ -128,6 +128,14 @@ export interface WorkerStoreQuarantine {
   previousDigest?: string;
 }
 
+export interface WorkerStoreRecoverySnapshot {
+  version: 1;
+  statePath: string;
+  capturedAt: number;
+  stateDigest: string;
+  state: WorkerStateFileV3;
+}
+
 export class WorkerStoreError extends Error {
   readonly code: string;
 
@@ -818,6 +826,10 @@ export class WorkerStore {
     return `${this.path}.poison.json`;
   }
 
+  private recoveryPath(): string {
+    return `${this.path}.recovery.json`;
+  }
+
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const operation = this.queue.catch(() => undefined).then(fn);
     this.queue = operation.then(() => undefined, () => undefined);
@@ -1483,6 +1495,7 @@ export class WorkerStore {
   private async durableCommit(text: string, previousRaw?: string): Promise<void> {
     const startedAt = this.options.instrumentation ? process.hrtime.bigint() : undefined;
     try {
+      if (previousRaw !== undefined) await this.writeRecoverySnapshot(previousRaw);
       await this.durableCommitUnmeasured(text, previousRaw);
       this.metric("commit", startedAt, "ok", Buffer.byteLength(text));
     } catch (error) {
@@ -1546,6 +1559,49 @@ export class WorkerStore {
     }
   }
 
+  private async writeRecoverySnapshot(previousRaw: string): Promise<void> {
+    const parsed = this.parseRaw(previousRaw);
+    if (parsed.sourceVersion !== 3) return;
+    const state = cloneState(parsed.state);
+    const stateText = serializedState(state);
+    const snapshot: WorkerStoreRecoverySnapshot = {
+      version: 1,
+      statePath: this.path,
+      capturedAt: this.options.now(),
+      stateDigest: digest(stateText),
+      state: JSON.parse(stateText) as WorkerStateFileV3,
+    };
+    await this.writeSmallDurable(this.recoveryPath(), `${JSON.stringify(snapshot, null, 2)}\n`);
+  }
+
+  async readRecoverySnapshot(): Promise<WorkerStoreRecoverySnapshot | undefined> {
+    let raw: string;
+    try {
+      raw = await readFile(this.recoveryPath(), "utf8");
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return undefined;
+      throw new WorkerStoreError(`Could not read worker recovery snapshot ${this.recoveryPath()}: ${errorText(error)}`, "WORKER_STORE_RECOVERY_READ_FAILED");
+    }
+    try {
+      const value = assertExactObject(JSON.parse(raw), new Set(["version", "statePath", "capturedAt", "stateDigest", "state"]), ["version", "statePath", "capturedAt", "stateDigest", "state"], "worker recovery snapshot");
+      if (requiredNumber(value, "version", "worker recovery snapshot", true, 1) !== 1) throw new WorkerStoreValidationError("worker recovery snapshot.version must equal 1");
+      if (requiredString(value, "statePath", "worker recovery snapshot") !== this.path) throw new WorkerStoreValidationError("worker recovery snapshot.statePath does not match this store");
+      const state = parseV3File(value.state, false);
+      this.assertSupportedFeatures(state);
+      const stateDigest = requiredString(value, "stateDigest", "worker recovery snapshot");
+      if (digest(serializedState(state)) !== stateDigest) throw new WorkerStoreValidationError("worker recovery snapshot digest does not match its state");
+      return {
+        version: 1,
+        statePath: this.path,
+        capturedAt: requiredNumber(value, "capturedAt", "worker recovery snapshot", true, 0),
+        stateDigest,
+        state: cloneState(state),
+      };
+    } catch (error) {
+      throw new WorkerStoreError(`Worker recovery snapshot ${this.recoveryPath()} is invalid: ${errorText(error)}`, "WORKER_STORE_RECOVERY_INVALID");
+    }
+  }
+
   private publish(target: WorkerStateFile, committed: WorkerStateFileV3): void {
     try {
       for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
@@ -1577,6 +1633,36 @@ export class WorkerStore {
       const fast = await this.loadCanonicalV3LockFree();
       if (fast) return cloneState(fast);
       return this.withLock(async () => cloneState((await this.loadLocked()).state));
+    }));
+  }
+
+  /**
+   * Restore the independently validated predecessor only while the canonical
+   * registry is still the exact empty generation that was assessed. The
+   * snapshot is re-read under the writer lock and selected by digest so a
+   * concurrent overwrite, mutation, or snapshot rotation fails closed.
+   */
+  async restoreEmptyFromRecovery(expectedGeneration: number, expectedSnapshotDigest: string): Promise<WorkerStateFileV3> {
+    return this.enqueue(() => this.withLock(async () => {
+      const loaded = await this.loadLocked();
+      if (loaded.state.generation !== expectedGeneration) {
+        throw new WorkerStoreConflictError(expectedGeneration, loaded.state.generation);
+      }
+      if (loaded.state.workers.length !== 0) {
+        throw new WorkerStoreError("Worker registry recovery requires the canonical registry to remain empty", "WORKER_STORE_RECOVERY_CONFLICT");
+      }
+      const snapshot = await this.readRecoverySnapshot();
+      if (!snapshot || snapshot.stateDigest !== expectedSnapshotDigest) {
+        throw new WorkerStoreError("Worker recovery snapshot changed before restore", "WORKER_STORE_RECOVERY_CONFLICT");
+      }
+      if (snapshot.state.workers.length === 0) {
+        throw new WorkerStoreError("Worker recovery snapshot contains no worker records", "WORKER_STORE_RECOVERY_INVALID");
+      }
+      const restored = cloneState(snapshot.state);
+      restored.generation = loaded.state.generation + 1;
+      const text = serializedState(restored);
+      await this.durableCommit(text, loaded.raw);
+      return cloneState(restored);
     }));
   }
 

@@ -359,6 +359,15 @@ export interface UnitStatus {
   activeEnterTimestampMonotonic?: number;
   inactiveEnterTimestampMonotonic?: number;
   execMainStartTimestampMonotonic?: number;
+  /** Exact orchestrator identity projected from the transient unit environment. */
+  workerIdentity?: {
+    workerId: string;
+    workerIncarnationId: string;
+    unit: string;
+    managerSessionId: string;
+    managerContext: ManagerOwnerKind;
+    owned: true;
+  };
   error?: string;
 }
 
