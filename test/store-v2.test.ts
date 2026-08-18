@@ -1012,7 +1012,7 @@ test("WorkerStore restores an exact validated predecessor only from the assessed
   }
 });
 
-test("WorkerStore restore preserves the populated snapshot across pre- and post-rename faults", async () => {
+test("WorkerStore restore atomically commits its recovery transform across pre- and post-rename faults", async () => {
   for (const faultPoint of ["after_file_fsync", "after_rename"] as const) {
     const root = await mkdtemp(join(tmpdir(), `worker-store-recovery-fault-${faultPoint}-`));
     const path = join(root, "workers.json");
@@ -1034,10 +1034,15 @@ test("WorkerStore restore preserves the populated snapshot across pre- and post-
       });
 
       if (faultPoint === "after_file_fsync") {
-        await assert.rejects(() => restoring.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest), /simulated/);
+        await assert.rejects(() => restoring.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest, (state) => {
+          state.workers[0].task = "recovered-with-grace";
+        }), /simulated/);
       } else {
-        const restored = await restoring.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest);
+        const restored = await restoring.restoreEmptyFromRecovery(empty.generation, snapshot.stateDigest, (state) => {
+          state.workers[0].task = "recovered-with-grace";
+        });
         assert.deepEqual(restored.workers.map((entry) => entry.id), ["recoverable"]);
+        assert.equal((await seed.read()).workers[0].task, "recovered-with-grace");
       }
       const preserved = await seed.readRecoverySnapshot();
       assert.deepEqual(preserved?.state.workers.map((entry) => entry.id), ["recoverable"]);

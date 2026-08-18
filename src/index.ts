@@ -724,7 +724,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
   const publishStatus = (ctx: ExtensionContext, workers: WorkerRecord[]) => {
     if (registryDegraded) {
-      ctx.ui.setStatus(STATUS_KEY, `agents DEGRADED · ${registryDegraded.units.length} untracked`);
+      ctx.ui.setStatus(STATUS_KEY, `agents READ-ONLY · ${registryDegraded.units.length} live unverified`);
       return;
     }
     const attached = workersAttachedToManager(workers, managerSessionId(ctx));
@@ -751,7 +751,14 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const recordRegistryHealth = async (assessment?: Extract<WorkerRegistryRecoveryAssessment, { status: "degraded" }>): Promise<void> => {
     registryDegraded = assessment;
     if (assessment) {
-      await writeFile(registryDiagnosticPath, `${JSON.stringify({ version: 1, degraded: true, reason: assessment.reason, untrackedLiveUnits: assessment.units, observedAt: Date.now() })}\n`, { mode: 0o600 });
+      await mkdir(dirname(registryDiagnosticPath), { recursive: true, mode: 0o700 });
+      const temporary = `${registryDiagnosticPath}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, `${JSON.stringify({ version: 1, degraded: true, reason: assessment.reason, untrackedLiveUnits: assessment.units, observedAt: Date.now() })}\n`, { mode: 0o600, flag: "wx" });
+        await rename(temporary, registryDiagnosticPath);
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
     } else {
       await rm(registryDiagnosticPath, { force: true });
     }
@@ -773,17 +780,27 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       recoverySnapshot = await store.readRecoverySnapshot();
     } catch (error) {
       const affectedUnits = inventory.units.filter((unit) => workerRegistryUnitLiveness(statuses.get(unit)) !== "absent");
-      if (affectedUnits.length) {
-        const degraded = { status: "degraded" as const, units: affectedUnits, reason: `recovery snapshot validation failed: ${error instanceof Error ? error.message : String(error)}` };
-        await recordRegistryHealth(degraded);
-        throw new WorkerRegistryDegradedError(degraded);
-      }
-      throw error;
+      const degraded = {
+        status: "degraded" as const,
+        units: affectedUnits,
+        reason: `recovery snapshot validation failed; worker mutations remain blocked until ${store.path}.recovery.json is repaired or quarantined after operator inspection: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      await recordRegistryHealth(degraded);
+      throw new WorkerRegistryDegradedError(degraded);
     }
     const assessment = assessWorkerRegistryRecovery({ current, recovery: recoverySnapshot?.state, inventory, statuses });
     if (assessment.status === "recoverable") {
       try {
-        await store.restoreEmptyFromRecovery(current.generation, recoverySnapshot!.stateDigest);
+        await store.restoreEmptyFromRecovery(current.generation, recoverySnapshot!.stateDigest, (state) => {
+          const recoveredUnits = new Set(assessment.units);
+          for (const worker of state.workers) {
+            if (worker.unit && recoveredUnits.has(worker.unit) && isLiveState(worker.state)) {
+              // Commit exact-identity recovery and its cleanup grace atomically.
+              // A crash after rename must never expose restored expired leases.
+              recordWorkerActivity(worker, config);
+            }
+          }
+        });
       } catch (error) {
         const code = (error as { code?: string } | undefined)?.code;
         if (allowConflictReassessment && (code === "WORKER_STORE_CAS_CONFLICT" || code === "WORKER_STORE_RECOVERY_CONFLICT")) {
@@ -794,23 +811,9 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         }
         throw error;
       }
-      const restored = await store.mutateConditionallyWithSnapshot((state) => {
-        let changed = false;
-        const recoveredUnits = new Set(assessment.units);
-        for (const worker of state.workers) {
-          if (worker.unit && recoveredUnits.has(worker.unit) && isLiveState(worker.state)) {
-            // Exact live identity verification is an authenticated recovery
-            // observation. Give restored workers one normal activity window so
-            // stale persisted lease/checkpoint deadlines cannot kill them in
-            // the cleanup pass immediately following startup.
-            recordWorkerActivity(worker, config);
-            changed = true;
-          }
-        }
-        return { value: undefined, changed };
-      });
+      const restored = await store.read();
       await recordRegistryHealth();
-      return restored.state;
+      return restored;
     }
     if (assessment.status === "degraded") {
       await recordRegistryHealth(assessment);
@@ -1854,7 +1857,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
 
       if (params.action === "status") {
-        const reconciled = await reconcile();
+        let reconciled: WorkerRecord[];
+        try {
+          reconciled = await reconcile();
+        } catch (error) {
+          if (!(error instanceof WorkerRegistryDegradedError)) throw error;
+          const { units, reason } = error.assessment;
+          return textResult(
+            `READ-ONLY worker registry: ${reason}\nVerified live units whose registry identity cannot be trusted:\n${units.map((unit) => `- ${unit}`).join("\n") || "(none observed)"}\nWorker status is unavailable and unsafe mutations remain blocked until registry recovery is resolved.`,
+            { workers: [], degraded: true, untrackedLiveUnits: units, reason },
+          );
+        }
         const cleanup = await readCleanupRunDiagnostics(cleanupRunStatePath);
         const visible = params.all
           ? reconciled
@@ -3075,10 +3088,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       clearInterval(heartbeat);
       heartbeatRunning = false;
       heartbeat = setInterval(() => {
-        if (registryDegraded || heartbeatRunning || !currentCtx || initializedSessionId !== sessionId) return;
+        if (heartbeatRunning || !currentCtx || initializedSessionId !== sessionId) return;
         const heartbeatCtx = currentCtx;
         heartbeatRunning = true;
-        void runLifecycleHeartbeat(heartbeatCtx).then(async (result) => {
+        const reassess = registryDegraded
+          ? ensureWorkerRegistry().then(() => true).catch((error) => {
+            if (error instanceof WorkerRegistryDegradedError) return false;
+            throw error;
+          })
+          : Promise.resolve(true);
+        void reassess.then(async (healthy) => {
+          if (!healthy) return undefined;
+          return runLifecycleHeartbeat(heartbeatCtx);
+        }).then(async (result) => {
+          if (!result) return;
+
           if (!currentCtx || initializedSessionId !== sessionId) return;
           await reconcileApplyingBossPauseControls();
           await synchronizeTrustedLocalBossWorkers();

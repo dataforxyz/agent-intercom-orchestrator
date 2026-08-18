@@ -239,8 +239,8 @@ export async function launchUnit(runner: CommandRunner, input: LaunchUnitInput):
 function parseWorkerUnitIdentity(environment: string | undefined, expectedUnit: string): UnitStatus["workerIdentity"] {
   if (!environment) return undefined;
   const field = (name: string): string | undefined => {
-    const match = environment.match(new RegExp(`(?:^|\\s)"?${name}=([^"\\s]*)"?(?=\\s|$)`));
-    return match?.[1];
+    const matches = [...environment.matchAll(new RegExp(`(?:^|\\s)"?${name}=([^"\\s]*)"?(?=\\s|$)`, "g"))];
+    return matches.at(-1)?.[1];
   };
   const workerId = field("AGENT_INTERCOM_WORKER_ID");
   const workerIncarnationId = field("AGENT_INTERCOM_RUN_ID");

@@ -5,6 +5,7 @@
 - Reduce Boss Controller message noise with milestone-only Manager summaries, stable assignment-token acknowledgements, bounded stale retries, and role-specific final reporting.
 - Allow strict-schema Boss callers to declare `gitTransport: "none"` for Controller-provisioned local-worktree runs, without claiming or probing remote Git authority.
 - Add an explicit non-executed `testCommand` argv probe that verifies the configured shell, executable toolchain, and package script when applicable before admitting `tests: true`.
+- Recover an accidentally emptied global worker registry from its durable predecessor snapshot only after exact live-unit identity verification, atomically refresh recovered cleanup deadlines, and enter a diagnostic read-only degraded mode when recovery evidence is missing, corrupt, transitional, or conflicting.
 
 ## 0.11.0 - 2026-08-13
 

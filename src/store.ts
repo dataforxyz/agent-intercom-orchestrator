@@ -1642,7 +1642,11 @@ export class WorkerStore {
    * snapshot is re-read under the writer lock and selected by digest so a
    * concurrent overwrite, mutation, or snapshot rotation fails closed.
    */
-  async restoreEmptyFromRecovery(expectedGeneration: number, expectedSnapshotDigest: string): Promise<WorkerStateFileV3> {
+  async restoreEmptyFromRecovery(
+    expectedGeneration: number,
+    expectedSnapshotDigest: string,
+    transform?: (state: WorkerStateFileV3) => void,
+  ): Promise<WorkerStateFileV3> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
       if (loaded.state.generation !== expectedGeneration) {
@@ -1660,12 +1664,20 @@ export class WorkerStore {
       }
       const restored = cloneState(snapshot.state);
       restored.generation = loaded.state.generation + 1;
-      const text = serializedState(restored);
+      transform?.(restored);
+      // Validate the transformed state before it becomes canonical. Recovery
+      // callers may refresh deadlines, but cannot bypass the normal schema.
+      // Validate against the independently trusted predecessor's store-managed
+      // identity ledger. The canonical file may be ENOENT (generation zero),
+      // in which case the empty loader has no ledger to compare against.
+      const normalized = this.normalizeInput(restored, snapshot.state);
+      normalized.generation = restored.generation;
+      const text = serializedState(normalized);
       // The recovery snapshot is the independently validated populated copy.
       // Do not rotate the empty canonical predecessor over it while restoring:
       // a failure before or after rename must leave a populated recovery source.
       await this.durableCommit(text, loaded.raw, true);
-      return cloneState(restored);
+      return cloneState(normalized);
     }));
   }
 
