@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replace free-form model entry in `/agents-config` with a live per-harness model selector using the exact identifiers accepted by each harness, while retaining an explicit manual-entry escape hatch.
+
 ## 0.12.0 - 2026-08-18
 
 - Reduce Boss Controller message noise with milestone-only Manager summaries, stable assignment-token acknowledgements, bounded stale retries, and role-specific final reporting.

@@ -1838,6 +1838,138 @@ test("extension registers discovery tools and interactive configuration commands
   }
 });
 
+test("agents-config selects enumerated provider/model identifiers instead of requiring model text", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-model-picker-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const commands = new Map<string, any>();
+    let mainMenuVisits = 0;
+    let modelOptions: string[] = [];
+    let inputCalls = 0;
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool() {},
+      registerCommand(name: string, command: any) { commands.set(name, command); },
+      async exec(_command: string, args: string[]) {
+        if (args.includes("--list-models")) {
+          return {
+            ...commandResult(),
+            stdout: "Provider   Model                         Context  Max Out  Reasoning  Images\n"
+              + "codex     gpt-5.6-terra               272K     128K     yes        yes\n"
+              + "anthropic claude-opus-4-8             200K     64K      yes        yes\n",
+          };
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: process.cwd(),
+      mode: "rpc",
+      hasUI: true,
+      sessionManager: { getSessionId: () => "model-picker-test", getSessionFile: () => undefined },
+      ui: {
+        setStatus() {},
+        notify() {},
+        async select(title: string, options: string[]) {
+          if (title === "Agent Fleet defaults") return mainMenuVisits++ === 0 ? "Pi defaults" : "Save and close";
+          if (title === "pi profile") return options[0];
+          if (title === "pi model") {
+            modelOptions = options;
+            return "codex/gpt-5.6-terra";
+          }
+          if (title === "pi effort") return "(harness default)";
+          return undefined;
+        },
+        async input() { inputCalls += 1; return undefined; },
+        async editor() { return undefined; },
+        async confirm() { return false; },
+      },
+    };
+    const extensionUrl = new URL(`../src/index.ts?model-picker-test=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+    await commands.get("agents-config").handler("", ctx);
+
+    assert.ok(modelOptions.includes("(harness default)"));
+    assert.ok(modelOptions.includes("codex/gpt-5.6-terra"));
+    assert.ok(modelOptions.includes("(enter model manually)"));
+    assert.equal(inputCalls, 0);
+    const saved = JSON.parse(await readFile(join(agentDir, "intercom", "orchestrator", "config.json"), "utf8"));
+    assert.equal(saved.defaultModels.pi, "codex/gpt-5.6-terra");
+
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("agents-config preserves manual fallback when model enumeration rejects", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-model-fallback-test-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const commands = new Map<string, any>();
+    const notices: Array<{ message: string; level: string }> = [];
+    let mainMenuVisits = 0;
+    let modelOptions: string[] = [];
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool() {},
+      registerCommand(name: string, command: any) { commands.set(name, command); },
+      async exec(_command: string, args: string[]) {
+        if (args.includes("--list-models")) throw new Error("model catalog unavailable");
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: process.cwd(),
+      mode: "rpc",
+      hasUI: true,
+      sessionManager: { getSessionId: () => "model-fallback-test", getSessionFile: () => undefined },
+      ui: {
+        setStatus() {},
+        notify(message: string, level: string) { notices.push({ message, level }); },
+        async select(title: string, options: string[]) {
+          if (title === "Agent Fleet defaults") return mainMenuVisits++ === 0 ? "Pi defaults" : "Save and close";
+          if (title === "pi profile") return options[0];
+          if (title === "pi model") {
+            modelOptions = options;
+            return "(harness default)";
+          }
+          if (title === "pi effort") return "(harness default)";
+          return undefined;
+        },
+        async input() { return undefined; },
+        async editor() { return undefined; },
+        async confirm() { return false; },
+      },
+    };
+    const extensionUrl = new URL(`../src/index.ts?model-fallback-test=${Date.now()}`, import.meta.url);
+    const { default: extension } = await import(extensionUrl.href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+    await commands.get("agents-config").handler("", ctx);
+
+    assert.ok(modelOptions.includes("(harness default)"));
+    assert.ok(modelOptions.includes("(enter model manually)"));
+    assert.ok(notices.some((notice) => notice.level === "warning" && /live pi model catalog could not be enumerated/.test(notice.message)));
+
+    await lifecycle.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("route previews automatic selection and explicit profile overrides without spawning", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-route-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

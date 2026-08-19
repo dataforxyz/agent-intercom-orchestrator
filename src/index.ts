@@ -648,8 +648,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       .then((commit) => { if (commit.value) publishStatus(ctx, commit.state.workers); })
       .catch(() => undefined);
   });
-  const modelCache = new Map<Harness, { expiresAt: number; models: string[] }>();
-  let openCodeModelInfoCache: { expiresAt: number; models: OpenCodeModelInfo[] } | undefined;
+  const modelCache = new Map<Harness, { expiresAt: number; models: string[]; catalogAvailable: boolean }>();
+  let openCodeModelInfoCache: { expiresAt: number; models: OpenCodeModelInfo[]; catalogAvailable: boolean } | undefined;
 
   const loadConfig = async () => {
     config = await readConfig(configPath);
@@ -1323,11 +1323,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const profileName = config.defaultProfiles.opencode;
     const command = profileName ? config.profiles[profileName]?.command : "opencode";
     const executable = command ? resolveProfileCommand(command) : undefined;
-    if (!executable) return [];
-    const result = await runner.exec(executable, ["models", "--verbose"], { timeout: 30000 });
-    if (result.code !== 0) return [];
+    if (!executable) {
+      openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models: [], catalogAvailable: false };
+      return [];
+    }
+    const result = await runner.exec(executable, ["models", "--verbose"], { timeout: 30000 }).catch(() => undefined);
+    if (!result || result.code !== 0) {
+      openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models: [], catalogAvailable: false };
+      return [];
+    }
     const models = parseOpenCodeModelsVerbose(result.stdout);
-    openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models };
+    openCodeModelInfoCache = { expiresAt: Date.now() + 5 * 60_000, models, catalogAvailable: true };
     return structuredClone(models);
   };
 
@@ -1335,15 +1341,18 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const cached = modelCache.get(harness);
     if (cached && cached.expiresAt > Date.now()) return [...cached.models];
     const models = new Set(configuredModels(config, harness));
+    let catalogAvailable = false;
     if (harness === "opencode") {
       for (const info of await enumerateOpenCodeModelInfo()) models.add(info.id);
+      catalogAvailable = openCodeModelInfoCache?.catalogAvailable ?? false;
     } else {
       const piProfileName = config.defaultProfiles.pi;
       const piCommand = piProfileName ? config.profiles[piProfileName]?.command : "pi";
       const executable = piCommand ? resolveProfileCommand(piCommand) : undefined;
       if (executable) {
-        const result = await runner.exec(executable, ["--list-models"], { timeout: 30000 });
-        if (result.code === 0) {
+        const result = await runner.exec(executable, ["--list-models"], { timeout: 30000 }).catch(() => undefined);
+        if (result?.code === 0) {
+          catalogAvailable = true;
           for (const model of parsePiModels(result.stdout)) {
             if (harness === "pi") models.add(model);
             else if (inferHarnessFromModel(model, config.routing.modelRouting) === harness) {
@@ -1354,8 +1363,33 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       }
     }
     const result = [...models].sort();
-    modelCache.set(harness, { expiresAt: Date.now() + 5 * 60_000, models: result });
+    modelCache.set(harness, { expiresAt: Date.now() + 5 * 60_000, models: result, catalogAvailable });
     return [...result];
+  };
+
+  const selectConfiguredModel = async (
+    ctx: ExtensionContext,
+    harness: Harness,
+    title: string,
+    current?: string,
+  ): Promise<{ cancelled: true } | { cancelled: false; model?: string }> => {
+    const harnessDefault = "(harness default)";
+    const enterManually = "(enter model manually)";
+    const models = await enumerateModels(harness);
+    if (modelCache.get(harness)?.catalogAvailable === false) {
+      ctx.ui.notify(`The live ${harness} model catalog could not be enumerated. Configured models may still be listed; choose the harness default or enter an exact model identifier manually.`, "warning");
+    } else if (models.length === 0) {
+      ctx.ui.notify(`No ${harness} models were found. Choose the harness default or enter an exact model identifier manually.`, "warning");
+    }
+    const normalizedCurrent = normalizeModelForHarness(harness, current, config.routing.modelRouting) ?? current;
+    const choices = [harnessDefault, ...new Set([...(normalizedCurrent ? [normalizedCurrent] : []), ...models]), enterManually];
+    const choice = await ctx.ui.select(title, preferredFirst(choices, normalizedCurrent || harnessDefault));
+    if (!choice) return { cancelled: true };
+    if (choice === harnessDefault) return { cancelled: false };
+    if (choice !== enterManually) return { cancelled: false, model: choice };
+    const manual = await ctx.ui.input(`${harness} model identifier`, normalizedCurrent || "");
+    if (manual === undefined) return { cancelled: true };
+    return { cancelled: false, ...(manual.trim() ? { model: manual.trim() } : {}) };
   };
 
   const resolveRouting = async (params: FleetParams): Promise<ResolvedRoute> => {
@@ -3004,20 +3038,22 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           const profiles = Object.entries(draft.profiles).filter(([, profile]) => profile.harness === harness).map(([name]) => name);
           const profile = await ctx.ui.select("Role profile", preferredFirst(profiles, role.profile || draft.defaultProfiles[harness]));
           const permissionProfile = await ctx.ui.select("Role permission profile", preferredFirst(Object.keys(draft.permissionProfiles).sort(), role.permissionProfile || "builder-restricted"));
-          const model = await ctx.ui.input("Role model (blank = harness default)", role.model || "");
+          const modelChoice = await selectConfiguredModel(ctx, harness, "Role model", role.model);
+          if (modelChoice.cancelled) continue;
           const effortChoice = await ctx.ui.select("Role effort", preferredFirst(["(harness default)", ...HARNESS_EFFORTS[harness]], role.effort || draft.defaultEfforts[harness] || "(harness default)"));
           const effort = effortChoice && effortChoice !== "(harness default)" ? effortChoice as Effort : undefined;
           const instructions = await ctx.ui.editor("Role instructions", role.instructions || "");
-          draft.roles[roleName] = { harness, ...(profile ? { profile } : {}), ...(permissionProfile ? { permissionProfile } : {}), ...(model?.trim() ? { model: model.trim() } : {}), ...(effort ? { effort } : {}), ...(instructions?.trim() ? { instructions: instructions.trim() } : {}) };
+          draft.roles[roleName] = { harness, ...(profile ? { profile } : {}), ...(permissionProfile ? { permissionProfile } : {}), ...(modelChoice.model ? { model: modelChoice.model } : {}), ...(effort ? { effort } : {}), ...(instructions?.trim() ? { instructions: instructions.trim() } : {}) };
           continue;
         }
         const harness = choice.toLowerCase().replace(" defaults", "") as Harness;
         const profiles = Object.entries(draft.profiles).filter(([, profile]) => profile.harness === harness).map(([name]) => name);
         const profile = await ctx.ui.select(`${harness} profile`, preferredFirst(profiles, draft.defaultProfiles[harness]));
-        const model = await ctx.ui.input(`${harness} model (blank = harness default)`, draft.defaultModels[harness] || "");
+        const modelChoice = await selectConfiguredModel(ctx, harness, `${harness} model`, draft.defaultModels[harness]);
+        if (modelChoice.cancelled) continue;
         const effortChoice = await ctx.ui.select(`${harness} effort`, preferredFirst(["(harness default)", ...HARNESS_EFFORTS[harness]], draft.defaultEfforts[harness] || "(harness default)"));
         if (profile) draft.defaultProfiles[harness] = profile;
-        if (model?.trim()) draft.defaultModels[harness] = model.trim();
+        if (modelChoice.model) draft.defaultModels[harness] = modelChoice.model;
         else delete draft.defaultModels[harness];
         if (effortChoice && effortChoice !== "(harness default)") draft.defaultEfforts[harness] = effortChoice as Effort;
         else delete draft.defaultEfforts[harness];
