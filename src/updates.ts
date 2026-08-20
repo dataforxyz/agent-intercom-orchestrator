@@ -161,7 +161,7 @@ function statusFor(current: string | undefined, latest: string | undefined): Ada
 export async function inspectAdapterFamily(options: {
   agentDir: string;
   currentPackageRoot: string;
-  commandPaths?: Partial<Record<"coi" | "cci", string>>;
+  commandPaths?: Partial<Record<"coi" | "cci" | "codex-intercom-mcp" | "claude-intercom-mcp", string>>;
   home?: string;
   latest?: (packageName: string) => Promise<string | undefined>;
   globalNpmRoot?: string;
@@ -177,6 +177,8 @@ export async function inspectAdapterFamily(options: {
     let root = sourceSpec ? rootFromPiSource(options.agentDir, sourceSpec, adapter) : undefined;
     if (adapter.id === "orchestrator") root = root ?? options.currentPackageRoot;
     if (adapter.binary) root = root ?? await packageRootFrom(options.commandPaths?.[adapter.binary], adapter.packageName);
+    if (adapter.id === "codex") root = root ?? await packageRootFrom(options.commandPaths?.["codex-intercom-mcp"], adapter.packageName);
+    if (adapter.id === "claude") root = root ?? await packageRootFrom(options.commandPaths?.["claude-intercom-mcp"], adapter.packageName);
     if (adapter.id === "opencode") root = root ?? await configuredOpenCodePluginRoot(options.home, adapter.packageName);
     root = root ?? (globalRoot ? await packageRootFrom(join(globalRoot, "@dataforxyz", adapter.repo), adapter.packageName) : undefined);
     if (root && !(await exists(root))) root = undefined;

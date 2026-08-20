@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep successful and coalesced cleanup-run telemetry off the Pi terminal by default; detailed cleanup stderr output now follows the existing `AGENT_INTERCOM_ORCHESTRATOR_METRICS=1` opt-in, while durable cleanup diagnostics and error reporting remain active.
+- Accept `delegationGrant: null` as explicit absence for strict-schema fleet callers, preventing ordinary Claude/Codex/Pi resume requests from manufacturing invalid Controller delegation placeholders.
+- Detect package-owned Codex and Claude MCP executables independently from custom `coi`/`cci` wrappers, so linked adapter checkouts are not misreported as missing or replaced by unsafe global npm installs.
+
 - Replace free-form model entry in `/agents-config` with a live per-harness model selector using the exact identifiers accepted by each harness, while retaining an explicit manual-entry escape hatch.
 - Add explicit, durable, incarnation-bound delegated Pi manager grants with strict resolved model/profile/permission/cwd allowlists, atomic hierarchy budgets, subtree-scoped lifecycle operations, and fail-closed recovery.
 - Add Controller-only trusted-local Boss dynamic-growth grants and released assignment audit retention, while keeping real Boss dynamic spawning fenced off until participant rebind and cross-store launch compensation are complete.
