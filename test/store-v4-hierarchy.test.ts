@@ -75,6 +75,9 @@ test("v3 migration creates non-delegating depth-zero roots", async () => {
     assert.equal(migrated.version, 4);
     assert.deepEqual(migrated.workers[0].hierarchy, { rootWorkerIncarnationId: "inc-legacy", depth: 0 });
     assert.equal(migrated.workers[0].delegationGrant, undefined);
+    const durable = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(durable.version, 4);
+    assert.deepEqual(durable.workers[0].hierarchy, { rootWorkerIncarnationId: "inc-legacy", depth: 0 });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

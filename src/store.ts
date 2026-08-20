@@ -1836,7 +1836,7 @@ export class WorkerStore {
   async migrate(): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
-      if (loaded.sourceVersion === 3) return cloneState(loaded.state);
+      if (loaded.sourceVersion === 4) return cloneState(loaded.state);
       const text = serializedState(loaded.state);
       await this.durableCommit(text, loaded.raw);
       return cloneState(loaded.state);

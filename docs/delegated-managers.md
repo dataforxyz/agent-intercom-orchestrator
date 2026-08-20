@@ -11,8 +11,8 @@ OrcBoss can give an explicitly selected **Pi** coworker a durable, restricted `a
   "role": "advisor",
   "task": "Coordinate bounded review scouts",
   "cwd": "/home/alice/worktrees/app-review",
-  "profile": "pi-delegated-manager",
-  "permissionProfile": "delegated-manager-restricted",
+  "profile": "boss-delegated-manager",
+  "permissionProfile": "boss-delegated-manager-restricted",
   "model": "anthropic/claude-opus-4-6",
   "effort": "high",
   "delegationGrant": {

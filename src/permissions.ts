@@ -338,7 +338,7 @@ export const DEFAULT_PERMISSION_PROFILES: Record<string, PermissionProfile> = {
     git: "read-only",
     hardened: true,
     allowsDelegation: true,
-    piTools: SAFE_PI_MANAGER_TOOLS,
+    piTools: [...SAFE_PI_MANAGER_TOOLS, "agent_fleet"],
     inaccessiblePaths: SENSITIVE_HOME_PATHS,
     environment: SCRUBBED_CREDENTIAL_ENV,
   },

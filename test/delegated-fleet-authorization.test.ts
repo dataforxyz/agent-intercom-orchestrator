@@ -71,8 +71,13 @@ test("delegated environment parsing fails closed on missing or invalid hierarchy
   assert.equal(delegatedManagerIdentityFromEnvironment({
     AGENT_INTERCOM_WORKER_ID: "manager", AGENT_INTERCOM_RUN_ID: "inc-1", AGENT_INTERCOM_SYSTEMD_UNIT: "unit",
     AGENT_INTERCOM_MANAGER_SESSION_ID: "controller", AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID: "root",
-    AGENT_INTERCOM_WORKER_DEPTH: "0", AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID: "grant",
+    AGENT_INTERCOM_WORKER_DEPTH: "-1", AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID: "grant",
   }), undefined);
+  assert.equal(delegatedManagerIdentityFromEnvironment({
+    AGENT_INTERCOM_WORKER_ID: "manager", AGENT_INTERCOM_RUN_ID: "inc-1", AGENT_INTERCOM_SYSTEMD_UNIT: "unit",
+    AGENT_INTERCOM_MANAGER_SESSION_ID: "controller", AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID: "inc-1",
+    AGENT_INTERCOM_WORKER_DEPTH: "0", AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID: "grant",
+  })?.depth, 0);
 });
 
 test("hierarchy projection exposes exact parent, direct children, depth, and descendant counts", () => {

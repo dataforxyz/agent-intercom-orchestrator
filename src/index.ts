@@ -110,6 +110,26 @@ const PACKAGE_ROOT = dirname(dirname(ORCHESTRATOR_EXTENSION));
 const INTERCOM_INBOUND_ACTIVITY_EVENT = "agent-intercom:inbound-message";
 const INTERCOM_LIFECYCLE_SEND_EVENT = "agent-intercom:lifecycle-send";
 
+const ControllerDelegationGrantParams = Type.Object({
+  version: Type.Literal(1),
+  expiresAt: Type.Optional(Type.Number()),
+  roles: Type.Array(Type.String()),
+  harnesses: Type.Array(StringEnum(["pi", "codex"] as const)),
+  permissionProfiles: Type.Array(Type.String()),
+  profiles: Type.Array(Type.String()),
+  cwdRoots: Type.Array(Type.Object({
+    path: Type.String(),
+    gitCommonDir: Type.Optional(Type.String()),
+    gitWorktreeRoot: Type.Optional(Type.String()),
+  }, { additionalProperties: false })),
+  modelPatterns: Type.Array(Type.String()),
+  efforts: Type.Array(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
+  maxLiveDirectChildren: Type.Number(),
+  maxLiveDescendants: Type.Number(),
+  maxDepth: Type.Number(),
+  canSubdelegate: Type.Boolean(),
+}, { additionalProperties: false });
+
 const AgentFleetParams = Type.Object({
   action: StringEnum(ACTIONS),
   id: Type.Optional(Type.String({ description: "Stable worker id" })),
@@ -125,6 +145,7 @@ const AgentFleetParams = Type.Object({
   subagents: Type.Optional(StringEnum(["auto", "required", "not-required"] as const, { description: "Use 'auto' unless the caller explicitly requires or forbids nested-subagent capability" })),
   requiresSubagents: Type.Optional(Type.Boolean({ description: "Legacy nested-subagent override; prefer subagents=auto|required|not-required" })),
   fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
+  delegationGrant: Type.Optional(ControllerDelegationGrantParams),
   all: Type.Optional(Type.Boolean({ description: "Include workers owned by other manager sessions for list/status diagnostics" })),
   execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup or updates; false previews them" })),
   acknowledge: Type.Optional(Type.Boolean({ description: "Manager acknowledgment required before deleting stopped worker records" })),
@@ -189,6 +210,7 @@ type FleetParams = {
   requiresSubagents?: boolean;
   fresh?: boolean;
   childGrant?: DelegationGrantV1;
+  delegationGrant?: Omit<DelegationGrantV1, "grantId" | "issuedAt" | "issuedByWorkerIncarnationId">;
   all?: boolean;
   execute?: boolean;
   acknowledge?: boolean;
@@ -1659,6 +1681,17 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       managerSessionId: managerSessionId(ctx),
       config,
     });
+    if (params.delegationGrant) {
+      if (delegatedManager) throw new Error("Delegated managers must use childGrant for monotonic subdelegation");
+      if (harness !== "pi") throw new Error("Controller-issued delegation is restricted to Pi managers");
+      if (permissionProfile.allowsDelegation !== true) throw new Error(`Permission profile ${permissionProfileName} does not allow delegation`);
+      worker.delegationGrant = {
+        ...structuredClone(params.delegationGrant),
+        version: 1,
+        grantId: `grant-${newRunId()}`,
+        issuedAt: Date.now(),
+      };
+    }
     if (delegatedManager) {
       if (!model || !effort) throw new Error("Delegated child launch requires a resolved model and effort");
       const admitted = await assertResolvedDelegatedAdmission(delegatedManager, {

@@ -51,7 +51,7 @@ export function delegatedManagerIdentityFromEnvironment(
   const rawDepth = environment.AGENT_INTERCOM_WORKER_DEPTH;
   if (!workerId || !workerIncarnationId || !systemdUnit || !managerSessionId || !rootWorkerIncarnationId || !grantId || rawDepth === undefined) return undefined;
   const depth = Number(rawDepth);
-  if (!Number.isSafeInteger(depth) || depth < 1) return undefined;
+  if (!Number.isSafeInteger(depth) || depth < 0) return undefined;
   return { workerId, workerIncarnationId, systemdUnit, managerSessionId, rootWorkerIncarnationId, depth, grantId };
 }
 
