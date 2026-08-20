@@ -55,7 +55,7 @@ Add a new canonical type, stored inline on the grantee worker record:
 interface DelegationGrantV1 {
   version: 1;
   grantId: string;                  // random immutable identity
-  issuedByWorkerIncarnationId?: string; // absent only for Controller-issued root grant
+  issuedByWorkerIncarnationId?: string; // absent only for a Controller-issued grant held by a depth-0 hierarchy root
   issuedAt: number;
   roles: string[];                  // exact role names
   harnesses: Harness[];

@@ -17,7 +17,7 @@ OrcBoss can give an explicitly selected **Pi** coworker a durable, restricted `a
   "effort": "high",
   "delegationGrant": {
     "version": 1,
-    "roles": ["scout", "reviewer"],
+    "roles": ["reviewer", "scout"],
     "harnesses": ["pi"],
     "profiles": ["pi-peer"],
     "permissionProfiles": ["review-readonly"],
@@ -25,8 +25,8 @@ OrcBoss can give an explicitly selected **Pi** coworker a durable, restricted `a
       { "path": "/home/alice/worktrees/app-review" }
     ],
     "modelPatterns": [
-      "anthropic/claude-sonnet-4-6",
-      "anthropic/claude-opus-*"
+      "anthropic/claude-opus-*",
+      "anthropic/claude-sonnet-4-6"
     ],
     "efforts": ["high", "xhigh"],
     "maxLiveDirectChildren": 2,
@@ -37,7 +37,7 @@ OrcBoss can give an explicitly selected **Pi** coworker a durable, restricted `a
 }
 ```
 
-The Controller supplies policy, but OrcBoss creates the immutable `grantId` and binds `issuedByWorkerIncarnationId` to the launched incarnation. `cwdRoots` are canonicalized and retain Git identity where applicable.
+The Controller supplies policy, but OrcBoss creates the immutable `grantId`. A Controller-issued grant held by the depth-0 root intentionally omits `issuedByWorkerIncarnationId`; only a delegated subgrant records its exact issuing worker incarnation. `cwdRoots` are canonicalized and retain Git identity where applicable.
 
 ### Model allowlists
 

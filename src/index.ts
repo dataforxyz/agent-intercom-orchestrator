@@ -1807,6 +1807,11 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           unit,
           managerSessionId: worker.managerSessionId,
           fresh: params.fresh,
+          // A grant is persisted before launch and the delegated extension
+          // re-authenticates it against that exact durable identity. Boss
+          // participants remain fenced until their complete dynamic-growth
+          // lifecycle is implemented.
+          delegatedFleet: harness === "pi" && !params.bossTeam && worker.delegationGrant !== undefined,
         }),
         // Recovery identity is orchestrator-owned. Permission/runtime/profile
         // and Boss metadata must not replace the manager context used to

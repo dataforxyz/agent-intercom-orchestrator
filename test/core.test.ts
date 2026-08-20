@@ -112,6 +112,11 @@ test("harness launch args include identity or the initial task", () => {
     assert.match(args.join(" "), /never claim it succeeded/);
   }
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
+  const grantedPiEnv = buildWorkerEnvironment("pi", "delegated-manager", "manager", undefined, {
+    runId: "delegated-run", unit: "delegated-manager.service", managerSessionId: "controller-a", delegatedFleet: true,
+  });
+  assert.equal(grantedPiEnv.AGENT_INTERCOM_DELEGATED_FLEET_ENABLED, "1");
+  assert.equal(grantedPiEnv.AGENT_INTERCOM_ORCHESTRATOR_DISABLED, undefined);
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
   const ownedEnv = buildWorkerEnvironment("pi", "advisor-a", "advisor", undefined, {
     runId: "run-a", unit: "worker-a.service", managerSessionId: "manager-a", fresh: true,

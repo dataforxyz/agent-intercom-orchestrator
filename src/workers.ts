@@ -176,7 +176,7 @@ export function buildWorkerEnvironment(
   workerId: string,
   role: string,
   model?: string,
-  ownership?: { runId: string; unit: string; managerSessionId: string; fresh?: boolean },
+  ownership?: { runId: string; unit: string; managerSessionId: string; fresh?: boolean; delegatedFleet?: boolean },
 ): Record<string, string> {
   const ownedEnvironment = {
     AGENT_INTERCOM_ROLE: role,
@@ -200,7 +200,12 @@ export function buildWorkerEnvironment(
   if (harness === "pi") {
     return {
       ...ownedEnvironment,
-      AGENT_INTERCOM_ORCHESTRATOR_DISABLED: "1",
+      // A durable grant has already been admitted to WorkerStore by the caller.
+      // Keep the ordinary-worker default fail-closed, but do not reintroduce the
+      // absolute extension kill switch for a granted Pi manager.
+      ...(ownership?.delegatedFleet
+        ? { AGENT_INTERCOM_DELEGATED_FLEET_ENABLED: "1" }
+        : { AGENT_INTERCOM_ORCHESTRATOR_DISABLED: "1" }),
     };
   }
   if (harness === "codex") {

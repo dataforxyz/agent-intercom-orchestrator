@@ -106,6 +106,85 @@ test("owned Boss participants cannot register /boss, boss, or agent_fleet when o
   }
 });
 
+test("Controller-granted Pi managers launch with the restricted delegated fleet enabled", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-controller-delegated-launch-"));
+  const keys = [
+    "PI_CODING_AGENT_DIR", "AGENT_INTERCOM_ORCHESTRATOR_DISABLED", "AGENT_INTERCOM_DELEGATED_FLEET_ENABLED",
+    "AGENT_INTERCOM_DELEGATED_FLEET_DISABLED", "AGENT_INTERCOM_DISABLE_CLEANUP_TIMER", "AGENT_INTERCOM_SKIP_STARTUP_CLEANUP",
+  ] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+    await mkdir(orchestratorDir, { recursive: true });
+    await writeFile(join(orchestratorDir, "config.json"), JSON.stringify({
+      profiles: { "delegated-pi": { harness: "pi", command: "/bin/true", mode: "one-shot", maxRuntime: "12h" } },
+      permissionProfiles: { delegating: { workspace: "read-only", git: "read-only", allowsDelegation: true } },
+      defaultModels: { pi: "anthropic/claude-sonnet" },
+      defaultEfforts: { pi: "high" },
+    }));
+    Object.assign(process.env, {
+      PI_CODING_AGENT_DIR: agentDir,
+      AGENT_INTERCOM_DISABLE_CLEANUP_TIMER: "1",
+      AGENT_INTERCOM_SKIP_STARTUP_CLEANUP: "1",
+    });
+    delete process.env.AGENT_INTERCOM_ORCHESTRATOR_DISABLED;
+    delete process.env.AGENT_INTERCOM_DELEGATED_FLEET_ENABLED;
+    delete process.env.AGENT_INTERCOM_DELEGATED_FLEET_DISABLED;
+
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const launches: string[][] = [];
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {},
+      async exec(command: string, args: string[]) {
+        if (command === "systemd-run") launches.push([...args]);
+        if (command === "systemctl" && args.includes("show")) {
+          return { ...commandResult(), stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\nJob=\nExecMainStartTimestampMonotonic=10\n" };
+        }
+        return commandResult();
+      },
+    };
+    const ctx: any = {
+      cwd: agentDir, mode: "tui", hasUI: false,
+      sessionManager: { getSessionId: () => "controller-session", getSessionFile: () => undefined, getEntries: () => [] },
+      ui: { setStatus() {}, notify() {} },
+    };
+    const { default: extension } = await import(new URL(`../src/index.ts?controller-delegated-launch=${Date.now()}`, import.meta.url).href);
+    extension(pi);
+    await lifecycle.get("session_start")?.({}, ctx);
+    await tools.get("agent_fleet").execute("controller-granted-manager", {
+      action: "spawn", id: "delegated-manager", task: "coordinate bounded work", role: "manager", harness: "pi",
+      profile: "delegated-pi", permissionProfile: "delegating", model: "anthropic/claude-sonnet", effort: "high",
+      delegationGrant: {
+        version: 1, roles: ["scout"], harnesses: ["pi"], permissionProfiles: ["delegating"], profiles: ["delegated-pi"],
+        cwdRoots: [{ path: agentDir }], modelPatterns: ["anthropic/claude-*"], efforts: ["high"],
+        maxLiveDirectChildren: 1, maxLiveDescendants: 1, maxDepth: 1, canSubdelegate: false,
+      },
+    }, new AbortController().signal, () => {}, ctx);
+    await tools.get("agent_fleet").execute("ordinary-pi-worker", {
+      action: "spawn", id: "ordinary-pi", task: "ordinary bounded work", role: "scout", harness: "pi",
+      profile: "delegated-pi", permissionProfile: "delegating", model: "anthropic/claude-sonnet", effort: "high",
+    }, new AbortController().signal, () => {}, ctx);
+
+    assert.equal(launches.length, 2);
+    const grantedLaunch = launches[0];
+    assert.ok(grantedLaunch.includes("--setenv=AGENT_INTERCOM_DELEGATED_FLEET_ENABLED=1"));
+    assert.equal(grantedLaunch.some((arg) => arg === "--setenv=AGENT_INTERCOM_ORCHESTRATOR_DISABLED=1"), false);
+    const ordinaryLaunch = launches[1];
+    assert.ok(ordinaryLaunch.includes("--setenv=AGENT_INTERCOM_ORCHESTRATOR_DISABLED=1"));
+    assert.equal(ordinaryLaunch.some((arg) => arg === "--setenv=AGENT_INTERCOM_DELEGATED_FLEET_ENABLED=1"), false);
+  } finally {
+    await rm(agentDir, { recursive: true, force: true });
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("delegated fleet registration is feature-fenced, identity-bound, restricted, and revocable", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-delegated-registration-"));
   const keys = [
