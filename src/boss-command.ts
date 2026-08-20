@@ -11,6 +11,8 @@ export const BOSS_COMMAND_ACTIONS = [
   "proof",
   "approve",
   "reject",
+  "authorize-growth",
+  "revoke-growth",
 ] as const;
 
 export type BossCommandAction = typeof BOSS_COMMAND_ACTIONS[number];
@@ -35,6 +37,8 @@ export type BossCommandRequest =
   | { action: "create"; goal: string; requirements?: BossCreateRequirements; sourcePath?: string }
   | { action: "freeze"; bossRunId: string; expectedAcceptanceRevision: number; expectedDesignRevision: number }
   | { action: "unfreeze"; bossRunId: string; expectedFreezeRevision: number; expectedFingerprintSha256: string }
+  | { action: "authorize-growth"; bossRunId: string; participantRole: "manager" | "worker" | "scout" | "adversary"; participantWorkerId: string; participantWorkerIncarnationId: string; expectedAcceptanceRevision: number; expectedDesignRevision: number; delegationGrant: import("./types.ts").DelegationGrantV1 }
+  | { action: "revoke-growth"; bossRunId: string; expectedGrowthGrantRevision: number }
   | { action: "resume" | "pause" | "cancel" | "proof" | "approve" | "reject"; bossRunId: string; note?: string };
 
 export interface BossCommandContextLike {
@@ -107,6 +111,9 @@ export function parseBossCommand(input: string): BossCommandRequest {
   }
   if (action === "status") {
     return remainder ? { action, bossRunId: parseBossRunId(remainder) } : { action };
+  }
+  if (action === "authorize-growth" || action === "revoke-growth") {
+    throw new Error(`/boss ${action} is available only through the typed Controller boss tool.`);
   }
   const parts = remainder.split(/\s+/).filter(Boolean);
   const id = parseBossRunId(parts[0]);

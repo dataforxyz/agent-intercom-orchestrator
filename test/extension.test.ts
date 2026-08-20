@@ -106,6 +106,223 @@ test("owned Boss participants cannot register /boss, boss, or agent_fleet when o
   }
 });
 
+test("delegated fleet registration is feature-fenced, identity-bound, restricted, and revocable", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-delegated-registration-"));
+  const keys = [
+    "PI_CODING_AGENT_DIR", "AGENT_INTERCOM_DELEGATED_FLEET_ENABLED", "AGENT_INTERCOM_DELEGATED_FLEET_DISABLED",
+    "AGENT_INTERCOM_WORKER_ID", "AGENT_INTERCOM_RUN_ID", "AGENT_INTERCOM_SYSTEMD_UNIT",
+    "AGENT_INTERCOM_MANAGER_SESSION_ID", "AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID",
+    "AGENT_INTERCOM_WORKER_DEPTH", "AGENT_INTERCOM_DELEGATION_GRANT_ID", "AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID",
+    "AGENT_INTERCOM_DISABLE_CLEANUP_TIMER", "AGENT_INTERCOM_SKIP_STARTUP_CLEANUP",
+  ] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const orchestratorDir = join(agentDir, "intercom", "orchestrator");
+  const delegatedCwd = join(agentDir, "delegated-repo");
+  const worker = {
+    id: "delegated-manager", workerIncarnationId: "inc-manager", workerGeneration: 1,
+    harness: "pi", backend: "systemd", role: "manager", task: "manage", cwd: delegatedCwd,
+    profile: "delegated-pi", permissionProfile: "delegating", state: "ready", owned: true,
+    managerOwner: { context: "pi", principalId: "controller-session", sessionId: "controller-session", bindingEpoch: 0 },
+    hierarchy: { rootWorkerIncarnationId: "inc-root", parentWorkerIncarnationId: "inc-root", depth: 1, grantId: "parent-grant" },
+    delegationGrant: {
+      version: 1, grantId: "grant-1", issuedAt: Date.now() - 1_000, roles: ["scout"], harnesses: ["pi"],
+      permissionProfiles: ["delegating"], profiles: ["delegated-pi"], cwdRoots: [{ path: delegatedCwd }],
+      modelPatterns: ["anthropic/claude-*"], efforts: ["high"], maxLiveDirectChildren: 1,
+      maxLiveDescendants: 2, maxDepth: 3, canSubdelegate: true, issuedByWorkerIncarnationId: "inc-root",
+    },
+    unit: "agent-delegated-manager.service", createdAt: Date.now() - 1_000, updatedAt: Date.now() - 1_000,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const rootWorker = {
+    ...worker, id: "root-manager", workerIncarnationId: "inc-root", role: "root",
+    delegationGrant: { ...worker.delegationGrant, grantId: "parent-grant", canSubdelegate: true, maxDepth: 4, issuedByWorkerIncarnationId: undefined },
+    hierarchy: { rootWorkerIncarnationId: "inc-root", depth: 0 }, unit: "agent-root-manager.service",
+  };
+  const childWorker = {
+    ...worker, id: "delegated-child", workerIncarnationId: "inc-child", role: "scout",
+    delegationGrant: { ...worker.delegationGrant, grantId: "child-grant", maxDepth: 3, canSubdelegate: false, issuedByWorkerIncarnationId: "inc-manager" },
+    managerOwner: { context: "pi", principalId: "inc-manager", sessionId: "inc-manager", bindingEpoch: 0 },
+    hierarchy: { rootWorkerIncarnationId: "inc-root", parentWorkerIncarnationId: "inc-manager", depth: 2, grantId: "grant-1" },
+    unit: "agent-delegated-child.service",
+  };
+  const grandchildWorker = {
+    ...childWorker, id: "delegated-grandchild", workerIncarnationId: "inc-grandchild", delegationGrant: undefined,
+    hierarchy: { rootWorkerIncarnationId: "inc-root", parentWorkerIncarnationId: "inc-child", depth: 3, grantId: "child-grant" },
+    unit: "agent-delegated-grandchild.service",
+  };
+  const writeState = async (overrides: Record<string, unknown> = {}, descendants: any[] = []) => {
+    const workers = [{ ...worker, ...overrides }, rootWorker, ...descendants];
+    await writeFile(join(orchestratorDir, "workers.json"), JSON.stringify({
+      version: 4, generation: 1, workers,
+      workerGenerations: workers.map((candidate) => ({ workerId: candidate.id, generation: 1 }))
+        .sort((left, right) => left.workerId.localeCompare(right.workerId)),
+    }));
+  };
+  let failNextStopUnit: string | undefined;
+  let failNextLaunch = false;
+  const stoppedUnits = new Set<string>();
+  const launchedUnits: string[] = [];
+  const load = async (label: string) => {
+    const lifecycle = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const pi: any = {
+      on(name: string, handler: (...args: any[]) => any) { lifecycle.set(name, handler); },
+      events: { on() { return () => {}; }, emit() {} },
+      registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {},
+      async exec(command: string, args: string[]) {
+        const unit = args.includes("show") ? args[2] : args.find((arg) => arg.startsWith("--unit="))?.slice("--unit=".length) ?? args.at(-1)!;
+        if (command === "systemd-run") {
+          if (failNextLaunch) {
+            failNextLaunch = false;
+            return { ...commandResult(), code: 1, stderr: "injected delegated launch failure" };
+          }
+          launchedUnits.push(unit);
+        }
+        if (command === "systemctl" && args.includes("stop")) {
+          if (failNextStopUnit === unit) {
+            failNextStopUnit = undefined;
+            return { ...commandResult(), code: 1, stderr: "transient delegated stop failure" };
+          }
+          stoppedUnits.add(unit);
+        }
+        if (command === "systemctl" && args.includes("show") && stoppedUnits.has(unit)) {
+          return { ...commandResult(), stdout: "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n" };
+        }
+        if (command === "systemctl" && args.includes("show")) {
+          return { ...commandResult(), stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\nResult=success\nExecMainStatus=0\nJob=\nExecMainStartTimestampMonotonic=10\n" };
+        }
+        return commandResult();
+      },
+    };
+    const { default: extension } = await import(new URL(`../src/index.ts?delegated-registration=${label}-${Date.now()}`, import.meta.url).href);
+    extension(pi);
+    const ctx: any = {
+      cwd: delegatedCwd, mode: "tui", hasUI: false,
+      sessionManager: { getSessionId: () => "delegated-live-session", getSessionFile: () => undefined, getEntries: () => [] },
+      ui: { setStatus() {}, notify() {} },
+    };
+    return { lifecycle, tools, ctx };
+  };
+  try {
+    await mkdir(orchestratorDir, { recursive: true });
+    await mkdir(delegatedCwd, { recursive: true });
+    await writeFile(join(orchestratorDir, "config.json"), JSON.stringify({
+      profiles: { "delegated-pi": { harness: "pi", command: "/bin/true", mode: "one-shot", maxRuntime: "12h" } },
+      permissionProfiles: { delegating: { workspace: "read-only", git: "read-only", allowsDelegation: true } },
+      defaultModels: { pi: "anthropic/claude-sonnet" },
+    }));
+    await writeState();
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.AGENT_INTERCOM_DISABLE_CLEANUP_TIMER = "1";
+    process.env.AGENT_INTERCOM_SKIP_STARTUP_CLEANUP = "1";
+    Object.assign(process.env, {
+      AGENT_INTERCOM_DELEGATED_FLEET_ENABLED: "1", AGENT_INTERCOM_WORKER_ID: worker.id,
+      AGENT_INTERCOM_RUN_ID: worker.workerIncarnationId, AGENT_INTERCOM_SYSTEMD_UNIT: worker.unit,
+      AGENT_INTERCOM_MANAGER_SESSION_ID: worker.managerOwner.sessionId,
+      AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID: worker.hierarchy.rootWorkerIncarnationId,
+      AGENT_INTERCOM_WORKER_DEPTH: "1", AGENT_INTERCOM_DELEGATION_GRANT_ID: worker.hierarchy.grantId,
+      AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID: worker.delegationGrant.grantId,
+    });
+
+    const valid = await load("valid");
+    assert.equal(valid.tools.has("agent_fleet"), false, "delegated tool must not register before durable authentication");
+    await valid.lifecycle.get("session_start")?.({}, valid.ctx);
+    const delegatedTool = valid.tools.get("agent_fleet");
+    assert.ok(delegatedTool, "valid delegated identity should receive agent_fleet after initialization");
+    assert.deepEqual(Object.keys(delegatedTool.parameters.properties).sort(), [
+      "action", "childGrant", "cwd", "effort", "fresh", "harness", "id", "instructions", "lines", "model",
+      "permissionProfile", "profile", "requiresSubagents", "role", "subagents", "task",
+    ]);
+    assert.equal(delegatedTool.parameters.additionalProperties, false);
+    assert.equal("all" in delegatedTool.parameters.properties, false);
+    assert.equal("execute" in delegatedTool.parameters.properties, false);
+
+    const allowedRoute = await delegatedTool.execute("delegated-route", {
+      action: "route", role: "scout", harness: "pi", profile: "delegated-pi", permissionProfile: "delegating",
+      model: "anthropic/claude-sonnet", effort: "high", cwd: delegatedCwd,
+    }, new AbortController().signal, () => {}, valid.ctx);
+    assert.equal(allowedRoute.details.profile, "delegated-pi");
+    await assert.rejects(delegatedTool.execute("delegated-route-model-denied", {
+      action: "route", role: "scout", harness: "pi", profile: "delegated-pi", permissionProfile: "delegating",
+      model: "openai/gpt-5", effort: "high", cwd: delegatedCwd,
+    }, new AbortController().signal, () => {}, valid.ctx), /exceeds delegated authority/i);
+    await assert.rejects(delegatedTool.execute("delegated-route-permission-denied", {
+      action: "route", role: "scout", harness: "pi", profile: "delegated-pi", permissionProfile: "trusted",
+      model: "anthropic/claude-sonnet", effort: "high", cwd: delegatedCwd,
+    }, new AbortController().signal, () => {}, valid.ctx), /exceeds delegated authority/i);
+
+    const spawned = await delegatedTool.execute("delegated-spawn", {
+      action: "spawn", id: "spawned-child", task: "research", role: "scout", harness: "pi",
+      profile: "delegated-pi", permissionProfile: "delegating", model: "anthropic/claude-sonnet", effort: "high", cwd: delegatedCwd,
+    }, new AbortController().signal, () => {}, valid.ctx);
+    assert.equal(spawned.details.worker.id, "spawned-child");
+    assert.equal(spawned.details.worker.hierarchy.parentWorkerIncarnationId, worker.workerIncarnationId);
+    assert.equal(launchedUnits.length, 1);
+    await writeState();
+    failNextLaunch = true;
+    await assert.rejects(delegatedTool.execute("delegated-spawn-failure", {
+      action: "spawn", id: "failed-child", task: "research", role: "scout", harness: "pi",
+      profile: "delegated-pi", permissionProfile: "delegating", model: "anthropic/claude-sonnet", effort: "high", cwd: delegatedCwd,
+    }, new AbortController().signal, () => {}, valid.ctx), /injected delegated launch failure/);
+    const failedSpawnState = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    const failedChild = failedSpawnState.workers.find((entry: any) => entry.id === "failed-child");
+    assert.equal(failedChild.state, "failed");
+    assert.equal(failedChild.stopReason, "spawn-failed");
+    assert.match(failedChild.lastError, /injected delegated launch failure/);
+
+    await writeState({}, [childWorker, grandchildWorker]);
+    failNextStopUnit = grandchildWorker.unit;
+    await assert.rejects(
+      delegatedTool.execute("partial-cascade-stop", { action: "stop", id: childWorker.id }, new AbortController().signal, () => {}, valid.ctx),
+      /transient delegated stop failure/,
+    );
+    const partial = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    for (const id of [childWorker.id, grandchildWorker.id]) {
+      const candidate = partial.workers.find((entry: any) => entry.id === id);
+      assert.equal(candidate.state, "blocked");
+      assert.equal(candidate.stateReason, "stop_in_progress");
+      assert.equal(candidate.stoppedAt, undefined);
+    }
+    assert.match(partial.workers.find((entry: any) => entry.id === grandchildWorker.id).lastError, /transient delegated stop failure/);
+    const retried = await delegatedTool.execute("retry-cascade-stop", { action: "stop", id: childWorker.id }, new AbortController().signal, () => {}, valid.ctx);
+    assert.deepEqual(retried.details.stopped.map((entry: any) => entry.id), [grandchildWorker.id, childWorker.id]);
+    const completed = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    assert.ok(completed.workers.filter((entry: any) => [childWorker.id, grandchildWorker.id].includes(entry.id)).every((entry: any) => entry.state === "stopped" && entry.stateReason === undefined));
+
+    const forgotten = await delegatedTool.execute("forget-terminal-subtree", { action: "forget", id: childWorker.id }, new AbortController().signal, () => {}, valid.ctx);
+    assert.deepEqual(forgotten.details.forgotten, [grandchildWorker.id, childWorker.id]);
+    const afterForget = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
+    assert.equal(afterForget.workers.some((entry: any) => [childWorker.id, grandchildWorker.id].includes(entry.id)), false);
+    assert.ok(afterForget.workers.some((entry: any) => entry.id === worker.id), "forget must preserve the delegated manager record");
+
+    await writeState({ delegationGrant: { ...worker.delegationGrant, expiresAt: Date.now() - 1 } });
+    await assert.rejects(
+      delegatedTool.execute("revoked", { action: "list" }, new AbortController().signal, () => {}, valid.ctx),
+      /stale, revoked, or unauthorized/,
+      "every delegated call must reauthenticate the durable grant",
+    );
+
+    await writeState();
+    process.env.AGENT_INTERCOM_RUN_ID = "stale-incarnation";
+    const stale = await load("stale");
+    await assert.rejects(stale.lifecycle.get("session_start")?.({}, stale.ctx), /authority is unavailable/);
+    assert.equal(stale.tools.has("agent_fleet"), false);
+
+    process.env.AGENT_INTERCOM_RUN_ID = worker.workerIncarnationId;
+    process.env.AGENT_INTERCOM_DELEGATED_FLEET_DISABLED = "1";
+    const killed = await load("killed");
+    assert.equal(killed.tools.has("agent_fleet"), true, "absolute kill switch preserves the ordinary Controller surface");
+    assert.ok("all" in killed.tools.get("agent_fleet").parameters.properties);
+  } finally {
+    await rm(agentDir, { recursive: true, force: true });
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("Boss participant launches carry isolated Ralph state, exact extensions, tools, and role prompts", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-boss-launch-"));
   const runtimeDir = await mkdtemp(join(tmpdir(), "agent-intercom-orchestrator-boss-runtime-"));
@@ -332,6 +549,9 @@ test("Boss participant launches carry isolated Ralph state, exact extensions, to
       assert.ok(launch.includes(`--setenv=AGENT_INTERCOM_BOSS_RUN_ID=${bossRunId}`));
       assert.ok(launch.includes("--setenv=AGENT_INTERCOM_BOSS_CONTROLLER_TARGET=controller-exact-target"));
       assert.ok(launch.includes(`--setenv=AGENT_INTERCOM_BOSS_MANAGER_TARGET=boss-manager-${suffix}`));
+      const teamTargetSource = join(agentDir, "intercom", "orchestrator", "boss-team-targets", `${bossRunId}.json`);
+      assert.ok(launch.includes(`--setenv=AGENT_INTERCOM_BOSS_TEAM_TARGET_SOURCE=${teamTargetSource}`));
+      assert.ok(launch.includes(`--property=ReadOnlyPaths="-${teamTargetSource}"`), `${role} can access its Controller-owned team target source as writable`);
       assert.ok(launch.includes(`--working-directory=${canonicalCwd}`), `${role} did not launch in the canonical resource`);
       assert.ok(launch.includes(`--setenv=PI_RALPH_STATE_ROOT=${join(runtimeDir, "agent-intercom-worker", "boss-ralph", bossRunId, role)}`));
       assert.ok(launch.includes(`--setenv=PI_RETURN_ON_STATE_DIR=${join(runtimeDir, "agent-intercom-worker", "boss-return-on", bossRunId, role)}`));
@@ -1561,18 +1781,36 @@ test("cleanup prunes retention-expired terminal workers and preserves recent his
       pruneStoppedWorkersOnCleanup: true,
     }));
     const now = Date.now();
-    const worker = (id: string, stoppedAt: number, dirtyAtStop = false) => ({
-      id, runId: `run-${id}`, harness: "pi", role: "advisor", task: "review", cwd: "/tmp",
-      state: "stopped", owned: true, managerSessionId: "manager-a", stopReason: "manager-requested",
+    const worker = (id: string, stoppedAt: number, dirtyAtStop = false, parentId?: string) => ({
+      id, workerIncarnationId: `run-${id}`, workerGeneration: 1,
+      harness: "pi", backend: "systemd", role: "advisor", task: "review", cwd: "/tmp",
+      state: "stopped", owned: true,
+      managerOwner: { context: "pi", principalId: "manager-a", sessionId: "manager-a", bindingEpoch: 0 },
+      stopReason: "manager-requested",
       dirtyAtStop, stoppedAt, createdAt: stoppedAt, updatedAt: stoppedAt, leaseExpiresAt: stoppedAt,
+      hierarchy: parentId
+        ? { rootWorkerIncarnationId: "run-expired-parent", parentWorkerIncarnationId: `run-${parentId}`, depth: 1, grantId: "grant-parent-child" }
+        : { rootWorkerIncarnationId: `run-${id}`, depth: 0 },
+      ...(id === "expired-parent" ? { delegationGrant: {
+        version: 1, grantId: "grant-parent-child", issuedAt: 1,
+        roles: ["advisor"], harnesses: ["pi"], permissionProfiles: ["review-readonly"], profiles: ["pi-peer"],
+        cwdRoots: [{ path: "/tmp" }], modelPatterns: ["anthropic/claude-*"], efforts: ["medium"],
+        maxLiveDirectChildren: 1, maxLiveDescendants: 1, maxDepth: 1, canSubdelegate: false,
+      } } : {}),
     });
-    await writeFile(join(orchestratorDir, "workers.json"), JSON.stringify({ version: 1, workers: [
+    const workers = [
+      worker("expired-parent", now - 2 * 24 * 60 * 60_000),
+      worker("retained-child", now - 2 * 60 * 60_000, false, "expired-parent"),
       worker("expired-clean", now - 2 * 24 * 60 * 60_000),
       worker("retained-recent", now - 2 * 60 * 60_000),
       worker("retained-dirty", now - 2 * 24 * 60 * 60_000, true),
       worker("unsafe-cache", now - 2 * 60 * 60_000),
-    ] }));
-    for (const id of ["expired-clean", "retained-recent", "retained-dirty", "unsafe-cache"]) {
+    ];
+    await writeFile(join(orchestratorDir, "workers.json"), JSON.stringify({
+      version: 4, generation: 1, workers,
+      workerGenerations: workers.map(({ id }) => ({ workerId: id, generation: 1 })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
+    }));
+    for (const id of ["expired-parent", "retained-child", "expired-clean", "retained-recent", "retained-dirty", "unsafe-cache"]) {
       const root = join(orchestratorDir, "worker-runtime", id);
       await mkdir(root, { recursive: true });
       await writeFile(join(root, "state"), "retained\n");
@@ -1620,10 +1858,12 @@ test("cleanup prunes retention-expired terminal workers and preserves recent his
       ["unsafe-cache", "cache", true],
     ]);
     const saved = JSON.parse(await readFile(join(orchestratorDir, "workers.json"), "utf8"));
-    assert.deepEqual(saved.workers.map((record: any) => record.id), ["retained-recent", "retained-dirty", "unsafe-cache"]);
+    assert.deepEqual(saved.workers.map((record: any) => record.id), ["expired-parent", "retained-child", "retained-recent", "retained-dirty", "unsafe-cache"]);
     await assert.rejects(access(join(orchestratorDir, "worker-runtime", "expired-clean")));
     await assert.rejects(access(join(orchestratorDir, "worker-runtime", "orphaned-run")));
     await assert.rejects(access(join(orchestratorDir, "worker-runtime", "retained-recent", "home", ".cache", "npm")));
+    assert.equal(await readFile(join(orchestratorDir, "worker-runtime", "expired-parent", "state"), "utf8"), "retained\n");
+    assert.equal(await readFile(join(orchestratorDir, "worker-runtime", "retained-child", "state"), "utf8"), "retained\n");
     assert.equal(await readFile(join(orchestratorDir, "worker-runtime", "retained-recent", "state"), "utf8"), "retained\n");
     assert.equal(await readFile(join(orchestratorDir, "worker-runtime", "retained-dirty", "state"), "utf8"), "retained\n");
     assert.equal(await readFile(join(externalHome, ".cache", "npm", "keep"), "utf8"), "outside\n");
@@ -1798,7 +2038,7 @@ test("extension registers discovery tools and interactive configuration commands
     );
     assert.match(capabilities.content[0].text, /pi: modes=persistent/);
     assert.match(capabilities.content[0].text, /opencode: modes=persistent,one-shot/);
-    assert.match(capabilities.content[0].text, /permissions: builder-restricted,manager-restricted,review-readonly,trusted/);
+    assert.match(capabilities.content[0].text, /permissions: boss-delegated-manager-restricted,builder-restricted,manager-restricted,review-readonly,trusted/);
     assert.match(capabilities.content[0].text, /visual\/browser capture: unmodeled/);
     const permissions = await tools.get("agent_fleet").execute("permissions-test", { action: "permissions" }, new AbortController().signal, () => {}, ctx);
     assert.match(permissions.content[0].text, /review-readonly \[workspace=read-only git=read-only hardened\]/);

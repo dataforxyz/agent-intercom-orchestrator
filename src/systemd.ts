@@ -247,10 +247,28 @@ function parseWorkerUnitIdentity(environment: string | undefined, expectedUnit: 
   const unit = field("AGENT_INTERCOM_SYSTEMD_UNIT");
   const managerSessionId = field("AGENT_INTERCOM_MANAGER_SESSION_ID");
   const managerContext = field("AGENT_INTERCOM_MANAGER_CONTEXT");
+  const rootWorkerIncarnationId = field("AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID");
+  const parentWorkerIncarnationId = field("AGENT_INTERCOM_PARENT_WORKER_INCARNATION_ID");
+  const grantId = field("AGENT_INTERCOM_DELEGATION_GRANT_ID");
+  const depthText = field("AGENT_INTERCOM_WORKER_DEPTH");
+  const depth = depthText === undefined ? undefined : Number(depthText);
+  const hasHierarchyIdentity = rootWorkerIncarnationId !== undefined || parentWorkerIncarnationId !== undefined || grantId !== undefined || depthText !== undefined;
   if (!workerId || !workerIncarnationId || unit !== expectedUnit || !managerSessionId
+    || (hasHierarchyIdentity && (!rootWorkerIncarnationId || !Number.isSafeInteger(depth) || depth! < 0))
     || (managerContext !== "pi" && managerContext !== "opencode" && managerContext !== "headless_cli")
     || field("AGENT_INTERCOM_OWNED") !== "1") return undefined;
-  return { workerId, workerIncarnationId, unit, managerSessionId, managerContext: managerContext as ManagerOwnerKind, owned: true };
+  return {
+    workerId,
+    workerIncarnationId,
+    unit,
+    managerSessionId,
+    managerContext: managerContext as ManagerOwnerKind,
+    ...(rootWorkerIncarnationId ? { rootWorkerIncarnationId } : {}),
+    ...(parentWorkerIncarnationId ? { parentWorkerIncarnationId } : {}),
+    ...(depth !== undefined ? { depth } : {}),
+    ...(grantId ? { grantId } : {}),
+    owned: true,
+  };
 }
 
 export async function getUnitStatus(runner: CommandRunner, unit: string): Promise<UnitStatus> {

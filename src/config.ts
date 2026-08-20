@@ -120,6 +120,14 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
       maxRuntime: "12h",
       description: "Independent wakeable Pi coworker with its own session and Intercom identity",
     },
+    "boss-delegated-manager": {
+      harness: "pi",
+      command: preferredLocalWrapper("pi"),
+      args: ["--mode", "rpc"],
+      mode: "persistent",
+      maxRuntime: "12h",
+      description: "Explicitly authorized Boss participant manager with restricted delegated fleet access",
+    },
     "codex-safe": {
       harness: "codex",
       command: preferredLocalWrapper("coi"),
@@ -338,6 +346,7 @@ function mergePermissionProfile(value: unknown, fallback?: PermissionProfile): P
     git,
     ...(typeof value.description === "string" ? { description: value.description } : {}),
     ...(typeof value.hardened === "boolean" ? { hardened: value.hardened } : {}),
+    ...(typeof value.allowsDelegation === "boolean" ? { allowsDelegation: value.allowsDelegation } : {}),
     ...(strings(value.piTools) ? { piTools: strings(value.piTools) } : {}),
     ...(strings(value.inaccessiblePaths) ? { inaccessiblePaths: strings(value.inaccessiblePaths) } : {}),
     ...(strings(value.writablePaths) ? { writablePaths: strings(value.writablePaths) } : {}),

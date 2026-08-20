@@ -122,15 +122,15 @@ test("queued jobs and activation evidence survive status parsing", async () => {
 
   const identityUnit = "agent-intercom-worker-builder-inc.service";
   const identified = await getUnitStatus({ async exec() { return ok(
-    `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nJob=\nEnvironment=AGENT_INTERCOM_OWNED=1 AGENT_INTERCOM_WORKER_ID=builder AGENT_INTERCOM_RUN_ID=inc AGENT_INTERCOM_SYSTEMD_UNIT=${identityUnit} AGENT_INTERCOM_MANAGER_SESSION_ID=manager AGENT_INTERCOM_MANAGER_CONTEXT=pi\n`,
+    `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nJob=\nEnvironment=AGENT_INTERCOM_OWNED=1 AGENT_INTERCOM_WORKER_ID=builder AGENT_INTERCOM_RUN_ID=inc AGENT_INTERCOM_SYSTEMD_UNIT=${identityUnit} AGENT_INTERCOM_MANAGER_SESSION_ID=manager AGENT_INTERCOM_MANAGER_CONTEXT=pi AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID=inc AGENT_INTERCOM_WORKER_DEPTH=0\n`,
   ); } }, identityUnit);
   assert.deepEqual(identified.workerIdentity, {
     workerId: "builder", workerIncarnationId: "inc", unit: identityUnit,
-    managerSessionId: "manager", managerContext: "pi", owned: true,
+    managerSessionId: "manager", managerContext: "pi", rootWorkerIncarnationId: "inc", depth: 0, owned: true,
   });
 
   const reassigned = await getUnitStatus({ async exec() { return ok(
-    `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nJob=\nEnvironment=AGENT_INTERCOM_OWNED=0 AGENT_INTERCOM_WORKER_ID=stale AGENT_INTERCOM_RUN_ID=old AGENT_INTERCOM_OWNED=1 AGENT_INTERCOM_WORKER_ID=builder AGENT_INTERCOM_RUN_ID=inc AGENT_INTERCOM_SYSTEMD_UNIT=${identityUnit} AGENT_INTERCOM_MANAGER_SESSION_ID=manager AGENT_INTERCOM_MANAGER_CONTEXT=pi\n`,
+    `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\nJob=\nEnvironment=AGENT_INTERCOM_OWNED=0 AGENT_INTERCOM_WORKER_ID=stale AGENT_INTERCOM_RUN_ID=old AGENT_INTERCOM_OWNED=1 AGENT_INTERCOM_WORKER_ID=builder AGENT_INTERCOM_RUN_ID=inc AGENT_INTERCOM_SYSTEMD_UNIT=${identityUnit} AGENT_INTERCOM_MANAGER_SESSION_ID=manager AGENT_INTERCOM_MANAGER_CONTEXT=pi AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID=inc AGENT_INTERCOM_WORKER_DEPTH=0\n`,
   ); } }, identityUnit);
   assert.deepEqual(reassigned.workerIdentity, identified.workerIdentity, "systemd environment assignment semantics are last-assignment-wins");
 });

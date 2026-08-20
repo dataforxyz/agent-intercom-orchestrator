@@ -104,6 +104,127 @@ async function applyPersistedPause(store: TrustedLocalBossStore, bossRunId: stri
   return store.finishPauseControl(status.run!.bossRunId, transition.actionId);
 }
 
+test("trusted-local Boss dynamic-growth state is strict, revision-bound, and default-off", async () => {
+  const { dir, store } = await fixture();
+  try {
+    const created = await store.execute(parseBossCommand("create dynamic growth schema"), "controller-session");
+    assert.deepEqual(created.run?.dynamicGrowthGrants, []);
+    assert.deepEqual(created.run?.dynamicAssignments, []);
+    const statePath = join(dir, "runs.json");
+    const disk = JSON.parse(await readFile(statePath, "utf8"));
+    const bossRunId = disk.runs[0].bossRunId;
+    disk.runs[0].dynamicGrowthGrants = [{
+      version: "orc.boss-dynamic-growth-grant.v1",
+      revision: 1,
+      bossRunId,
+      participantRole: "manager",
+      participantWorkerId: "boss-manager-1",
+      participantWorkerIncarnationId: "manager-incarnation-1",
+      acceptanceRevision: 1,
+      designRevision: 1,
+      delegationGrant: {
+        version: 1, grantId: "boss-growth-grant-1", issuedAt: 1_700_000_000_000,
+        roles: ["scout"], harnesses: ["pi"], permissionProfiles: ["boss-dynamic-scout"], profiles: ["boss-dynamic-pi"],
+        cwdRoots: [{ path: "/tmp" }], modelPatterns: ["anthropic/claude-*"], efforts: ["high"],
+        maxLiveDirectChildren: 1, maxLiveDescendants: 2, maxDepth: 1, canSubdelegate: false,
+      },
+      state: "active", authorizedBySessionId: "controller-session", authorizedAt: "2023-11-14T22:13:20.000Z",
+    }];
+    disk.runs[0].dynamicAssignments = [{ workerId: "dynamic-scout-1", workerIncarnationId: "dynamic-incarnation-1", parentWorkerIncarnationId: "manager-incarnation-1", grantId: "boss-growth-grant-1", growthGrantRevision: 1, state: "active", createdAt: "2023-11-14T22:13:21.000Z" }];
+    await writeFile(statePath, `${JSON.stringify(disk)}\n`);
+    const status = await store.execute(parseBossCommand(`status ${bossRunId}`), "controller-session");
+    assert.equal(status.run?.dynamicGrowthGrants[0].participantWorkerIncarnationId, "manager-incarnation-1");
+    assert.equal(status.run?.dynamicAssignments[0].growthGrantRevision, 1);
+
+    disk.runs[0].dynamicAssignments[0] = { ...disk.runs[0].dynamicAssignments[0], state: "released", releasedAt: "2023-11-14T22:13:22.000Z", releaseReason: "launch-failed" };
+    await writeFile(statePath, `${JSON.stringify(disk)}\n`);
+    const released = await store.execute(parseBossCommand(`status ${bossRunId}`), "controller-session");
+    assert.equal(released.run?.dynamicAssignments[0].releaseReason, "launch-failed");
+    disk.runs[0].dynamicAssignments[0].releasedAt = "2023-11-14T22:13:19.000Z";
+    await writeFile(statePath, `${JSON.stringify(disk)}\n`);
+    await assert.rejects(store.execute(parseBossCommand(`status ${bossRunId}`), "controller-session"), /release predates creation/);
+    disk.runs[0].dynamicAssignments[0].releasedAt = "2023-11-14T22:13:22.000Z";
+    await writeFile(statePath, `${JSON.stringify(disk)}\n`);
+
+    const malformed = JSON.parse(await readFile(statePath, "utf8"));
+    malformed.runs[0].dynamicGrowthGrants[0].unexpected = true;
+    await writeFile(statePath, `${JSON.stringify(malformed)}\n`);
+    await assert.rejects(store.execute(parseBossCommand(`status ${bossRunId}`), "controller-session"), /invalid dynamic growth grant/);
+
+    delete malformed.runs[0].dynamicGrowthGrants[0].unexpected;
+    malformed.runs[0].dynamicGrowthGrants[0].revision = 2;
+    await writeFile(statePath, `${JSON.stringify(malformed)}\n`);
+    await assert.rejects(store.execute(parseBossCommand(`status ${bossRunId}`), "controller-session"), /invalid dynamic growth correlation/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss Controller authorizes and revokes exact revision-bound dynamic growth", async () => {
+  const { dir, store } = await fixture();
+  try {
+    const bossRunId = `boss-${randomUUID()}`;
+    const created = await store.createProvisionedRun({ bossRunId, goal: "dynamic growth authorization", managerSessionId: "controller-session", resource: canonicalResource(bossRunId) });
+    testRunOwners.set(bossRunId, "controller-session");
+    const run = created.run!;
+    const manager = managerWorker(run.bossRunId);
+    const staffed = await store.recordManagerStarted(run.bossRunId, manager);
+    const expectedAcceptanceRevision = staffed.acceptanceRevision!;
+    const expectedDesignRevision = staffed.designRevision!;
+    const grant = {
+      version: 1 as const, grantId: "boss-growth-grant-1", issuedAt: 1_700_000_000_000, issuedByWorkerIncarnationId: manager.workerIncarnationId!,
+      roles: ["scout"], harnesses: ["pi" as const], permissionProfiles: ["boss-dynamic-scout"], profiles: ["boss-dynamic-pi"],
+      cwdRoots: [{ path: "/tmp" }], modelPatterns: ["anthropic/claude-*"], efforts: ["high" as const],
+      maxLiveDirectChildren: 2, maxLiveDescendants: 3, maxDepth: 1, canSubdelegate: false,
+    };
+    await assert.rejects(store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "foreign", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: grant }), /owning Controller/);
+    await assert.rejects(store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: "stale-incarnation", expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: grant }), /exact assigned incarnation/);
+    await assert.rejects(store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: { ...grant, issuedByWorkerIncarnationId: "foreign-incarnation" } }), /issuer must match/);
+    const authorized = await store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: grant });
+    assert.equal(authorized.run?.dynamicGrowthGrants[0].state, "active");
+    assert.equal(authorized.run?.dynamicGrowthGrants[0].revision, 1);
+
+    await assert.rejects(store.reserveDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "foreign", expectedGrowthGrantRevision: 1, parentWorkerIncarnationId: manager.workerIncarnationId!, workerId: "dynamic-scout-1", workerIncarnationId: "dynamic-scout-incarnation-1" }), /owning Controller/);
+    const firstAssignment = await store.reserveDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 1, parentWorkerIncarnationId: manager.workerIncarnationId!, workerId: "dynamic-scout-1", workerIncarnationId: "dynamic-scout-incarnation-1" });
+    assert.deepEqual(firstAssignment.run?.dynamicAssignments.map((entry) => [entry.workerId, entry.growthGrantRevision]), [["dynamic-scout-1", 1]]);
+    await assert.rejects(store.reserveDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 1, parentWorkerIncarnationId: "stale-parent", workerId: "dynamic-scout-2", workerIncarnationId: "dynamic-scout-incarnation-2" }), /parent does not match/);
+    await store.reserveDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 1, parentWorkerIncarnationId: manager.workerIncarnationId!, workerId: "dynamic-scout-2", workerIncarnationId: "dynamic-scout-incarnation-2" });
+    await assert.rejects(store.reserveDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 1, parentWorkerIncarnationId: manager.workerIncarnationId!, workerId: "dynamic-scout-3", workerIncarnationId: "dynamic-scout-incarnation-3" }), /exceeds the active growth grant budget/);
+
+    await assert.rejects(store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: { ...grant, grantId: "boss-growth-grant-widened", maxLiveDirectChildren: 3 } }), /widens worker budgets/);
+    await assert.rejects(store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: { ...grant, grantId: "boss-growth-grant-too-narrow", maxLiveDirectChildren: 1, maxLiveDescendants: 1 } }), /cannot narrow below existing/);
+    await assert.rejects(store.releaseDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "foreign", workerIncarnationId: "dynamic-scout-incarnation-1", releaseReason: "terminal" }), /owning Controller/);
+    const released = await store.releaseDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", workerIncarnationId: "dynamic-scout-incarnation-1", releaseReason: "terminal" });
+    assert.deepEqual(released.run?.dynamicAssignments[0].state, "released");
+    await assert.rejects(store.releaseDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", workerIncarnationId: "dynamic-scout-incarnation-1", releaseReason: "terminal" }), /stale or inactive/);
+    const reused = await store.reserveDynamicAssignment({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 1, parentWorkerIncarnationId: manager.workerIncarnationId!, workerId: "dynamic-scout-3", workerIncarnationId: "dynamic-scout-incarnation-3" });
+    assert.deepEqual(reused.run?.dynamicAssignments.map((entry) => entry.state), ["released", "active", "active"]);
+    const narrowed = await store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision, expectedDesignRevision, delegationGrant: { ...grant, grantId: "boss-growth-grant-2", maxLiveDescendants: 2 } });
+    assert.deepEqual(narrowed.run?.dynamicGrowthGrants.map((entry) => [entry.revision, entry.state]), [[1, "revoked"], [2, "active"]]);
+    await assert.rejects(store.revokeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 1 }), /stale or inactive/);
+    const revoked = await store.revokeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", expectedGrowthGrantRevision: 2 });
+    assert.equal(revoked.run?.dynamicGrowthGrants[1].state, "revoked");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted-local Boss dynamic growth fails closed while paused or frozen", async () => {
+  const { dir, store } = await fixture();
+  try {
+    const created = await store.execute(parseBossCommand("create fenced dynamic growth"), "controller-session");
+    const run = created.run!;
+    const manager = managerWorker(run.bossRunId);
+    await store.recordManagerStarted(run.bossRunId, manager);
+    const transition = await store.beginPauseControl({ bossRunId: run.bossRunId, managerSessionId: "controller-session", action: "pause", targets: [], intentionallyUnfrozenManagerWorkerId: manager.id, timers: [] });
+    await store.finishPauseControl(run.bossRunId, transition.actionId);
+    const grant = { version: 1 as const, grantId: "boss-growth-grant-fenced", issuedAt: 1_700_000_000_000, issuedByWorkerIncarnationId: manager.workerIncarnationId!, roles: ["scout"], harnesses: ["pi" as const], permissionProfiles: ["boss-dynamic-scout"], profiles: ["boss-dynamic-pi"], cwdRoots: [{ path: "/tmp" }], modelPatterns: ["anthropic/claude-*"], efforts: ["high" as const], maxLiveDirectChildren: 1, maxLiveDescendants: 1, maxDepth: 1, canSubdelegate: false };
+    await assert.rejects(store.authorizeDynamicGrowth({ bossRunId: run.bossRunId, managerSessionId: "controller-session", participantRole: "manager", participantWorkerId: manager.id, participantWorkerIncarnationId: manager.workerIncarnationId!, expectedAcceptanceRevision: 1, expectedDesignRevision: 1, delegationGrant: grant }), /active, unpaused, unfrozen/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("trusted-local Boss creates and reports an explicitly advisory run", async () => {
   const { dir, store } = await fixture();
   try {

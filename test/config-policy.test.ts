@@ -5,6 +5,18 @@ import { join } from "node:path";
 import test from "node:test";
 import { configMigrationDiagnostics, DEFAULT_CONFIG, isBossOnboardingComplete, mergeConfig, readConfig, readConfigWithDiagnostics, writeConfig, writeConfigDefaults } from "../src/config.ts";
 
+test("Boss delegated-manager defaults are explicit and do not widen existing participants", () => {
+  const launch = DEFAULT_CONFIG.profiles["boss-delegated-manager"];
+  const delegated = DEFAULT_CONFIG.permissionProfiles["boss-delegated-manager-restricted"];
+  assert.equal(launch.harness, "pi");
+  assert.equal(launch.mode, "persistent");
+  assert.deepEqual(launch.args, ["--mode", "rpc"]);
+  assert.equal(delegated.allowsDelegation, true);
+  assert.equal(delegated.hardened, true);
+  assert.equal(DEFAULT_CONFIG.permissionProfiles["manager-restricted"].allowsDelegation, undefined);
+  assert.ok(DEFAULT_CONFIG.profiles["pi-peer"].args?.includes("agent_fleet"));
+});
+
 test("policy config merges partial values without dropping typed defaults", () => {
   assert.equal(mergeConfig({}).routing.modelRouting.unmatchedHarness, null);
   const config = mergeConfig({

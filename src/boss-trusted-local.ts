@@ -1,16 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, normalize } from "node:path";
+import { assertDelegationGrantSubset } from "./delegated-fleet-authorization.ts";
 import { acquireKernelFileLock } from "./file-lock.ts";
 import type { BossCandidateFingerprint } from "./boss-candidate-fingerprint.ts";
 import type { BossCommandRequest } from "./boss-command.ts";
-import type { WorkerRecord, WorkerState } from "./types.ts";
+import { parseDelegationGrant } from "./store.ts";
+import type { DelegationGrantV1, WorkerRecord, WorkerState } from "./types.ts";
 
-export const TRUSTED_LOCAL_BOSS_RUN_VERSION = "orc.boss-trusted-local.v8" as const;
-const LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4", "orc.boss-trusted-local.v5", "orc.boss-trusted-local.v6", "orc.boss-trusted-local.v7"]);
+export const TRUSTED_LOCAL_BOSS_RUN_VERSION = "orc.boss-trusted-local.v9" as const;
+const LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4", "orc.boss-trusted-local.v5", "orc.boss-trusted-local.v6", "orc.boss-trusted-local.v7", "orc.boss-trusted-local.v8"]);
 export const TRUSTED_LOCAL_BOSS_RESOURCE_VERSION = "orc.boss-resource.v1" as const;
-export const TRUSTED_LOCAL_BOSS_STORE_VERSION = "orc.boss-trusted-local.v10" as const;
-const LEGACY_TRUSTED_LOCAL_BOSS_STORE_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4", "orc.boss-trusted-local.v5", "orc.boss-trusted-local.v6", "orc.boss-trusted-local.v7", "orc.boss-trusted-local.v8", "orc.boss-trusted-local.v9"]);
+export const TRUSTED_LOCAL_BOSS_STORE_VERSION = "orc.boss-trusted-local.v11" as const;
+const LEGACY_TRUSTED_LOCAL_BOSS_STORE_VERSIONS = new Set(["orc.boss-trusted-local.v1", "orc.boss-trusted-local.v2", "orc.boss-trusted-local.v3", "orc.boss-trusted-local.v4", "orc.boss-trusted-local.v5", "orc.boss-trusted-local.v6", "orc.boss-trusted-local.v7", "orc.boss-trusted-local.v8", "orc.boss-trusted-local.v9", "orc.boss-trusted-local.v10"]);
 export const TRUSTED_LOCAL_BOSS_FREEZE_TRANSITION_VERSION = "orc.boss-freeze-transition.v1" as const;
 export const TRUSTED_LOCAL_BOSS_FREEZE_VERSION = "orc.boss-freeze.v1" as const;
 export const TRUSTED_LOCAL_BOSS_PAUSE_TRANSITION_VERSION = "orc.boss-pause-transition.v2" as const;
@@ -273,6 +275,35 @@ export interface TrustedLocalBossFreeze {
   authorizedAt: string;
 }
 
+export interface TrustedLocalBossDynamicGrowthGrant {
+  version: "orc.boss-dynamic-growth-grant.v1";
+  revision: number;
+  bossRunId: string;
+  participantRole: TrustedLocalBossAssignmentRole;
+  participantWorkerId: string;
+  participantWorkerIncarnationId: string;
+  acceptanceRevision: number;
+  designRevision: number;
+  delegationGrant: DelegationGrantV1;
+  state: "active" | "revoked";
+  authorizedBySessionId: string;
+  authorizedAt: string;
+  revokedBySessionId?: string;
+  revokedAt?: string;
+}
+
+export interface TrustedLocalBossDynamicAssignment {
+  workerId: string;
+  workerIncarnationId: string;
+  parentWorkerIncarnationId: string;
+  grantId: string;
+  growthGrantRevision: number;
+  state: "active" | "released";
+  createdAt: string;
+  releasedAt?: string;
+  releaseReason?: "launch-failed" | "terminal" | "forgotten";
+}
+
 export interface TrustedLocalBossRun {
   version: typeof TRUSTED_LOCAL_BOSS_RUN_VERSION;
   bossRunId: string;
@@ -289,6 +320,8 @@ export interface TrustedLocalBossRun {
   currentPause: TrustedLocalBossPause | null;
   pauseReconciliations: TrustedLocalBossPauseReconciliation[];
   currentPauseDegradation: TrustedLocalBossPauseReconciliation | null;
+  dynamicGrowthGrants: TrustedLocalBossDynamicGrowthGrant[];
+  dynamicAssignments: TrustedLocalBossDynamicAssignment[];
   assignments: TrustedLocalBossAssignment[];
   deliveries: TrustedLocalBossDelivery[];
   assignmentResults: TrustedLocalBossAssignmentResult[];
@@ -669,6 +702,43 @@ export function deterministicBossRunHandle(bossRunId: string, prefix = "boss"): 
   return `${prefix}-${suffix}`;
 }
 
+function parseDynamicGrowthGrant(value: unknown, bossRunId: string): TrustedLocalBossDynamicGrowthGrant {
+  if (!isPlainRecord(value)) throw new Error("Trusted-local Boss state contains an invalid dynamic growth grant");
+  const revoked = value.state === "revoked";
+  const keys = ["acceptanceRevision", "authorizedAt", "authorizedBySessionId", "bossRunId", "delegationGrant", "designRevision", "participantRole", "participantWorkerId", "participantWorkerIncarnationId", "revision", "state", "version", ...(revoked ? ["revokedAt", "revokedBySessionId"] : [])];
+  if (!exactKeys(value, keys)) throw new Error("Trusted-local Boss state contains an invalid dynamic growth grant");
+  const grant = value as unknown as TrustedLocalBossDynamicGrowthGrant;
+  if (grant.version !== "orc.boss-dynamic-growth-grant.v1" || grant.bossRunId !== bossRunId
+    || !Number.isSafeInteger(grant.revision) || grant.revision < 1
+    || (grant.participantRole !== "manager" && grant.participantRole !== "worker" && grant.participantRole !== "scout" && grant.participantRole !== "adversary")
+    || typeof grant.participantWorkerId !== "string" || grant.participantWorkerId.length < 1 || grant.participantWorkerId.length > 128
+    || typeof grant.participantWorkerIncarnationId !== "string" || grant.participantWorkerIncarnationId.length < 1 || grant.participantWorkerIncarnationId.length > 128
+    || !Number.isSafeInteger(grant.acceptanceRevision) || grant.acceptanceRevision < 1
+    || !Number.isSafeInteger(grant.designRevision) || grant.designRevision < 1
+    || (grant.state !== "active" && grant.state !== "revoked")
+    || typeof grant.authorizedBySessionId !== "string" || grant.authorizedBySessionId.length < 1 || grant.authorizedBySessionId.length > 1_024
+    || (revoked && (typeof grant.revokedBySessionId !== "string" || grant.revokedBySessionId.length < 1 || grant.revokedBySessionId.length > 1_024 || typeof grant.revokedAt !== "string"))) throw new Error("Trusted-local Boss state contains invalid dynamic growth grant fields");
+  const authorizedAt = parseTimestamp(grant.authorizedAt, "dynamic growth authorizedAt");
+  const revokedAt = revoked ? parseTimestamp(grant.revokedAt, "dynamic growth revokedAt") : undefined;
+  if (revokedAt && Date.parse(revokedAt) < Date.parse(authorizedAt)) throw new Error("Trusted-local Boss dynamic growth revocation predates authorization");
+  return { ...grant, delegationGrant: parseDelegationGrant(grant.delegationGrant, "boss.dynamicGrowthGrant.delegationGrant"), authorizedAt, ...(revoked ? { revokedAt } : {}) };
+}
+
+function parseDynamicAssignment(value: unknown): TrustedLocalBossDynamicAssignment {
+  if (!isPlainRecord(value)) throw new Error("Trusted-local Boss state contains an invalid dynamic assignment");
+  const released = value.state === "released";
+  if (!exactKeys(value, ["createdAt", "grantId", "growthGrantRevision", "parentWorkerIncarnationId", ...(released ? ["releaseReason", "releasedAt"] : []), "state", "workerId", "workerIncarnationId"])) throw new Error("Trusted-local Boss state contains an invalid dynamic assignment");
+  const assignment = value as unknown as TrustedLocalBossDynamicAssignment;
+  if ([assignment.workerId, assignment.workerIncarnationId, assignment.parentWorkerIncarnationId, assignment.grantId].some((field) => typeof field !== "string" || field.length < 1 || field.length > 128)
+    || !Number.isSafeInteger(assignment.growthGrantRevision) || assignment.growthGrantRevision < 1
+    || (assignment.state !== "active" && assignment.state !== "released")
+    || (released && assignment.releaseReason !== "launch-failed" && assignment.releaseReason !== "terminal" && assignment.releaseReason !== "forgotten")) throw new Error("Trusted-local Boss state contains invalid dynamic assignment fields");
+  const createdAt = parseTimestamp(assignment.createdAt, "dynamic assignment createdAt");
+  const releasedAt = released ? parseTimestamp(assignment.releasedAt, "dynamic assignment releasedAt") : undefined;
+  if (releasedAt && Date.parse(releasedAt) < Date.parse(createdAt)) throw new Error("Trusted-local Boss dynamic assignment release predates creation");
+  return { ...assignment, createdAt, ...(released ? { releasedAt } : {}) };
+}
+
 function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   if (!isPlainRecord(value)) throw new Error("Trusted-local Boss state contains an invalid run record");
   const legacyVersion = typeof value.version === "string" && LEGACY_TRUSTED_LOCAL_BOSS_RUN_VERSIONS.has(value.version);
@@ -678,7 +748,8 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const legacyPause = value.version === "orc.boss-trusted-local.v1" || value.version === "orc.boss-trusted-local.v2" || value.version === "orc.boss-trusted-local.v3" || value.version === "orc.boss-trusted-local.v4" || value.version === "orc.boss-trusted-local.v5";
   const legacyPauseReconciliation = value.version === "orc.boss-trusted-local.v1" || value.version === "orc.boss-trusted-local.v2" || value.version === "orc.boss-trusted-local.v3" || value.version === "orc.boss-trusted-local.v4" || value.version === "orc.boss-trusted-local.v5" || value.version === "orc.boss-trusted-local.v6";
   const legacyPauseSettlement = legacyVersion;
-  const keys = ["assignmentResults", "assignments", "bossRunId", "cancellation", "createdAt", "decisions", "deliveries", "goal", "lifecycle", "managerSessionId", "proofPackets", "state", "updatedAt", "version", ...(legacyHandle ? [] : ["handle"]), ...(legacyResource ? [] : ["resource"]), ...(legacyFreeze ? [] : ["acceptanceRevision", "currentFreeze", "designRevision", "freezeTransitions"]), ...(legacyPause ? [] : ["currentPause", "pauseTransitions"]), ...(legacyPauseReconciliation ? [] : ["currentPauseDegradation", "pauseReconciliations"])];
+  const legacyDynamicGrowth = legacyVersion && value.dynamicAssignments === undefined && value.dynamicGrowthGrants === undefined;
+  const keys = ["assignmentResults", "assignments", "bossRunId", "cancellation", "createdAt", "decisions", "deliveries", "goal", "lifecycle", "managerSessionId", "proofPackets", "state", "updatedAt", "version", ...(legacyHandle ? [] : ["handle"]), ...(legacyResource ? [] : ["resource"]), ...(legacyFreeze ? [] : ["acceptanceRevision", "currentFreeze", "designRevision", "freezeTransitions"]), ...(legacyPause ? [] : ["currentPause", "pauseTransitions"]), ...(legacyPauseReconciliation ? [] : ["currentPauseDegradation", "pauseReconciliations"]), ...(legacyDynamicGrowth ? [] : ["dynamicAssignments", "dynamicGrowthGrants"])];
   if (!exactKeys(value, keys)) throw new Error("Trusted-local Boss state contains an invalid run record");
   const { assignmentResults, assignments, bossRunId, cancellation, createdAt, decisions, deliveries, goal, lifecycle, managerSessionId, proofPackets, state, updatedAt } = value;
   if ((!legacyVersion && value.version !== TRUSTED_LOCAL_BOSS_RUN_VERSION) || typeof bossRunId !== "string" || !/^boss-[0-9a-f-]{36}$/.test(bossRunId)
@@ -686,6 +757,15 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
     || (state !== "active" && state !== "paused" && !TERMINAL_RUN_STATES.has(state as TrustedLocalBossRunState))
     || !Array.isArray(assignments) || assignments.length < 3 || assignments.length > 4 || !Array.isArray(deliveries) || deliveries.length > 256 || !Array.isArray(assignmentResults) || assignmentResults.length > 256 || !Array.isArray(lifecycle) || lifecycle.length > 256
     || !Array.isArray(proofPackets) || proofPackets.length > MAX_PROOF_PACKETS || !Array.isArray(decisions) || decisions.length > 64) throw new Error("Trusted-local Boss state contains invalid run fields");
+  const dynamicGrowthGrants = legacyDynamicGrowth ? [] : Array.isArray(value.dynamicGrowthGrants) ? value.dynamicGrowthGrants.map((grant) => parseDynamicGrowthGrant(grant, bossRunId)) : (() => { throw new Error("Trusted-local Boss state contains invalid dynamic growth grants"); })();
+  const dynamicAssignments = legacyDynamicGrowth ? [] : Array.isArray(value.dynamicAssignments) ? value.dynamicAssignments.map(parseDynamicAssignment) : (() => { throw new Error("Trusted-local Boss state contains invalid dynamic assignments"); })();
+  const activeGrowthParticipants = dynamicGrowthGrants.filter((grant) => grant.state === "active").map((grant) => grant.participantWorkerIncarnationId);
+  if (dynamicGrowthGrants.length > 64 || dynamicAssignments.length > 256
+    || dynamicGrowthGrants.some((grant, index) => grant.revision !== index + 1)
+    || new Set(activeGrowthParticipants).size !== activeGrowthParticipants.length
+    || new Set(dynamicAssignments.map((assignment) => assignment.workerId)).size !== dynamicAssignments.length
+    || new Set(dynamicAssignments.map((assignment) => assignment.workerIncarnationId)).size !== dynamicAssignments.length
+    || dynamicAssignments.some((assignment) => !dynamicGrowthGrants.some((grant) => grant.revision === assignment.growthGrantRevision && grant.delegationGrant.grantId === assignment.grantId && grant.participantWorkerIncarnationId === assignment.parentWorkerIncarnationId))) throw new Error("Trusted-local Boss state contains invalid dynamic growth correlation");
   const parsedAssignments = assignments.map((assignment) => parseAssignment(assignment, legacyResource));
   if (parsedAssignments.filter((assignment) => assignment.role === "manager").length !== 1 || parsedAssignments.filter((assignment) => assignment.role === "worker").length !== 1 || parsedAssignments.filter((assignment) => assignment.role === "scout").length !== 1 || parsedAssignments.filter((assignment) => assignment.role === "adversary").length > 1) throw new Error("Trusted-local Boss state contains invalid staffing roles");
   const parsedDeliveries = deliveries.map(parseDelivery);
@@ -761,7 +841,7 @@ function parseRun(value: unknown, handlePrefix: string): TrustedLocalBossRun {
   const derivedPauseDegradation = currentPause ? [...pauseReconciliations].reverse().find((entry) => entry.pauseRevision === currentPause.pauseRevision && entry.transitionRevision === currentPause.transitionRevision) ?? null : null;
   const currentPauseDegradation = legacyPauseReconciliation ? null : value.currentPauseDegradation === null ? null : parsePauseReconciliation(value.currentPauseDegradation);
   if (JSON.stringify(currentPauseDegradation) !== JSON.stringify(derivedPauseDegradation)) throw new Error("Trusted-local Boss current pause degradation is not derived from observed reconciliation evidence");
-  return { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId, handle, goal, state: migratedState, managerSessionId, resource, acceptanceRevision, designRevision, freezeTransitions, currentFreeze, pauseTransitions, currentPause, pauseReconciliations, currentPauseDegradation, assignments: parsedAssignments, deliveries: parsedDeliveries, assignmentResults: parsedResults, lifecycle: parsedLifecycle, proofPackets: parsedProofs, decisions: parsedDecisions, cancellation: parseCancellation(cancellation), createdAt: parseTimestamp(createdAt, "run createdAt"), updatedAt: parseTimestamp(updatedAt, "run updatedAt") };
+  return { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId, handle, goal, state: migratedState, managerSessionId, resource, acceptanceRevision, designRevision, freezeTransitions, currentFreeze, pauseTransitions, currentPause, pauseReconciliations, currentPauseDegradation, dynamicGrowthGrants, dynamicAssignments, assignments: parsedAssignments, deliveries: parsedDeliveries, assignmentResults: parsedResults, lifecycle: parsedLifecycle, proofPackets: parsedProofs, decisions: parsedDecisions, cancellation: parseCancellation(cancellation), createdAt: parseTimestamp(createdAt, "run createdAt"), updatedAt: parseTimestamp(updatedAt, "run updatedAt") };
 }
 
 function parseState(value: unknown, handlePrefix: string): TrustedLocalBossState {
@@ -969,10 +1049,141 @@ export class TrustedLocalBossStore {
       const assignments = [assignment("manager", `Manage the trusted-local Boss goal: ${input.goal}`), assignment("worker", `Implement the highest-priority bounded work for: ${input.goal}`), assignment("scout", `Scout risks, dependencies, and verification gaps for: ${input.goal}`)];
       const handle = deterministicBossRunHandle(input.bossRunId, this.handlePrefix);
       if (state.runs.some((candidate) => candidate.handle === handle)) throw new Error("Trusted-local Boss deterministic handle collision; no run was created");
-      const run: TrustedLocalBossRun = { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId: input.bossRunId, handle, goal: input.goal, state: "active", managerSessionId: input.managerSessionId, resource, acceptanceRevision: 1, designRevision: 1, freezeTransitions: [], currentFreeze: null, pauseTransitions: [], currentPause: null, pauseReconciliations: [], currentPauseDegradation: null, assignments, deliveries: [], assignmentResults: [], lifecycle: [], proofPackets: [], decisions: [], cancellation: null, createdAt: timestamp, updatedAt: timestamp };
+      const run: TrustedLocalBossRun = { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId: input.bossRunId, handle, goal: input.goal, state: "active", managerSessionId: input.managerSessionId, resource, acceptanceRevision: 1, designRevision: 1, freezeTransitions: [], currentFreeze: null, pauseTransitions: [], currentPause: null, pauseReconciliations: [], currentPauseDegradation: null, dynamicGrowthGrants: [], dynamicAssignments: [], assignments, deliveries: [], assignmentResults: [], lifecycle: [], proofPackets: [], decisions: [], cancellation: null, createdAt: timestamp, updatedAt: timestamp };
       state.runs.push(run);
       state.revision += 1;
       return { title: "Boss trusted-local run created", message: formatRun(run, timestamp), run: structuredClone(run) };
+    });
+  }
+
+  async authorizeDynamicGrowth(input: {
+    bossRunId: string;
+    managerSessionId: string;
+    participantRole: TrustedLocalBossAssignmentRole;
+    participantWorkerId: string;
+    participantWorkerIncarnationId: string;
+    expectedAcceptanceRevision: number;
+    expectedDesignRevision: number;
+    delegationGrant: DelegationGrantV1;
+  }): Promise<TrustedLocalBossResult> {
+    return this.mutate((state, timestamp) => {
+      const run = state.runs.find((candidate) => candidate.bossRunId === input.bossRunId || candidate.handle === input.bossRunId);
+      if (!run) throw new Error("No matching trusted-local Boss run exists.");
+      assertOwningSession(run, input.managerSessionId);
+      if (run.state !== "active" || run.currentPause || run.currentFreeze || run.cancellation) throw new Error("Trusted-local Boss dynamic growth requires an active, unpaused, unfrozen, non-cancelling run.");
+      if (run.acceptanceRevision !== input.expectedAcceptanceRevision || run.designRevision !== input.expectedDesignRevision) throw new Error("Trusted-local Boss dynamic growth revisions are stale.");
+      const assignment = assignmentForRole(run, input.participantRole);
+      if (assignment.state !== "assigned" || assignment.workerId !== input.participantWorkerId || assignment.workerIncarnationId !== input.participantWorkerIncarnationId) {
+        throw new Error("Trusted-local Boss dynamic growth participant identity does not match the exact assigned incarnation.");
+      }
+      const delegationGrant = parseDelegationGrant(structuredClone(input.delegationGrant), "boss.dynamicGrowthGrant.delegationGrant");
+      if (delegationGrant.issuedByWorkerIncarnationId !== input.participantWorkerIncarnationId) {
+        throw new Error("Trusted-local Boss dynamic growth grant issuer must match the exact participant incarnation.");
+      }
+      const previous = [...run.dynamicGrowthGrants].reverse().find((candidate) => candidate.participantWorkerIncarnationId === input.participantWorkerIncarnationId);
+      if (previous) assertDelegationGrantSubset(previous.delegationGrant, delegationGrant);
+      const existingAssignments = run.dynamicAssignments.filter((candidate) => candidate.state === "active" && candidate.parentWorkerIncarnationId === input.participantWorkerIncarnationId);
+      if (existingAssignments.length > delegationGrant.maxLiveDirectChildren || existingAssignments.length > delegationGrant.maxLiveDescendants) {
+        throw new Error("Trusted-local Boss dynamic growth grant cannot narrow below existing dynamic assignments.");
+      }
+      const active = run.dynamicGrowthGrants.find((candidate) => candidate.state === "active" && candidate.participantWorkerIncarnationId === input.participantWorkerIncarnationId);
+      if (active) {
+        active.state = "revoked";
+        active.revokedBySessionId = input.managerSessionId;
+        active.revokedAt = timestamp;
+      }
+      const grant: TrustedLocalBossDynamicGrowthGrant = {
+        version: "orc.boss-dynamic-growth-grant.v1",
+        revision: run.dynamicGrowthGrants.length + 1,
+        bossRunId: run.bossRunId,
+        participantRole: input.participantRole,
+        participantWorkerId: input.participantWorkerId,
+        participantWorkerIncarnationId: input.participantWorkerIncarnationId,
+        acceptanceRevision: input.expectedAcceptanceRevision,
+        designRevision: input.expectedDesignRevision,
+        delegationGrant,
+        state: "active",
+        authorizedBySessionId: input.managerSessionId,
+        authorizedAt: timestamp,
+      };
+      run.dynamicGrowthGrants.push(grant);
+      run.updatedAt = timestamp;
+      state.revision += 1;
+      return { title: "Boss dynamic growth authorized", message: formatRun(run, timestamp), run: structuredClone(run) };
+    });
+  }
+
+  async reserveDynamicAssignment(input: {
+    bossRunId: string;
+    managerSessionId: string;
+    expectedGrowthGrantRevision: number;
+    parentWorkerIncarnationId: string;
+    workerId: string;
+    workerIncarnationId: string;
+  }): Promise<TrustedLocalBossResult> {
+    return this.mutate((state, timestamp) => {
+      const run = state.runs.find((candidate) => candidate.bossRunId === input.bossRunId || candidate.handle === input.bossRunId);
+      if (!run) throw new Error("No matching trusted-local Boss run exists.");
+      assertOwningSession(run, input.managerSessionId);
+      if (run.state !== "active" || run.currentPause || run.currentFreeze || run.cancellation) throw new Error("Trusted-local Boss dynamic assignment requires an active, unpaused, unfrozen, non-cancelling run.");
+      const grant = run.dynamicGrowthGrants.find((candidate) => candidate.revision === input.expectedGrowthGrantRevision);
+      if (!grant || grant.state !== "active") throw new Error("Trusted-local Boss dynamic growth grant revision is stale or inactive.");
+      if (grant.participantWorkerIncarnationId !== input.parentWorkerIncarnationId) throw new Error("Trusted-local Boss dynamic assignment parent does not match the authorized participant incarnation.");
+      if (run.dynamicAssignments.some((candidate) => candidate.workerId === input.workerId || candidate.workerIncarnationId === input.workerIncarnationId)) throw new Error("Trusted-local Boss dynamic assignment identity already exists.");
+      const directAssignments = run.dynamicAssignments.filter((candidate) => candidate.state === "active" && candidate.parentWorkerIncarnationId === input.parentWorkerIncarnationId);
+      if (directAssignments.length >= grant.delegationGrant.maxLiveDirectChildren || directAssignments.length >= grant.delegationGrant.maxLiveDescendants) {
+        throw new Error("Trusted-local Boss dynamic assignment exceeds the active growth grant budget.");
+      }
+      run.dynamicAssignments.push({
+        workerId: input.workerId,
+        workerIncarnationId: input.workerIncarnationId,
+        parentWorkerIncarnationId: input.parentWorkerIncarnationId,
+        grantId: grant.delegationGrant.grantId,
+        growthGrantRevision: grant.revision,
+        state: "active",
+        createdAt: timestamp,
+      });
+      run.updatedAt = timestamp;
+      state.revision += 1;
+      return { title: "Boss dynamic assignment reserved", message: formatRun(run, timestamp), run: structuredClone(run) };
+    });
+  }
+
+  async releaseDynamicAssignment(input: {
+    bossRunId: string;
+    managerSessionId: string;
+    workerIncarnationId: string;
+    releaseReason: "launch-failed" | "terminal" | "forgotten";
+  }): Promise<TrustedLocalBossResult> {
+    return this.mutate((state, timestamp) => {
+      const run = state.runs.find((candidate) => candidate.bossRunId === input.bossRunId || candidate.handle === input.bossRunId);
+      if (!run) throw new Error("No matching trusted-local Boss run exists.");
+      assertOwningSession(run, input.managerSessionId);
+      const assignment = run.dynamicAssignments.find((candidate) => candidate.workerIncarnationId === input.workerIncarnationId);
+      if (!assignment || assignment.state !== "active") throw new Error("Trusted-local Boss dynamic assignment is stale or inactive.");
+      assignment.state = "released";
+      assignment.releasedAt = timestamp;
+      assignment.releaseReason = input.releaseReason;
+      run.updatedAt = timestamp;
+      state.revision += 1;
+      return { title: "Boss dynamic assignment released", message: formatRun(run, timestamp), run: structuredClone(run) };
+    });
+  }
+
+  async revokeDynamicGrowth(input: { bossRunId: string; managerSessionId: string; expectedGrowthGrantRevision: number }): Promise<TrustedLocalBossResult> {
+    return this.mutate((state, timestamp) => {
+      const run = state.runs.find((candidate) => candidate.bossRunId === input.bossRunId || candidate.handle === input.bossRunId);
+      if (!run) throw new Error("No matching trusted-local Boss run exists.");
+      assertOwningSession(run, input.managerSessionId);
+      if (run.state !== "active" || run.currentPause || run.currentFreeze || run.cancellation) throw new Error("Trusted-local Boss dynamic growth revocation requires an active, unpaused, unfrozen, non-cancelling run.");
+      const grant = run.dynamicGrowthGrants.find((candidate) => candidate.revision === input.expectedGrowthGrantRevision);
+      if (!grant || grant.state !== "active") throw new Error("Trusted-local Boss dynamic growth grant revision is stale or inactive.");
+      grant.state = "revoked";
+      grant.revokedBySessionId = input.managerSessionId;
+      grant.revokedAt = timestamp;
+      run.updatedAt = timestamp;
+      state.revision += 1;
+      return { title: "Boss dynamic growth revoked", message: formatRun(run, timestamp), run: structuredClone(run) };
     });
   }
 
@@ -1408,7 +1619,7 @@ export class TrustedLocalBossStore {
         const bossRunId = `boss-${randomUUID()}`;
         const handle = deterministicBossRunHandle(bossRunId, this.handlePrefix);
         if (state.runs.some((candidate) => candidate.handle === handle)) throw new Error("Trusted-local Boss deterministic handle collision; no run was created");
-        const run: TrustedLocalBossRun = { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId, handle, goal: request.goal, state: "active", managerSessionId, resource: null, acceptanceRevision: null, designRevision: null, freezeTransitions: [], currentFreeze: null, pauseTransitions: [], currentPause: null, pauseReconciliations: [], currentPauseDegradation: null, assignments, deliveries: [], assignmentResults: [], lifecycle: [], proofPackets: [], decisions: [], cancellation: null, createdAt: timestamp, updatedAt: timestamp };
+        const run: TrustedLocalBossRun = { version: TRUSTED_LOCAL_BOSS_RUN_VERSION, bossRunId, handle, goal: request.goal, state: "active", managerSessionId, resource: null, acceptanceRevision: null, designRevision: null, freezeTransitions: [], currentFreeze: null, pauseTransitions: [], currentPause: null, pauseReconciliations: [], currentPauseDegradation: null, dynamicGrowthGrants: [], dynamicAssignments: [], assignments, deliveries: [], assignmentResults: [], lifecycle: [], proofPackets: [], decisions: [], cancellation: null, createdAt: timestamp, updatedAt: timestamp };
         state.runs.push(run); state.revision += 1; return { title: "Boss trusted-local run created", message: formatRun(run, timestamp), run: structuredClone(run) };
       }
       if (!selected) throw new Error("No matching trusted-local Boss run exists.");

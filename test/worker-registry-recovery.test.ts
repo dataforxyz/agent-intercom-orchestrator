@@ -1,24 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { assessWorkerRegistryRecovery } from "../src/worker-registry-recovery.ts";
-import type { UnitStatus, WorkerRecordV3, WorkerStateFileV3 } from "../src/types.ts";
+import type { UnitStatus, WorkerRecordV4, WorkerStateFileV4 } from "../src/types.ts";
 
 const unit = "agent-intercom-worker-builder-inc-1.service";
-const worker: WorkerRecordV3 = {
+const worker: WorkerRecordV4 = {
   id: "builder", runId: "inc-1", workerIncarnationId: "inc-1", workerGeneration: 1,
   harness: "codex", backend: "systemd", role: "builder", task: "build", cwd: "/tmp",
   state: "working", owned: true,
   managerOwner: { context: "pi", principalId: "manager", sessionId: "manager", bindingEpoch: 1 }, managerSessionId: "manager",
+  hierarchy: { rootWorkerIncarnationId: "inc-1", depth: 0 },
   unit, createdAt: 1, updatedAt: 2, leaseExpiresAt: 10,
 };
-const empty: WorkerStateFileV3 = { version: 3, generation: 2, workers: [], workerGenerations: [] };
-const recovery: WorkerStateFileV3 = { version: 3, generation: 1, workers: [worker], workerGenerations: [{ workerId: "builder", generation: 1 }] };
+const empty: WorkerStateFileV4 = { version: 4, generation: 2, workers: [], workerGenerations: [] };
+const recovery: WorkerStateFileV4 = { version: 4, generation: 1, workers: [worker], workerGenerations: [{ workerId: "builder", generation: 1 }] };
 const exactStatus: UnitStatus = {
   verified: true, exists: true, activeState: "active", subState: "running", mainPid: 42,
-  workerIdentity: { workerId: "builder", workerIncarnationId: "inc-1", unit, managerSessionId: "manager", managerContext: "pi", owned: true },
+  workerIdentity: { workerId: "builder", workerIncarnationId: "inc-1", unit, managerSessionId: "manager", managerContext: "pi", rootWorkerIncarnationId: "inc-1", depth: 0, owned: true },
 };
 
-function assess(status: UnitStatus, snapshot: WorkerStateFileV3 | undefined = recovery) {
+function assess(status: UnitStatus, snapshot: WorkerStateFileV4 | undefined = recovery) {
   return assessWorkerRegistryRecovery({
     current: empty,
     recovery: snapshot,
@@ -37,6 +38,8 @@ test("missing identity evidence and identity mismatches fail closed as degraded"
   assert.equal(assess({ ...exactStatus, workerIdentity: undefined }).status, "degraded");
   assert.equal(assess({ ...exactStatus, workerIdentity: { ...exactStatus.workerIdentity!, workerIncarnationId: "replacement" } }).status, "degraded");
   assert.equal(assess({ ...exactStatus, workerIdentity: { ...exactStatus.workerIdentity!, managerSessionId: "other-manager" } }).status, "degraded");
+  assert.equal(assess({ ...exactStatus, workerIdentity: { ...exactStatus.workerIdentity!, rootWorkerIncarnationId: "other-root" } }).status, "degraded");
+  assert.equal(assess({ ...exactStatus, workerIdentity: { ...exactStatus.workerIdentity!, depth: 1 } }).status, "degraded");
   assert.equal(assessWorkerRegistryRecovery({
     current: empty,
     inventory: { verified: true, units: [unit] },
