@@ -145,7 +145,7 @@ const AgentFleetParams = Type.Object({
   subagents: Type.Optional(StringEnum(["auto", "required", "not-required"] as const, { description: "Use 'auto' unless the caller explicitly requires or forbids nested-subagent capability" })),
   requiresSubagents: Type.Optional(Type.Boolean({ description: "Legacy nested-subagent override; prefer subagents=auto|required|not-required" })),
   fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
-  delegationGrant: Type.Optional(ControllerDelegationGrantParams),
+  delegationGrant: Type.Optional(Type.Union([ControllerDelegationGrantParams, Type.Null()], { description: "Optional Controller-issued root delegation grant. Strict-schema callers must use null when no delegation is requested." })),
   all: Type.Optional(Type.Boolean({ description: "Include workers owned by other manager sessions for list/status diagnostics" })),
   execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup or updates; false previews them" })),
   acknowledge: Type.Optional(Type.Boolean({ description: "Manager acknowledgment required before deleting stopped worker records" })),
@@ -210,7 +210,7 @@ type FleetParams = {
   requiresSubagents?: boolean;
   fresh?: boolean;
   childGrant?: DelegationGrantV1;
-  delegationGrant?: Omit<DelegationGrantV1, "grantId" | "issuedAt" | "issuedByWorkerIncarnationId">;
+  delegationGrant?: Omit<DelegationGrantV1, "grantId" | "issuedAt" | "issuedByWorkerIncarnationId"> | null;
   all?: boolean;
   execute?: boolean;
   acknowledge?: boolean;
@@ -681,6 +681,7 @@ function fleetPromptGuidelines(config: OrchestratorConfig): string[] {
     "For UI or browser assignments, treat live browser automation, screenshot capture, and artifact write access as explicit requirements. Fleet capabilities do not currently verify them. Probe them before delegation or split the work into a read-only coworker audit plus manager-side capture. If Playwright's bundled browser is missing, probe an installed Chromium/Chrome executable and pass its explicit executablePath; if capture is still unavailable, report that honestly rather than substituting code inspection for visual evidence.",
     "For read-only test or audit assignments, package runners such as `uv run` may attempt cache or environment writes. When a trusted pinned `.venv` already exists and no dependency sync is needed, tell the worker to use direct immutable entry points such as `.venv/bin/python` or `.venv/bin/pytest`, and to disclose the bypass. Do not widen permissions or claim the package runner passed; if the pinned environment is missing or stale, report the test blocked.",
     `When the caller did not explicitly choose routing fields, pass harness=auto, effort=auto, and subagents=auto (or omit them when the client preserves optional fields); never invent pi/off/false placeholders. Capability-aware routing then chooses an installed eligible harness. Use action=route with the same explicit constraints to preview the selection. Explicit harness/profile choices always win; explicit model identifiers use the configured model-routing rules and unmatched-model harness.${explicitOnly}`,
+    "Delegation is optional and never inferred. Strict-schema callers must pass delegationGrant=null when no Controller-issued root delegation is requested; never manufacture an empty or placeholder grant.",
     "Preview update and cleanup before execute=true. Updates preserve detected install sources; never kill sessions the fleet does not own.",
     "Persistent workers expire after an activity-bounded idle budget. Worker messages to the manager or explicit renew extend it; manager heartbeat alone does not. Default list output hides older terminal history; use history when needed. Stop completed workers promptly, rely on configured retention cleanup, and use forget or bulk prune with acknowledge=true only after deliberate closure.",
   ];
@@ -704,9 +705,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const openCodePeerDir = join(agentDir, "intercom", "orchestrator", "opencode-peers");
   const configuredManagerContext = process.env.AGENT_INTERCOM_MANAGER_CONTEXT;
   const managerOwnerContext = configuredManagerContext === "opencode" || configuredManagerContext === "headless_cli" ? configuredManagerContext : "pi";
+  const metricsEnabled = process.env.AGENT_INTERCOM_ORCHESTRATOR_METRICS === "1";
   const store = new WorkerStore(statePath, {
     legacyManagerContext: managerOwnerContext,
-    ...(process.env.AGENT_INTERCOM_ORCHESTRATOR_METRICS === "1"
+    ...(metricsEnabled
       ? { instrumentation: (metric) => console.error(`[agent-intercom-orchestrator] worker_store operation=${metric.operation} outcome=${metric.outcome} duration_ms=${metric.durationMs.toFixed(3)}${metric.bytes === undefined ? "" : ` bytes=${metric.bytes}`}`) }
       : {}),
   });
@@ -788,6 +790,8 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     commandPaths: {
       coi: resolveProfileCommand("coi"),
       cci: resolveProfileCommand("cci"),
+      "codex-intercom-mcp": resolveProfileCommand("codex-intercom-mcp"),
+      "claude-intercom-mcp": resolveProfileCommand("claude-intercom-mcp"),
     },
   });
 
@@ -1354,7 +1358,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const startedAt = Date.now();
     const release = await tryAcquireKernelFileLock(cleanupRunLockPath);
     if (!release) {
-      console.error("[agent-intercom-orchestrator] cleanup_run outcome=coalesced");
+      if (metricsEnabled) console.error("[agent-intercom-orchestrator] cleanup_run outcome=coalesced");
       return { candidates: [], handled: [], errors: [], deferred: [], skipped: "in_progress" };
     }
     await recordCleanupRun({ version: 1, outcome: "running", startedAt, updatedAt: startedAt });
@@ -1374,7 +1378,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         deferred: result.deferred.length,
         budgetExhausted: result.budget?.exhausted ?? false,
       });
-      console.error(`[agent-intercom-orchestrator] cleanup_run outcome=${outcome} duration_ms=${finishedAt - startedAt} candidates=${result.candidates.length} handled=${result.handled.length} errors=${result.errors.length} deferred=${result.deferred.length} budget_exhausted=${result.budget?.exhausted ?? false}`);
+      if (metricsEnabled) console.error(`[agent-intercom-orchestrator] cleanup_run outcome=${outcome} duration_ms=${finishedAt - startedAt} candidates=${result.candidates.length} handled=${result.handled.length} errors=${result.errors.length} deferred=${result.deferred.length} budget_exhausted=${result.budget?.exhausted ?? false}`);
       return result;
     } catch (error) {
       const finishedAt = Date.now();

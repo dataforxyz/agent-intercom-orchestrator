@@ -165,7 +165,7 @@ test("Controller-granted Pi managers launch with the restricted delegated fleet 
     }, new AbortController().signal, () => {}, ctx);
     await tools.get("agent_fleet").execute("ordinary-pi-worker", {
       action: "spawn", id: "ordinary-pi", task: "ordinary bounded work", role: "scout", harness: "pi",
-      profile: "delegated-pi", permissionProfile: "delegating", model: "anthropic/claude-sonnet", effort: "high",
+      profile: "delegated-pi", permissionProfile: "delegating", model: "anthropic/claude-sonnet", effort: "high", delegationGrant: null,
     }, new AbortController().signal, () => {}, ctx);
 
     assert.equal(launches.length, 2);

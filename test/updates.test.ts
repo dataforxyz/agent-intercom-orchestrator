@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,6 +38,36 @@ test("adapter inspection preserves Pi and npm-global update sources", async () =
     assert.ok(adapters.every((entry) => entry.status === "outdated"));
     assert.match(formatAdapterVersions(adapters), /codex: installed=0.9.3 latest=0.9.4/);
     assert.match(formatUpdatePlan(adapters), /agent-intercom-claude@0\.9\.4/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adapter inspection recognizes package-owned MCP binaries when profile commands are wrappers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-intercom-linked-adapter-"));
+  try {
+    const packageDir = join(root, "agent-intercom-claude");
+    const binary = join(packageDir, "dist", "claude-server.mjs");
+    const binDir = join(root, "bin");
+    await packageRoot(packageDir, "@dataforxyz/agent-intercom-claude", "0.11.0");
+    await mkdir(join(packageDir, "dist"), { recursive: true });
+    await mkdir(binDir, { recursive: true });
+    await writeFile(binary, "// adapter\n");
+    const linkedBinary = join(binDir, "claude-intercom-mcp");
+    await symlink(binary, linkedBinary);
+    const adapters = await inspectAdapterFamily({
+      agentDir: join(root, "agent"),
+      currentPackageRoot: join(root, "orchestrator"),
+      globalNpmRoot: join(root, "global"),
+      commandPaths: { cci: join(root, "wrapper", "cci"), "claude-intercom-mcp": linkedBinary },
+      latest: async (name) => name === "@dataforxyz/agent-intercom-claude" ? "0.10.0" : undefined,
+    });
+    const claude = adapters.find((entry) => entry.id === "claude")!;
+    assert.equal(claude.current, "0.11.0");
+    assert.equal(claude.source, "local");
+    assert.equal(claude.status, "ahead");
+    assert.equal(claude.update, undefined);
+    assert.match(claude.blockedReason ?? "", /not safely updateable/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
