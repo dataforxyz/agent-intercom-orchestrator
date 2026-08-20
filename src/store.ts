@@ -5,6 +5,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { types as utilTypes } from "node:util";
 import type {
   CanonicalWorkerState,
+  DelegationGrantV1,
+  Effort,
   Harness,
   LegacyWorkerState,
   ManagerOwnerBinding,
@@ -16,14 +18,18 @@ import type {
   WorkerRecord,
   WorkerRecordV2,
   WorkerRecordV3,
+  WorkerRecordV4,
+  WorkerHierarchy,
   WorkerState,
   WorkerStateFile,
   WorkerStateFileV2,
   WorkerStateFileV3,
+  WorkerStateFileV4,
 } from "./types.ts";
 import { acquireKernelFileLock } from "./file-lock.ts";
+import { isSafeModelPattern } from "./routing.ts";
 
-const CURRENT_VERSION = 3 as const;
+const CURRENT_VERSION = 4 as const;
 const DEFAULT_LEGACY_STOPPING_SETTLE_MS = 120_000;
 const LOCK_STALE_MS = 120_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
@@ -63,6 +69,8 @@ const V2_COMPAT_STORED_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "lastAut
 const V2_COMPAT_API_WORKER_KEYS = new Set([...V2_API_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
 const V3_STORED_WORKER_KEYS = new Set([...V2_STORED_WORKER_KEYS, "lastAuthenticatedIntercomActivityAt"]);
 const V3_API_WORKER_KEYS = new Set([...V3_STORED_WORKER_KEYS, "runId", "managerSessionId"]);
+const V4_STORED_WORKER_KEYS = new Set([...V3_STORED_WORKER_KEYS, "hierarchy", "delegationGrant"]);
+const V4_API_WORKER_KEYS = new Set([...V4_STORED_WORKER_KEYS, "runId", "managerSessionId"]);
 const STRING_WORKER_KEYS = [
   "profile", "permissionProfile", "model", "instructions", "intercomTarget", "unit", "externalSessionId", "healthPath", "runtimeStatePath",
   "stopReason", "dirtyStatusAtStop", "dirtyCheckErrorAtStop", "lastError", "stateReason",
@@ -114,7 +122,7 @@ export interface WorkerStoreOptions {
 export interface WorkerStoreCommit<T> {
   value: T;
   generation: number;
-  state: WorkerStateFileV3;
+  state: WorkerStateFileV4;
 }
 
 export interface WorkerStoreQuarantine {
@@ -133,7 +141,7 @@ export interface WorkerStoreRecoverySnapshot {
   statePath: string;
   capturedAt: number;
   stateDigest: string;
-  state: WorkerStateFileV3;
+  state: WorkerStateFileV4;
 }
 
 export class WorkerStoreError extends Error {
@@ -430,6 +438,75 @@ function compactObject<T extends Record<string, unknown>>(value: T): Partial<T> 
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
 }
 
+const GRANT_ARRAY_LIMIT = 128;
+const GRANT_BUDGET_LIMIT = 10_000;
+const GRANT_DEPTH_LIMIT = 32;
+const EFFORTS = new Set<Effort>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function parseCanonicalStringArray(value: unknown, path: string, validate?: (entry: string) => boolean): string[] {
+  const entries = assertDenseArray(value, path).map((entry, index) => {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 512 || /[\u0000-\u001f\u007f]/.test(entry)) {
+      throw new WorkerStoreValidationError(`${path}[${index}] must be a bounded non-empty string without control characters`);
+    }
+    if (validate && !validate(entry)) throw new WorkerStoreValidationError(`${path}[${index}] is invalid`);
+    return entry;
+  });
+  if (entries.length === 0 || entries.length > GRANT_ARRAY_LIMIT) throw new WorkerStoreValidationError(`${path} must contain 1-${GRANT_ARRAY_LIMIT} entries`);
+  if (new Set(entries).size !== entries.length) throw new WorkerStoreValidationError(`${path} contains duplicates`);
+  const sorted = [...entries].sort();
+  if (entries.some((entry, index) => entry !== sorted[index])) throw new WorkerStoreValidationError(`${path} must be sorted`);
+  return entries;
+}
+
+export function parseDelegationGrant(value: unknown, path: string): DelegationGrantV1 {
+  const allowed = new Set(["version", "grantId", "issuedByWorkerIncarnationId", "issuedAt", "roles", "harnesses", "permissionProfiles", "profiles", "cwdRoots", "modelPatterns", "efforts", "maxLiveDirectChildren", "maxLiveDescendants", "maxDepth", "canSubdelegate", "expiresAt"]);
+  const object = assertExactObject(value, allowed, ["version", "grantId", "issuedAt", "roles", "harnesses", "permissionProfiles", "profiles", "cwdRoots", "modelPatterns", "efforts", "maxLiveDirectChildren", "maxLiveDescendants", "maxDepth", "canSubdelegate"], path);
+  if (object.version !== 1) throw new WorkerStoreValidationError(`${path}.version must be 1`);
+  const cwdRoots = assertDenseArray(object.cwdRoots, `${path}.cwdRoots`).map((entry, index) => {
+    const rootPath = `${path}.cwdRoots[${index}]`;
+    const root = assertExactObject(entry, new Set(["path", "gitCommonDir", "gitWorktreeRoot"]), ["path"], rootPath);
+    const parsed = compactObject({ path: requiredString(root, "path", rootPath), gitCommonDir: optionalString(root, "gitCommonDir", rootPath), gitWorktreeRoot: optionalString(root, "gitWorktreeRoot", rootPath) });
+    if (!String(parsed.path).startsWith("/")) throw new WorkerStoreValidationError(`${rootPath}.path must be absolute`);
+    if ((parsed.gitCommonDir === undefined) !== (parsed.gitWorktreeRoot === undefined)) throw new WorkerStoreValidationError(`${rootPath} Git identity fields must appear together`);
+    return parsed as DelegationGrantV1["cwdRoots"][number];
+  });
+  if (cwdRoots.length === 0 || cwdRoots.length > GRANT_ARRAY_LIMIT) throw new WorkerStoreValidationError(`${path}.cwdRoots must contain 1-${GRANT_ARRAY_LIMIT} entries`);
+  const harnesses = parseCanonicalStringArray(object.harnesses, `${path}.harnesses`, (entry) => entry === "pi" || entry === "codex") as Harness[];
+  const efforts = parseCanonicalStringArray(object.efforts, `${path}.efforts`, (entry) => EFFORTS.has(entry as Effort)) as Effort[];
+  const direct = requiredNumber(object, "maxLiveDirectChildren", path, true, 1);
+  const descendants = requiredNumber(object, "maxLiveDescendants", path, true, 1);
+  const depth = requiredNumber(object, "maxDepth", path, true, 1);
+  if (direct > descendants || descendants > GRANT_BUDGET_LIMIT || depth > GRANT_DEPTH_LIMIT) throw new WorkerStoreValidationError(`${path} delegation budgets are inconsistent or exceed implementation limits`);
+  return {
+    version: 1,
+    grantId: requiredString(object, "grantId", path),
+    ...(optionalString(object, "issuedByWorkerIncarnationId", path) ? { issuedByWorkerIncarnationId: optionalString(object, "issuedByWorkerIncarnationId", path) } : {}),
+    issuedAt: requiredNumber(object, "issuedAt", path),
+    roles: parseCanonicalStringArray(object.roles, `${path}.roles`),
+    harnesses,
+    permissionProfiles: parseCanonicalStringArray(object.permissionProfiles, `${path}.permissionProfiles`),
+    profiles: parseCanonicalStringArray(object.profiles, `${path}.profiles`),
+    cwdRoots,
+    modelPatterns: parseCanonicalStringArray(object.modelPatterns, `${path}.modelPatterns`, isSafeModelPattern),
+    efforts,
+    maxLiveDirectChildren: direct,
+    maxLiveDescendants: descendants,
+    maxDepth: depth,
+    canSubdelegate: requiredBoolean(object, "canSubdelegate", path),
+    ...(optionalNumber(object, "expiresAt", path) !== undefined ? { expiresAt: optionalNumber(object, "expiresAt", path) } : {}),
+  };
+}
+
+function parseHierarchy(value: unknown, path: string): WorkerHierarchy {
+  const object = assertExactObject(value, new Set(["rootWorkerIncarnationId", "parentWorkerIncarnationId", "depth", "grantId"]), ["rootWorkerIncarnationId", "depth"], path);
+  const depth = requiredNumber(object, "depth", path, true);
+  const parentWorkerIncarnationId = optionalString(object, "parentWorkerIncarnationId", path);
+  const grantId = optionalString(object, "grantId", path);
+  if ((depth === 0) !== (parentWorkerIncarnationId === undefined)) throw new WorkerStoreValidationError(`${path} parent presence must agree with depth`);
+  if ((depth === 0) !== (grantId === undefined)) throw new WorkerStoreValidationError(`${path} grantId presence must agree with depth`);
+  return compactObject({ rootWorkerIncarnationId: requiredString(object, "rootWorkerIncarnationId", path), parentWorkerIncarnationId, depth, grantId }) as WorkerHierarchy;
+}
+
 function parseWorkerCommon(object: Record<string, unknown>, path: string): Omit<WorkerRecord, "runId" | "state" | "managerSessionId"> {
   const harness = requiredString(object, "harness", path);
   if (!HARNESSES.has(harness as Harness)) throw new WorkerStoreValidationError(`${path}.harness is invalid`);
@@ -472,10 +549,12 @@ function parseLegacyWorker(value: unknown, path: string): WorkerRecord {
   } as WorkerRecord;
 }
 
-function parseVersionedWorker(value: unknown, path: string, allowAliases: boolean, expectedVersion: 2 | 3): WorkerRecordV2 | WorkerRecordV3 {
+function parseVersionedWorker(value: unknown, path: string, allowAliases: boolean, expectedVersion: 2 | 3 | 4): WorkerRecordV2 | WorkerRecordV3 | WorkerRecordV4 {
   const allowed = expectedVersion === 2
     ? (allowAliases ? V2_COMPAT_API_WORKER_KEYS : V2_COMPAT_STORED_WORKER_KEYS)
-    : (allowAliases ? V3_API_WORKER_KEYS : V3_STORED_WORKER_KEYS);
+    : expectedVersion === 3
+      ? (allowAliases ? V3_API_WORKER_KEYS : V3_STORED_WORKER_KEYS)
+      : (allowAliases ? V4_API_WORKER_KEYS : V4_STORED_WORKER_KEYS);
   const required = [
     "id", "workerIncarnationId", "workerGeneration", "harness", "backend", "role", "task", "cwd", "state", "owned", "managerOwner",
     "createdAt", "updatedAt", "leaseExpiresAt",
@@ -506,7 +585,11 @@ function parseVersionedWorker(value: unknown, path: string, allowAliases: boolea
   }
   const terminalOutcome = optionalString(object, "terminalOutcome", path);
   if (terminalOutcome !== undefined && terminalOutcome !== "completed") throw new WorkerStoreValidationError(`${path}.terminalOutcome is invalid`);
-  const record: WorkerRecordV3 = {
+  const hierarchy = expectedVersion === 4 ? parseHierarchy(object.hierarchy, `${path}.hierarchy`) : undefined;
+  const delegationGrant = expectedVersion === 4 && object.delegationGrant !== undefined
+    ? parseDelegationGrant(object.delegationGrant, `${path}.delegationGrant`)
+    : undefined;
+  const record: WorkerRecordV4 = {
     ...parseWorkerCommon(object, path),
     runId,
     workerIncarnationId,
@@ -518,9 +601,13 @@ function parseVersionedWorker(value: unknown, path: string, allowAliases: boolea
     managerSessionId,
     managerOwner,
     ...(migrationAudit ? { migrationAudit } : {}),
+    hierarchy: hierarchy as WorkerHierarchy,
+    ...(delegationGrant ? { delegationGrant } : {}),
   };
-  if (expectedVersion === 3) return record;
-  const { lastAuthenticatedIntercomActivityAt: _untrustedCompatibilityClaim, ...legacyRecord } = record;
+  if (expectedVersion === 4) return record;
+  const { hierarchy: _hierarchy, delegationGrant: _delegationGrant, ...preV4Record } = record;
+  if (expectedVersion === 3) return preV4Record as WorkerRecordV3;
+  const { lastAuthenticatedIntercomActivityAt: _untrustedCompatibilityClaim, ...legacyRecord } = preV4Record;
   return legacyRecord as WorkerRecordV2;
 }
 
@@ -554,6 +641,38 @@ function assertUniqueWorkers(workers: WorkerRecord[]): void {
   for (const worker of workers) {
     if (ids.has(worker.id)) throw new WorkerStoreValidationError(`workers contains duplicate id ${JSON.stringify(worker.id)}`);
     ids.add(worker.id);
+  }
+}
+
+function assertValidHierarchy(workers: WorkerRecordV4[]): void {
+  const byIncarnation = new Map<string, WorkerRecordV4>();
+  for (const worker of workers) {
+    if (byIncarnation.has(worker.workerIncarnationId)) throw new WorkerStoreValidationError(`workers contains duplicate incarnation ${JSON.stringify(worker.workerIncarnationId)}`);
+    byIncarnation.set(worker.workerIncarnationId, worker);
+  }
+  for (const worker of workers) {
+    const hierarchy = worker.hierarchy;
+    if (hierarchy.depth === 0) {
+      if (hierarchy.rootWorkerIncarnationId !== worker.workerIncarnationId) throw new WorkerStoreValidationError(`worker ${worker.id} root hierarchy must name its own incarnation`);
+      if (worker.delegationGrant?.issuedByWorkerIncarnationId !== undefined) throw new WorkerStoreValidationError(`worker ${worker.id} root grant must be Controller-issued`);
+      continue;
+    }
+    const parent = byIncarnation.get(hierarchy.parentWorkerIncarnationId!);
+    if (!parent) throw new WorkerStoreValidationError(`worker ${worker.id} hierarchy parent is missing`);
+    if (parent.hierarchy.depth + 1 !== hierarchy.depth || parent.hierarchy.rootWorkerIncarnationId !== hierarchy.rootWorkerIncarnationId) {
+      throw new WorkerStoreValidationError(`worker ${worker.id} hierarchy depth/root does not agree with its parent`);
+    }
+    if (hierarchy.grantId !== parent.delegationGrant?.grantId) throw new WorkerStoreValidationError(`worker ${worker.id} was not authorized by its parent's current grant`);
+    if (worker.delegationGrant && worker.delegationGrant.issuedByWorkerIncarnationId !== parent.workerIncarnationId) {
+      throw new WorkerStoreValidationError(`worker ${worker.id} delegation grant issuer does not match its parent`);
+    }
+    const seen = new Set<string>([worker.workerIncarnationId]);
+    let cursor: WorkerRecordV4 | undefined = parent;
+    while (cursor) {
+      if (seen.has(cursor.workerIncarnationId)) throw new WorkerStoreValidationError(`worker ${worker.id} hierarchy contains a cycle`);
+      seen.add(cursor.workerIncarnationId);
+      cursor = cursor.hierarchy.parentWorkerIncarnationId ? byIncarnation.get(cursor.hierarchy.parentWorkerIncarnationId) : undefined;
+    }
   }
 }
 
@@ -596,7 +715,8 @@ function parseFeatureList(value: unknown): string[] | undefined {
 
 function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2): WorkerStateFileV2;
 function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 3): WorkerStateFileV3;
-function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2 | 3): WorkerStateFileV2 | WorkerStateFileV3 {
+function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 4): WorkerStateFileV4;
+function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersion: 2 | 3 | 4): WorkerStateFileV2 | WorkerStateFileV3 | WorkerStateFileV4 {
   const object = assertExactObject(value, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers", ...(allowAliases ? [] : ["workerGenerations"])], "worker state");
   if (object.version !== expectedVersion) throw new WorkerStoreValidationError(`worker state version is not ${expectedVersion}`);
   const workers = assertDenseArray(object.workers, "worker state.workers").map((worker, index) => parseVersionedWorker(worker, `worker state.workers[${index}]`, allowAliases, expectedVersion));
@@ -610,6 +730,7 @@ function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersi
     const recorded = workerGenerations.find((entry) => entry.workerId === worker.id)?.generation;
     if (recorded !== undefined && recorded < worker.workerGeneration) throw new WorkerStoreValidationError(`worker state.workerGenerations is behind worker ${worker.id}`);
   }
+  if (expectedVersion === 4) assertValidHierarchy(workers as WorkerRecordV4[]);
   return {
     version: expectedVersion,
     generation: requiredNumber(object, "generation", "worker state", true),
@@ -619,7 +740,7 @@ function parseVersionedFile(value: unknown, allowAliases: boolean, expectedVersi
       : workers.map((worker) => ({ workerId: worker.id, generation: worker.workerGeneration })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
     ...(claims ? { runtimeCleanupClaims: claims } : {}),
     ...(activeFeatures ? { activeFeatures } : {}),
-  } as WorkerStateFileV2 | WorkerStateFileV3;
+  } as WorkerStateFileV2 | WorkerStateFileV3 | WorkerStateFileV4;
 }
 
 function parseV2File(value: unknown, allowAliases: boolean): WorkerStateFileV2 {
@@ -628,6 +749,10 @@ function parseV2File(value: unknown, allowAliases: boolean): WorkerStateFileV2 {
 
 function parseV3File(value: unknown, allowAliases: boolean): WorkerStateFileV3 {
   return parseVersionedFile(value, allowAliases, 3);
+}
+
+function parseV4File(value: unknown, allowAliases: boolean): WorkerStateFileV4 {
+  return parseVersionedFile(value, allowAliases, 4);
 }
 
 function migrationOutcome(worker: WorkerRecord): WorkerMigrationOutcomeAudit {
@@ -734,14 +859,25 @@ function migrateV2File(legacy: WorkerStateFileV2): WorkerStateFileV3 {
   };
 }
 
+function migrateV3File(legacy: WorkerStateFileV3): WorkerStateFileV4 {
+  return {
+    ...legacy,
+    version: 4,
+    workers: legacy.workers.map((worker) => ({
+      ...worker,
+      hierarchy: { rootWorkerIncarnationId: worker.workerIncarnationId, depth: 0 },
+    })),
+  };
+}
+
 function storedWorker(worker: WorkerRecord): Record<string, unknown> {
   const { runId: _runId, managerSessionId: _managerSessionId, ...stored } = worker;
   return compactObject(stored as Record<string, unknown>) as Record<string, unknown>;
 }
 
-function storedState(state: WorkerStateFileV3): Record<string, unknown> {
+function storedState(state: WorkerStateFileV4): Record<string, unknown> {
   return compactObject({
-    version: 3,
+    version: 4,
     generation: state.generation,
     workers: state.workers.map(storedWorker),
     workerGenerations: state.workerGenerations,
@@ -750,7 +886,7 @@ function storedState(state: WorkerStateFileV3): Record<string, unknown> {
   }) as Record<string, unknown>;
 }
 
-function serializedState(state: WorkerStateFileV3): string {
+function serializedState(state: WorkerStateFileV4): string {
   return `${JSON.stringify(storedState(state), null, 2)}\n`;
 }
 
@@ -764,7 +900,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function cloneState(state: WorkerStateFileV3): WorkerStateFileV3 {
+function cloneState(state: WorkerStateFileV4): WorkerStateFileV4 {
   return structuredClone(state);
 }
 
@@ -783,9 +919,9 @@ export function isWorkerDispatchAllowed(worker: WorkerRecord): boolean {
 }
 
 interface LoadedState {
-  state: WorkerStateFileV3;
+  state: WorkerStateFileV4;
   raw?: string;
-  sourceVersion: 0 | 1 | 2 | 3;
+  sourceVersion: 0 | 1 | 2 | 3 | 4;
 }
 
 interface HeldWriteContext {
@@ -976,12 +1112,12 @@ export class WorkerStore {
     throw new WorkerStoreCorruptError(`Could not parse worker state ${this.path}: ${reason}; preserved at ${quarantinePath}`, quarantinePath);
   }
 
-  private assertSupportedFeatures(state: WorkerStateFileV2 | WorkerStateFileV3): void {
+  private assertSupportedFeatures(state: WorkerStateFileV2 | WorkerStateFileV3 | WorkerStateFileV4): void {
     const unsupported = (state.activeFeatures ?? []).filter((feature) => !this.supportedFeatures.has(feature));
     if (unsupported.length > 0) throw new WorkerStoreUnsupportedFeatureError(unsupported);
   }
 
-  private parseRaw(raw: string): { state: WorkerStateFileV3; sourceVersion: 1 | 2 | 3 } {
+  private parseRaw(raw: string): { state: WorkerStateFileV4; sourceVersion: 1 | 2 | 3 | 4 } {
     let value: unknown;
     try {
       value = JSON.parse(raw);
@@ -999,22 +1135,27 @@ export class WorkerStore {
     const declaredFeatures = parseFeatureList(header.activeFeatures);
     const unsupportedFeatures = (declaredFeatures ?? []).filter((feature) => !this.supportedFeatures.has(feature));
     if (unsupportedFeatures.length > 0) throw new WorkerStoreUnsupportedFeatureError(unsupportedFeatures);
-    if (version === 1) return { state: migrateLegacyFile(parseLegacyFile(value), this.options.now(), this.options), sourceVersion: 1 };
+    if (version === 1) return { state: migrateV3File(migrateLegacyFile(parseLegacyFile(value), this.options.now(), this.options)), sourceVersion: 1 };
     if (version === 2) {
       const state = parseV2File(value, false);
       this.assertSupportedFeatures(state);
-      return { state: migrateV2File(state), sourceVersion: 2 };
+      return { state: migrateV3File(migrateV2File(state)), sourceVersion: 2 };
     }
     if (version === 3) {
       const state = parseV3File(value, false);
       this.assertSupportedFeatures(state);
-      return { state, sourceVersion: 3 };
+      return { state: migrateV3File(state), sourceVersion: 3 };
+    }
+    if (version === 4) {
+      const state = parseV4File(value, false);
+      this.assertSupportedFeatures(state);
+      return { state, sourceVersion: 4 };
     }
     throw new WorkerStoreValidationError(`unsupported or corrupt worker state version ${String(version)}`);
   }
 
   /**
-   * Read only a healthy canonical v3 snapshot without touching the writer lock.
+   * Read only a healthy canonical v4 snapshot without touching the writer lock.
    * This is an atomic-file snapshot, not a writer-linearizable or crash-durable
    * observation: it may see the state immediately before an in-flight commit or
    * after rename but before the writer's directory fsync completes. Callers that
@@ -1022,7 +1163,7 @@ export class WorkerStore {
    * or parse ambiguity is deliberately retried under the lock, where migration
    * and quarantine ordering remains authoritative.
    */
-  private async loadCanonicalV3LockFree(): Promise<WorkerStateFileV3 | undefined> {
+  private async loadCanonicalV4LockFree(): Promise<WorkerStateFileV4 | undefined> {
     const poisonBefore = await this.readPoisonMarker();
     if (poisonBefore) {
       throw new WorkerStorePoisonedError(`Worker state ${this.path} is quarantined: ${poisonBefore.reason}`, poisonBefore);
@@ -1034,14 +1175,14 @@ export class WorkerStore {
       if (errorCode(error) === "ENOENT") return undefined;
       throw new WorkerStoreError(`Could not read worker state ${this.path}: ${errorText(error)}`, "WORKER_STORE_READ_FAILED");
     }
-    let parsed: { state: WorkerStateFileV3; sourceVersion: 1 | 2 | 3 };
+    let parsed: { state: WorkerStateFileV4; sourceVersion: 1 | 2 | 3 | 4 };
     try {
       parsed = this.parseRaw(raw);
     } catch (error) {
       if (error instanceof WorkerStoreUnsupportedVersionError || error instanceof WorkerStoreUnsupportedFeatureError) throw error;
       return undefined;
     }
-    if (parsed.sourceVersion !== 3) return undefined;
+    if (parsed.sourceVersion !== 4) return undefined;
     const poisonAfter = await this.readPoisonMarker();
     if (poisonAfter) {
       throw new WorkerStorePoisonedError(`Worker state ${this.path} is quarantined: ${poisonAfter.reason}`, poisonAfter);
@@ -1055,7 +1196,7 @@ export class WorkerStore {
     try {
       raw = await readFile(this.path, "utf8");
     } catch (error) {
-      if (errorCode(error) === "ENOENT") return { state: { version: 3, generation: 0, workers: [], workerGenerations: [] }, sourceVersion: 0 };
+      if (errorCode(error) === "ENOENT") return { state: { version: 4, generation: 0, workers: [], workerGenerations: [] }, sourceVersion: 0 };
       throw new WorkerStoreError(`Could not read worker state ${this.path}: ${errorText(error)}`, "WORKER_STORE_READ_FAILED");
     }
     try {
@@ -1341,8 +1482,8 @@ export class WorkerStore {
     }
   }
 
-  private normalizeApiWorker(value: unknown, path: string, previous: WorkerRecord | undefined, previousGeneration = 0, sourceVersion: 2 | 3 = 3): WorkerRecordV3 {
-    const allowed = sourceVersion === 2 ? V2_API_WORKER_KEYS : V3_API_WORKER_KEYS;
+  private normalizeApiWorker(value: unknown, path: string, previous: WorkerRecord | undefined, previousGeneration = 0, sourceVersion: 2 | 3 | 4 = 4): WorkerRecordV4 {
+    const allowed = sourceVersion === 2 ? V2_API_WORKER_KEYS : sourceVersion === 3 ? V3_API_WORKER_KEYS : V4_API_WORKER_KEYS;
     const object = assertExactObject(value, allowed, ["id", "harness", "role", "task", "cwd", "state", "owned", "createdAt", "updatedAt", "leaseExpiresAt"], path);
     const id = requiredString(object, "id", path);
     const runAlias = optionalString(object, "runId", path);
@@ -1403,6 +1544,7 @@ export class WorkerStore {
       managerSessionId: managerOwner.sessionId,
       managerOwner,
       backend: object.backend ?? "systemd",
+      hierarchy: object.hierarchy ?? (previous && workerIdentity(previous) === incarnation ? previous.hierarchy : undefined) ?? { rootWorkerIncarnationId: incarnation, depth: 0 },
     };
     const state = object.state;
     if (typeof state !== "string") throw new WorkerStoreValidationError(`${path}.state must be a string`);
@@ -1418,10 +1560,10 @@ export class WorkerStore {
       const migrated = migrateLegacyWorker(legacy, this.options.now(), this.options);
       candidate = { ...migrated, workerGeneration: expectedWorkerGeneration, managerOwner, managerSessionId: managerOwner.sessionId };
     }
-    return parseVersionedWorker(compactObject(candidate), path, true, 3) as WorkerRecordV3;
+    return parseVersionedWorker(compactObject(candidate), path, true, 4) as WorkerRecordV4;
   }
 
-  private normalizeInput(state: WorkerStateFile, previous: WorkerStateFileV3): WorkerStateFileV3 {
+  private normalizeInput(state: WorkerStateFile, previous: WorkerStateFileV4): WorkerStateFileV4 {
     const header = assertPlainObject(state, "worker state");
     if (header.version === 1) {
       const migrated = migrateLegacyFile(parseLegacyFile(state), this.options.now(), this.options);
@@ -1436,10 +1578,10 @@ export class WorkerStore {
       }
       migrated.workerGenerations = [...generations].map(([workerId, generation]) => ({ workerId, generation })).sort((left, right) => left.workerId.localeCompare(right.workerId));
       if (previous.activeFeatures) migrated.activeFeatures = structuredClone(previous.activeFeatures);
-      return migrated;
+      return migrateV3File(migrated);
     }
     const object = assertExactObject(state, new Set(["version", "generation", "workers", "workerGenerations", "runtimeCleanupClaims", "activeFeatures"]), ["version", "generation", "workers"], "worker state");
-    if (object.version !== 2 && object.version !== 3) throw new WorkerStoreValidationError(`worker state version must be 1, 2, or 3`);
+    if (object.version !== 2 && object.version !== 3 && object.version !== 4) throw new WorkerStoreValidationError(`worker state version must be 1, 2, 3, or 4`);
     const sourceVersion = object.version;
     const generation = requiredNumber(object, "generation", "worker state", true);
     const previousById = new Map(previous.workers.map((worker) => [worker.id, worker]));
@@ -1454,14 +1596,15 @@ export class WorkerStore {
       return this.normalizeApiWorker(worker, `worker state.workers[${index}]`, previousById.get(id), previousGenerationById.get(id) ?? 0, sourceVersion);
     });
     assertUniqueWorkers(workers);
+    assertValidHierarchy(workers);
     const claims = object.runtimeCleanupClaims === undefined
       ? undefined
       : assertDenseArray(object.runtimeCleanupClaims, "worker state.runtimeCleanupClaims").map((claim, index) => parseClaim(claim, `worker state.runtimeCleanupClaims[${index}]`));
     const activeFeatures = parseFeatureList(object.activeFeatures);
     const nextGenerationById = new Map(previous.workerGenerations.map((entry) => [entry.workerId, entry.generation]));
     for (const worker of workers) nextGenerationById.set(worker.id, Math.max(nextGenerationById.get(worker.id) ?? 0, worker.workerGeneration));
-    const normalized: WorkerStateFileV3 = {
-      version: 3,
+    const normalized: WorkerStateFileV4 = {
+      version: 4,
       generation,
       workers,
       workerGenerations: [...nextGenerationById].map(([workerId, workerGeneration]) => ({ workerId, generation: workerGeneration })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
@@ -1472,7 +1615,7 @@ export class WorkerStore {
     return normalized;
   }
 
-  private assertPendingRecordsPreserved(previous: WorkerStateFileV3, next: WorkerStateFileV3, allowResolution: boolean): void {
+  private assertPendingRecordsPreserved(previous: WorkerStateFileV4, next: WorkerStateFileV4, allowResolution: boolean): void {
     for (const worker of previous.workers) {
       if (worker.state !== "migration_pending") continue;
       const updated = next.workers.find((candidate) => candidate.id === worker.id);
@@ -1561,7 +1704,7 @@ export class WorkerStore {
 
   private async writeRecoverySnapshot(previousRaw: string): Promise<void> {
     const parsed = this.parseRaw(previousRaw);
-    if (parsed.sourceVersion !== 3) return;
+    if (parsed.sourceVersion !== 4) return;
     const state = cloneState(parsed.state);
     const stateText = serializedState(state);
     const snapshot: WorkerStoreRecoverySnapshot = {
@@ -1569,7 +1712,7 @@ export class WorkerStore {
       statePath: this.path,
       capturedAt: this.options.now(),
       stateDigest: digest(stateText),
-      state: JSON.parse(stateText) as WorkerStateFileV3,
+      state: JSON.parse(stateText) as WorkerStateFileV4,
     };
     await this.writeSmallDurable(this.recoveryPath(), `${JSON.stringify(snapshot, null, 2)}\n`);
   }
@@ -1586,7 +1729,7 @@ export class WorkerStore {
       const value = assertExactObject(JSON.parse(raw), new Set(["version", "statePath", "capturedAt", "stateDigest", "state"]), ["version", "statePath", "capturedAt", "stateDigest", "state"], "worker recovery snapshot");
       if (requiredNumber(value, "version", "worker recovery snapshot", true, 1) !== 1) throw new WorkerStoreValidationError("worker recovery snapshot.version must equal 1");
       if (requiredString(value, "statePath", "worker recovery snapshot") !== this.path) throw new WorkerStoreValidationError("worker recovery snapshot.statePath does not match this store");
-      const state = parseV3File(value.state, false);
+      const state = parseV4File(value.state, false);
       this.assertSupportedFeatures(state);
       const stateDigest = requiredString(value, "stateDigest", "worker recovery snapshot");
       if (digest(serializedState(state)) !== stateDigest) throw new WorkerStoreValidationError("worker recovery snapshot digest does not match its state");
@@ -1602,7 +1745,7 @@ export class WorkerStore {
     }
   }
 
-  private publish(target: WorkerStateFile, committed: WorkerStateFileV3): void {
+  private publish(target: WorkerStateFile, committed: WorkerStateFileV4): void {
     try {
       for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
       Object.assign(target, cloneState(committed));
@@ -1615,7 +1758,7 @@ export class WorkerStore {
 
   private async writeLocked(state: WorkerStateFile, context: HeldWriteContext): Promise<void> {
     const previous = context.loaded.state;
-    if ((state.version === 2 || state.version === 3) && state.generation !== previous.generation) {
+    if ((state.version === 2 || state.version === 3 || state.version === 4) && state.generation !== previous.generation) {
       throw new WorkerStoreConflictError(state.generation ?? -1, previous.generation);
     }
     const normalized = this.normalizeInput(state, previous);
@@ -1624,13 +1767,13 @@ export class WorkerStore {
     const text = serializedState(normalized);
     await this.durableCommit(text, context.loaded.raw);
     const committed = cloneState(normalized);
-    context.loaded = { state: committed, raw: text, sourceVersion: 3 };
+    context.loaded = { state: committed, raw: text, sourceVersion: 4 };
     this.publish(state, committed);
   }
 
-  async read(): Promise<WorkerStateFileV3> {
+  async read(): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.measured("read", async () => {
-      const fast = await this.loadCanonicalV3LockFree();
+      const fast = await this.loadCanonicalV4LockFree();
       if (fast) return cloneState(fast);
       return this.withLock(async () => cloneState((await this.loadLocked()).state));
     }));
@@ -1645,8 +1788,8 @@ export class WorkerStore {
   async restoreEmptyFromRecovery(
     expectedGeneration: number,
     expectedSnapshotDigest: string,
-    transform?: (state: WorkerStateFileV3) => void,
-  ): Promise<WorkerStateFileV3> {
+    transform?: (state: WorkerStateFileV4) => void,
+  ): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
       if (loaded.state.generation !== expectedGeneration) {
@@ -1690,10 +1833,10 @@ export class WorkerStore {
   }
 
   /** Durably migrates a v1/v2 file without applying an unrelated user mutation. */
-  async migrate(): Promise<WorkerStateFileV3> {
+  async migrate(): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
-      if (loaded.sourceVersion === 3) return cloneState(loaded.state);
+      if (loaded.sourceVersion === 4) return cloneState(loaded.state);
       const text = serializedState(loaded.state);
       await this.durableCommit(text, loaded.raw);
       return cloneState(loaded.state);
@@ -1714,7 +1857,7 @@ export class WorkerStore {
 
   /** Conditional mutation with the defensive snapshot linearized at its commit/no-op. */
   async mutateConditionallyWithSnapshot<T>(
-    fn: (state: WorkerStateFileV3) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
+    fn: (state: WorkerStateFileV4) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
   ): Promise<WorkerStoreCommit<T>> {
     return this.mutateWithGeneration(undefined, fn);
   }
@@ -1722,7 +1865,7 @@ export class WorkerStore {
   /** Lock-backed optimistic mutation. A supplied generation is checked before the callback runs. */
   async mutateWithGeneration<T>(
     expectedGeneration: number | undefined,
-    fn: (state: WorkerStateFileV3) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
+    fn: (state: WorkerStateFileV4) => { value: T; changed: boolean } | Promise<{ value: T; changed: boolean }>,
   ): Promise<WorkerStoreCommit<T>> {
     return this.enqueue(() => {
       const startedAt = this.options.instrumentation ? process.hrtime.bigint() : undefined;
@@ -1746,7 +1889,7 @@ export class WorkerStore {
 
   async compareAndSwap<T>(
     expectedGeneration: number,
-    fn: (state: WorkerStateFileV3) => T | Promise<T>,
+    fn: (state: WorkerStateFileV4) => T | Promise<T>,
   ): Promise<WorkerStoreCommit<T>> {
     return this.mutateWithGeneration(expectedGeneration, async (state) => ({ value: await fn(state), changed: true }));
   }
@@ -1777,7 +1920,7 @@ export class WorkerStore {
     workerId: string,
     resolution: "stopped" | "failed" | "lost" | "unreachable",
     options: { expectedGeneration?: number; observedAt?: number; reason?: string } = {},
-  ): Promise<WorkerStateFileV3> {
+  ): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.withLock(async () => {
       const loaded = await this.loadLocked();
       if (options.expectedGeneration !== undefined && loaded.state.generation !== options.expectedGeneration) {
@@ -1803,7 +1946,7 @@ export class WorkerStore {
   }
 
   /** Reconcile an ambiguous post-rename fault when the expected bytes are now present. */
-  async reconcilePoisonedCommit(): Promise<WorkerStateFileV3> {
+  async reconcilePoisonedCommit(): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.withLock(async () => {
       const marker = await this.readPoisonMarker();
       if (!marker || marker.kind !== "ambiguous_commit" || !marker.expectedDigest) {
@@ -1821,14 +1964,14 @@ export class WorkerStore {
   }
 
   /** Replace a quarantined store only with an explicitly supplied, fully validated snapshot. */
-  async recoverFromQuarantine(replacement: WorkerStateFileV3, quarantinePath?: string): Promise<WorkerStateFileV3> {
+  async recoverFromQuarantine(replacement: WorkerStateFileV4, quarantinePath?: string): Promise<WorkerStateFileV4> {
     return this.enqueue(() => this.withLock(async () => {
       const marker = await this.readPoisonMarker();
       if (!marker || marker.kind !== "corrupt") throw new WorkerStorePoisonedError(`Worker state ${this.path} is not in corrupt quarantine`, marker);
       if (quarantinePath !== undefined && marker.quarantinePath !== quarantinePath) {
         throw new WorkerStoreValidationError(`Quarantine path does not match the durable poison marker`);
       }
-      const empty: WorkerStateFileV3 = { version: 3, generation: 0, workers: [], workerGenerations: [] };
+      const empty: WorkerStateFileV4 = { version: 4, generation: 0, workers: [], workerGenerations: [] };
       const normalized = this.normalizeInput(replacement, empty);
       const text = serializedState(normalized);
       await this.durableCommit(text);

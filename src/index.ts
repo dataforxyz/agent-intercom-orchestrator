@@ -14,7 +14,7 @@ import { formatBossCreateCapabilityReport, inspectBossCreateCapabilities, type B
 import { cleanupProvisionedBossResource, observeProvisionedBossResource, preserveProvisionedBossResource, provisionBossLinkedWorktree, rollbackProvisionedBossWorktree, type ProvisionedBossWorktree } from "./boss-resource.ts";
 import { formatBossReadinessReport, formatBossSetupReport, inspectBossSetup, inspectTrustedLocalBossReadiness } from "./boss-setup.ts";
 import { applyBossSystemdPausePlan, bossWorkerTimersSuspended, captureBossPausedTimers, recoverBossSystemdPauseTargets, resolveBossSystemdPausePlan, restoreBossWorkerTimers, suspendBossWorkerTimers, validatePersistedBossSystemdPauseTargets, verifyAcceptedBossSystemdPause, type BossSystemdPauseTarget } from "./boss-systemd-pause.ts";
-import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, TRUSTED_LOCAL_BOSS_PARTICIPANT_PROFILE, trustedLocalBossParticipantTargets, type TrustedLocalBossTeamIdentity } from "./boss-team-environment.ts";
+import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, buildTrustedLocalBossTeamTargetSource, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, TRUSTED_LOCAL_BOSS_PARTICIPANT_PROFILE, trustedLocalBossParticipantTargets, trustedLocalBossTeamTargetSourcePath, writeTrustedLocalBossTeamTargetSource, type TrustedLocalBossTeamIdentity } from "./boss-team-environment.ts";
 import { TRUSTED_LOCAL_BOSS_WARNING, TrustedLocalBossStore, type TrustedLocalBossAssignment, type TrustedLocalBossPausedTimer, type TrustedLocalBossPauseSettledTarget, type TrustedLocalBossResult, type TrustedLocalBossRun } from "./boss-trusted-local.ts";
 import { CLEANUP_SERVICE, CLEANUP_TIMER, ensureCleanupTimer } from "./cleanup-timer.ts";
 import { readCleanupRunDiagnostics, writeCleanupRunState, type CleanupRunDiagnostics } from "./cleanup-state.ts";
@@ -28,7 +28,7 @@ import { tryAcquireKernelFileLock } from "./file-lock.ts";
 import { WorkerStore } from "./store.ts";
 import { assessWorkerRegistryRecovery, workerRegistryUnitLiveness, type WorkerRegistryRecoveryAssessment } from "./worker-registry-recovery.ts";
 import { formatUnitStatus, getUnitStatus, getUserManagerHealth, launchUnit, listWorkerUnits, listWorkerUnitsForVerification, makeUnitName, parseDurationToSeconds, readUnitLogs, readUnitProcessTree, sanitizeUnitPart, stopUnit, systemdAvailable, waitForUnitRunning, workerSubmissionRejection } from "./systemd.ts";
-import type { CommandRunner, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerRecordV3, WorkerStateFile, WorkerStateFileV3 } from "./types.ts";
+import type { CommandRunner, DelegationGrantV1, Effort, Harness, OrchestratorConfig, PermissionProfile, RolePreset, WorkerRecord, WorkerRecordV3, WorkerRecordV4, WorkerStateFile, WorkerStateFileV4 } from "./types.ts";
 import {
   boundedLeaseExpiry,
   buildWorkerArgs,
@@ -52,6 +52,24 @@ import {
   validateWorkerId,
 } from "./workers.ts";
 import { detectHarnessVersions, formatAdapterVersions, formatHarnessVersions, formatUpdatePlan, inspectAdapterFamily } from "./updates.ts";
+import {
+  assertDelegatedFleetParameterSurface,
+  assertResolvedDelegatedAdmission,
+  authenticateDelegatedManagerFromState,
+  authorizeDelegatedAction,
+  DELEGATED_FLEET_ACTIONS,
+  delegatedFleetFeatureEnabled,
+  delegatedManagerIdentityFromEnvironment,
+  delegatedDirectChildForRenewal,
+  hierarchySafeTerminalPruneOrder,
+  reserveDelegatedCascadeStop,
+  delegatedSubtreeForgetOrder,
+  delegatedSubtreeWorker,
+  delegatedSubtreeWorkers,
+  projectWorkerHierarchies,
+  reserveDelegatedChild,
+  type DelegatedManagerIdentity,
+} from "./delegated-fleet-authorization.ts";
 
 const ACTIONS = [
   "spawn",
@@ -92,6 +110,26 @@ const PACKAGE_ROOT = dirname(dirname(ORCHESTRATOR_EXTENSION));
 const INTERCOM_INBOUND_ACTIVITY_EVENT = "agent-intercom:inbound-message";
 const INTERCOM_LIFECYCLE_SEND_EVENT = "agent-intercom:lifecycle-send";
 
+const ControllerDelegationGrantParams = Type.Object({
+  version: Type.Literal(1),
+  expiresAt: Type.Optional(Type.Number()),
+  roles: Type.Array(Type.String()),
+  harnesses: Type.Array(StringEnum(["pi", "codex"] as const)),
+  permissionProfiles: Type.Array(Type.String()),
+  profiles: Type.Array(Type.String()),
+  cwdRoots: Type.Array(Type.Object({
+    path: Type.String(),
+    gitCommonDir: Type.Optional(Type.String()),
+    gitWorktreeRoot: Type.Optional(Type.String()),
+  }, { additionalProperties: false })),
+  modelPatterns: Type.Array(Type.String()),
+  efforts: Type.Array(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
+  maxLiveDirectChildren: Type.Number(),
+  maxLiveDescendants: Type.Number(),
+  maxDepth: Type.Number(),
+  canSubdelegate: Type.Boolean(),
+}, { additionalProperties: false });
+
 const AgentFleetParams = Type.Object({
   action: StringEnum(ACTIONS),
   id: Type.Optional(Type.String({ description: "Stable worker id" })),
@@ -107,11 +145,54 @@ const AgentFleetParams = Type.Object({
   subagents: Type.Optional(StringEnum(["auto", "required", "not-required"] as const, { description: "Use 'auto' unless the caller explicitly requires or forbids nested-subagent capability" })),
   requiresSubagents: Type.Optional(Type.Boolean({ description: "Legacy nested-subagent override; prefer subagents=auto|required|not-required" })),
   fresh: Type.Optional(Type.Boolean({ description: "Start a fresh persistent harness session instead of resuming state for this worker id" })),
+  delegationGrant: Type.Optional(ControllerDelegationGrantParams),
   all: Type.Optional(Type.Boolean({ description: "Include workers owned by other manager sessions for list/status diagnostics" })),
   execute: Type.Optional(Type.Boolean({ description: "Actually execute cleanup or updates; false previews them" })),
   acknowledge: Type.Optional(Type.Boolean({ description: "Manager acknowledgment required before deleting stopped worker records" })),
   lines: Type.Optional(Type.Number({ description: "Journal lines for logs (1-500)" })),
 });
+
+const DelegatedChildGrantParams = Type.Object({
+  version: Type.Literal(1),
+  grantId: Type.String(),
+  issuedAt: Type.Number(),
+  expiresAt: Type.Optional(Type.Number()),
+  roles: Type.Array(Type.String()),
+  harnesses: Type.Array(StringEnum(["pi", "codex"] as const)),
+  permissionProfiles: Type.Array(Type.String()),
+  profiles: Type.Array(Type.String()),
+  cwdRoots: Type.Array(Type.Object({
+    path: Type.String(),
+    gitCommonDir: Type.Optional(Type.String()),
+    gitWorktreeRoot: Type.Optional(Type.String()),
+  }, { additionalProperties: false })),
+  modelPatterns: Type.Array(Type.String()),
+  efforts: Type.Array(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
+  maxLiveDirectChildren: Type.Number(),
+  maxLiveDescendants: Type.Number(),
+  maxDepth: Type.Number(),
+  canSubdelegate: Type.Boolean(),
+  issuedByWorkerIncarnationId: Type.String(),
+}, { additionalProperties: false });
+
+const DelegatedAgentFleetParams = Type.Object({
+  action: StringEnum(DELEGATED_FLEET_ACTIONS),
+  id: Type.Optional(Type.String({ description: "Stable worker id in this manager's subtree" })),
+  harness: Type.Optional(StringEnum(["auto", "pi", "codex"] as const)),
+  role: Type.Optional(Type.String()),
+  task: Type.Optional(Type.String()),
+  cwd: Type.Optional(Type.String()),
+  profile: Type.Optional(Type.String()),
+  permissionProfile: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String()),
+  effort: Type.Optional(StringEnum(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
+  instructions: Type.Optional(Type.String()),
+  subagents: Type.Optional(StringEnum(["auto", "required", "not-required"] as const)),
+  requiresSubagents: Type.Optional(Type.Boolean()),
+  fresh: Type.Optional(Type.Boolean()),
+  childGrant: Type.Optional(DelegatedChildGrantParams),
+  lines: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
+}, { additionalProperties: false });
 
 type FleetParams = {
   action: typeof ACTIONS[number] | "_heartbeat";
@@ -128,6 +209,8 @@ type FleetParams = {
   subagents?: "auto" | "required" | "not-required";
   requiresSubagents?: boolean;
   fresh?: boolean;
+  childGrant?: DelegationGrantV1;
+  delegationGrant?: Omit<DelegationGrantV1, "grantId" | "issuedAt" | "issuedByWorkerIncarnationId">;
   all?: boolean;
   execute?: boolean;
   acknowledge?: boolean;
@@ -360,7 +443,10 @@ function formatWorker(worker: WorkerRecord): string {
   const checkpoint = worker.checkpointRequestedAt ? ` checkpoint=${formatTime(worker.checkpointRequestedAt)} attempts=${worker.checkpointAttemptCount ?? 1}` : "";
   const stopped = worker.stopReason ? ` stop=${worker.stopReason}${worker.dirtyAtStop ? ":dirty" : ""}` : "";
   const error = worker.lastError ? ` error=${worker.lastError}` : "";
-  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${permission}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${idle}${checkpoint}${stopped}${error}`;
+  const hierarchy = worker.hierarchy
+    ? ` hierarchy=root:${worker.hierarchy.rootWorkerIncarnationId} depth:${worker.hierarchy.depth}${worker.hierarchy.parentWorkerIncarnationId ? ` parent:${worker.hierarchy.parentWorkerIncarnationId}` : ""}`
+    : "";
+  return `${worker.id} [${worker.harness}/${worker.role}] ${worker.state}${model}${effort}${permission}${externalSession}${target}${unit} lease=${formatTime(worker.leaseExpiresAt)}${idle}${checkpoint}${stopped}${hierarchy}${error}`;
 }
 
 function formatWorkers(workers: WorkerRecord[], hiddenHistory = 0): string {
@@ -481,7 +567,7 @@ export function renewObservedWorkerLeases(
 }
 
 export function recordIntercomWorkerActivity(
-  state: WorkerStateFileV3,
+  state: WorkerStateFileV4,
   managerId: string,
   sender: { id?: string; name?: string },
   config: OrchestratorConfig,
@@ -614,6 +700,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   const configPath = join(agentDir, "intercom", "orchestrator", "config.json");
   const statePath = join(agentDir, "intercom", "orchestrator", "workers.json");
   const trustedLocalBossStatePath = join(agentDir, "intercom", "orchestrator", "boss-trusted-local.json");
+  const bossTeamTargetSource = (bossRunId: string) => trustedLocalBossTeamTargetSourcePath(agentDir, bossRunId);
   const openCodePeerDir = join(agentDir, "intercom", "orchestrator", "opencode-peers");
   const configuredManagerContext = process.env.AGENT_INTERCOM_MANAGER_CONTEXT;
   const managerOwnerContext = configuredManagerContext === "opencode" || configuredManagerContext === "headless_cli" ? configuredManagerContext : "pi";
@@ -629,6 +716,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
   pi.events.emit(INTERCOM_CONTROL_REGISTER_EVENT, { type: WORKER_READINESS_ACK, version: 1 });
   const unsubscribeReadinessAcks = pi.events.on(INTERCOM_CONTROL_RECEIVED_EVENT, (payload) => readinessAcks.record(payload));
   let config: OrchestratorConfig;
+  const delegatedRegistrationRequested = delegatedFleetFeatureEnabled();
+  const delegatedIdentity: DelegatedManagerIdentity | undefined = delegatedRegistrationRequested
+    ? delegatedManagerIdentityFromEnvironment()
+    : undefined;
   let currentCtx: ExtensionContext | undefined;
   let currentManagerSessionId: string | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -765,7 +856,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (currentCtx) publishStatus(currentCtx, (await store.read()).workers);
   };
 
-  const ensureWorkerRegistry = async (allowConflictReassessment = true): Promise<WorkerStateFileV3> => {
+  const ensureWorkerRegistry = async (allowConflictReassessment = true): Promise<WorkerStateFileV4> => {
     const current = await store.read();
     if (current.workers.length !== 0) {
       // A diagnostic can survive a process restart while the in-memory flag
@@ -944,6 +1035,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     expectedManagerSessionId?: string;
     reason?: string;
     expectedCheckpointDeadlineAt?: number;
+    retryableFailure?: boolean;
   } = {}): Promise<WorkerRecord> => {
     await ensureWorkerRegistry();
     const stoppedAt = Date.now();
@@ -987,11 +1079,12 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     const finalWorker = await store.mutate((state) => {
       const current = state.workers.find((candidate) => candidate.id === worker.id && workerIncarnation(candidate) === workerIncarnation(worker));
       if (!current) throw new Error(`Worker ${worker.id} changed while it was stopping`);
-      current.state = stopError ? "failed" : "stopped";
-      current.stateReason = undefined;
+      const completedAt = Date.now();
+      current.state = stopError && options.retryableFailure ? "blocked" : stopError ? "failed" : "stopped";
+      current.stateReason = stopError && options.retryableFailure ? "stop_in_progress" : undefined;
       if (!stopError) current.mainPid = undefined;
-      current.stoppedAt = Date.now();
-      current.updatedAt = current.stoppedAt;
+      current.stoppedAt = stopError && options.retryableFailure ? undefined : completedAt;
+      current.updatedAt = completedAt;
       current.lastError = stopError ? (stopError instanceof Error ? stopError.message : String(stopError)) : undefined;
       return structuredClone(current);
     });
@@ -1110,13 +1203,19 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       const reason = cleanupReason(worker, now);
       return reason ? [{ worker, reason, kind: "stop" as const }] : [];
     });
+    const retentionReasons = new Map<string, string>();
     const pruneCandidates = config.pruneStoppedWorkersOnCleanup
-      ? migrated.workers
-        .filter((worker) => !claimedIds.has(worker.id))
-        .flatMap((worker) => {
-          const reason = stoppedWorkerRetentionReason(worker, config, now);
-          return reason ? [{ worker, reason, kind: "prune" as const }] : [];
-        })
+      ? hierarchySafeTerminalPruneOrder(migrated.workers, (worker) => {
+        if (claimedIds.has(worker.id)) return false;
+        const reason = stoppedWorkerRetentionReason(worker, config, now);
+        if (!reason) return false;
+        retentionReasons.set(worker.workerIncarnationId ?? worker.runId, reason);
+        return true;
+      }).map((worker) => ({
+        worker,
+        reason: retentionReasons.get(worker.workerIncarnationId ?? worker.runId)!,
+        kind: "prune" as const,
+      }))
       : [];
     const prunedRuns = new Set(pruneCandidates.map(({ worker }) => `${worker.id}\u0000${worker.runId}`));
     const cacheCandidates = config.pruneRuntimeCachesOnStop
@@ -1542,7 +1641,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     };
   };
 
-  const spawnWorker = async (params: FleetParams, ctx: ExtensionContext, resolved: ResolvedSpawn): Promise<WorkerRecord> => {
+  const spawnWorker = async (params: FleetParams, ctx: ExtensionContext, resolved: ResolvedSpawn, delegatedManager?: WorkerRecordV4): Promise<WorkerRecord> => {
     await ensureWorkerRegistry();
     const { harness, role, task, cwd, profileName, permissionProfileName, permissionProfile, model, effort, instructions } = resolved;
     if (harness === "opencode" && model && effort && effort !== "off") {
@@ -1582,6 +1681,27 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       managerSessionId: managerSessionId(ctx),
       config,
     });
+    if (params.delegationGrant) {
+      if (delegatedManager) throw new Error("Delegated managers must use childGrant for monotonic subdelegation");
+      if (harness !== "pi") throw new Error("Controller-issued delegation is restricted to Pi managers");
+      if (permissionProfile.allowsDelegation !== true) throw new Error(`Permission profile ${permissionProfileName} does not allow delegation`);
+      worker.delegationGrant = {
+        ...structuredClone(params.delegationGrant),
+        version: 1,
+        grantId: `grant-${newRunId()}`,
+        issuedAt: Date.now(),
+      };
+    }
+    if (delegatedManager) {
+      if (!model || !effort) throw new Error("Delegated child launch requires a resolved model and effort");
+      const admitted = await assertResolvedDelegatedAdmission(delegatedManager, {
+        role, harness, profile: profileName, permissionProfile: permissionProfileName, model, effort, cwd,
+        ...(params.childGrant ? { childGrant: params.childGrant } : {}),
+      });
+      worker.cwd = admitted.cwd;
+      worker.hierarchy = admitted.hierarchy;
+      if (params.childGrant) worker.delegationGrant = structuredClone(params.childGrant);
+    }
     if (params.bossTeam) assertTrustedLocalBossControllerTarget(params.bossTeam, worker.managerSessionId);
     const persistentPi = harness === "pi" && profile.mode === "persistent";
     const verifiedPersistentPi = persistentPi && managerOwnerContext === "pi";
@@ -1617,7 +1737,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       worker.healthPath = join(stateDir, `${id}.${runId}.adapter-health.json`);
       workerHealthPath = join(launchStateDir, `${id}.${runId}.adapter-health.json`);
     }
-    await store.mutate((state) => reserveWorkerRecord(state, worker));
+    await store.mutate((state) => {
+      if (delegatedManager) reserveDelegatedChild(state as WorkerStateFileV4, delegatedManager, worker as WorkerRecordV4);
+      else reserveWorkerRecord(state, worker);
+    });
     try {
       const runtime = permissionProfile.hardened ? await prepareWorkerRuntime(harness, id, agentDir, { profileName }) : undefined;
       if (persistentOpenCode || persistentAdapter) await rm(worker.healthPath!, { force: true });
@@ -1684,11 +1807,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           unit,
           managerSessionId: worker.managerSessionId,
           fresh: params.fresh,
+          // A grant is persisted before launch and the delegated extension
+          // re-authenticates it against that exact durable identity. Boss
+          // participants remain fenced until their complete dynamic-growth
+          // lifecycle is implemented.
+          delegatedFleet: harness === "pi" && !params.bossTeam && worker.delegationGrant !== undefined,
         }),
         // Recovery identity is orchestrator-owned. Permission/runtime/profile
         // and Boss metadata must not replace the manager context used to
         // authenticate a live unit against the durable worker record.
         AGENT_INTERCOM_MANAGER_CONTEXT: managerOwnerContext,
+        AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID: worker.hierarchy?.rootWorkerIncarnationId ?? runId,
+        AGENT_INTERCOM_WORKER_DEPTH: String(worker.hierarchy?.depth ?? 0),
+        ...(worker.hierarchy?.parentWorkerIncarnationId ? { AGENT_INTERCOM_PARENT_WORKER_INCARNATION_ID: worker.hierarchy.parentWorkerIncarnationId } : {}),
+        ...(worker.hierarchy?.grantId ? { AGENT_INTERCOM_DELEGATION_GRANT_ID: worker.hierarchy.grantId } : {}),
+        ...(worker.delegationGrant?.grantId ? { AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID: worker.delegationGrant.grantId } : {}),
         ...(params.bossTeam ? buildTrustedLocalBossSupervisionEnvironment(params.bossTeam, runtimeWorkerRoot!) : {}),
         ...(persistentOpenCode ? {
           AGENT_INTERCOM_OPENCODE_HEALTH_PATH: workerHealthPath!,
@@ -1715,7 +1848,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           cwd,
           gitMetadataPaths,
           runtime?.writablePaths ?? [],
-          runtime?.readOnlyPaths ?? [],
+          [
+            ...(runtime?.readOnlyPaths ?? []),
+            ...(params.bossTeam?.teamTargetSourcePath ? [params.bossTeam.teamTargetSourcePath] : []),
+          ],
           runtime?.inaccessiblePaths ?? [],
           runtime?.bindPaths ?? [],
         ),
@@ -1805,7 +1941,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     return { text, availability };
   };
 
-  pi.registerTool({
+  const fleetToolDefinition = {
     name: "agent_fleet",
     label: "Agent Fleet",
     description:
@@ -1814,9 +1950,19 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     promptGuidelines,
     parameters: AgentFleetParams,
 
-    async execute(_toolCallId, params: FleetParams, signal, onUpdate, ctx) {
+    async execute(_toolCallId: string, params: FleetParams, signal: AbortSignal | undefined, onUpdate: ((result: ReturnType<typeof textResult>) => void) | undefined, ctx: ExtensionContext) {
       if (!config) await loadConfig();
       if (signal?.aborted) throw new Error("Agent fleet action cancelled");
+
+      let delegatedManager: WorkerRecordV4 | undefined;
+      if (delegatedRegistrationRequested) {
+        assertDelegatedFleetParameterSurface(params as Record<string, unknown>);
+        authorizeDelegatedAction(params.action, params);
+        delegatedManager = authenticateDelegatedManagerFromState({ identity: delegatedIdentity, state: await store.read(), config });
+        if (!["spawn", "route", "list", "history", "status", "stop", "logs", "renew", "forget", "capabilities", "profiles", "permissions", "models", "variants"].includes(params.action)) {
+          throw new Error(`Delegated fleet action is not yet enabled: ${params.action}`);
+        }
+      }
 
       const mutatingActions = new Set(["spawn", "stop", "cleanup", "prune", "renew", "forget", "adopt"]);
       if (mutatingActions.has(params.action) && !(params.action === "cleanup" && !params.execute)) await ensureWorkerRegistry();
@@ -1829,7 +1975,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (params.action === "spawn") {
         const preview = await resolveSpawn(params, ctx);
         onUpdate?.(textResult(`Starting ${preview.harness}/${preview.role} coworker...`));
-        const worker = await spawnWorker(params, ctx, preview);
+        const worker = await spawnWorker(params, ctx, preview, delegatedManager);
         await updateStatus(ctx);
         const mode = worker.profile ? config.profiles[worker.profile]?.mode : undefined;
         const next = worker.harness === "opencode"
@@ -1845,6 +1991,27 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "route") {
         const routed = await resolveRouting(params);
+        if (delegatedManager) {
+          if (!routed.harness || !routed.profileName || !routed.effectiveEffort) {
+            throw new Error("Delegated route requires a fully resolved harness, profile, and effort");
+          }
+          const model = normalizeModelForHarness(
+            routed.harness,
+            params.model?.trim() || config.roles[routed.role]?.model || config.defaultModels[routed.harness],
+            config.routing.modelRouting,
+          );
+          if (!model) throw new Error("Delegated route requires a fully resolved model");
+          await assertResolvedDelegatedAdmission(delegatedManager, {
+            role: routed.role,
+            harness: routed.harness,
+            profile: routed.profileName,
+            permissionProfile: routed.permissionProfileName,
+            model,
+            effort: routed.effectiveEffort,
+            cwd: resolve(ctx.cwd, params.cwd || "."),
+            ...(params.childGrant ? { childGrant: params.childGrant } : {}),
+          });
+        }
         const selectedAvailability = routed.harness ? routed.availability[routed.harness] : undefined;
         const profile = routed.profileName
           ? `\nProfile: ${routed.profileName} (${selectedAvailability?.mode ?? "persistent"})`
@@ -1867,17 +2034,21 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (params.action === "list" || params.action === "history") {
         try {
           const reconciled = await reconcile();
-          const scoped = params.all
-            ? reconciled
-            : workersAttachedToManager(reconciled, managerSessionId(ctx));
+          const scoped = delegatedManager
+            ? delegatedSubtreeWorkers(reconciled as WorkerRecordV4[], delegatedManager)
+            : params.all
+              ? reconciled
+              : workersAttachedToManager(reconciled, managerSessionId(ctx));
           const workers = params.action === "history" || params.all
             ? scoped
             : scoped.filter((worker) => isLiveState(worker.state) || isRecentTerminalWorker(worker, config));
           const hiddenHistory = scoped.length - workers.length;
+          const hierarchy = projectWorkerHierarchies(reconciled as WorkerRecordV4[], workers as WorkerRecordV4[]);
           return textResult(formatWorkers(workers, hiddenHistory), {
             workers,
+            hierarchy,
             hiddenHistory,
-            scope: params.all ? "all" : "manager",
+            scope: delegatedManager ? "subtree" : params.all ? "all" : "manager",
             view: params.action,
           });
         } catch (error) {
@@ -1903,23 +2074,42 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
           );
         }
         const cleanup = await readCleanupRunDiagnostics(cleanupRunStatePath);
-        const visible = params.all
-          ? reconciled
-          : workersAttachedToManager(reconciled, managerSessionId(ctx));
-        const workers = extractWorkers({ version: 1, workers: visible }, params.id);
+        const visible = delegatedManager
+          ? delegatedSubtreeWorkers(reconciled as WorkerRecordV4[], delegatedManager)
+          : params.all
+            ? reconciled
+            : workersAttachedToManager(reconciled, managerSessionId(ctx));
+        const workers = params.id && delegatedManager
+          ? [delegatedSubtreeWorker(reconciled as WorkerRecordV4[], delegatedManager, params.id)]
+          : extractWorkers({ version: 1, workers: visible }, params.id);
         if (params.id && workers[0]?.unit) {
           const [processes, unitStatus] = await Promise.all([
             readUnitProcessTree(runner, workers[0].unit),
             getUnitStatus(runner, workers[0].unit),
           ]);
           const processText = processes.tree || "(unit cgroup is empty or unloaded)";
-          return textResult(`${formatWorkers(workers)}\n\n${formatCleanupDiagnostics(cleanup)}\n\nSystemd: ${formatUnitStatus(unitStatus)}\n\nCgroup process tree:\n${processText}`, { workers, cleanup, processes, unitStatus });
+          const hierarchy = projectWorkerHierarchies(reconciled as WorkerRecordV4[], workers as WorkerRecordV4[]);
+          return textResult(`${formatWorkers(workers)}\n\n${formatCleanupDiagnostics(cleanup)}\n\nSystemd: ${formatUnitStatus(unitStatus)}\n\nCgroup process tree:\n${processText}`, { workers, hierarchy, cleanup, processes, unitStatus });
         }
-        return textResult(`${formatWorkers(workers)}\n\n${formatCleanupDiagnostics(cleanup)}`, { workers, cleanup });
+        const hierarchy = projectWorkerHierarchies(reconciled as WorkerRecordV4[], workers as WorkerRecordV4[]);
+        return textResult(`${formatWorkers(workers)}\n\n${formatCleanupDiagnostics(cleanup)}`, { workers, hierarchy, cleanup });
       }
 
       if (params.action === "stop") {
         if (!params.id) throw new Error("stop requires id");
+        if (delegatedManager) {
+          const order = await store.mutate((state) => reserveDelegatedCascadeStop(
+            state as WorkerStateFileV4,
+            delegatedManager!,
+            params.id!,
+          ));
+          const stopped: WorkerRecord[] = [];
+          for (const worker of order) {
+            stopped.push(await stopWorker(worker, { reason: "delegated-manager-requested", retryableFailure: true }));
+          }
+          const target = stopped[stopped.length - 1];
+          return textResult(`Stopped ${target.id} and ${stopped.length - 1} live descendant${stopped.length === 2 ? "" : "s"}.`, { worker: target, stopped });
+        }
         const worker = extractWorkers(await store.read(), params.id)[0];
         const stopped = await stopWorker(worker, { expectedManagerSessionId: managerSessionId(ctx), reason: "manager-requested" });
         const dirty = stopped.dirtyAtStop ? ` Worker cwd was dirty when stopped.${stopped.dirtyStatusAtStop ? `\n${stopped.dirtyStatusAtStop}` : ""}` : "";
@@ -2062,7 +2252,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "logs") {
         if (!params.id) throw new Error("logs requires id");
-        const worker = extractWorkers(await store.read(), params.id)[0];
+        const snapshot = await store.read();
+        const worker = delegatedManager
+          ? delegatedSubtreeWorker(snapshot.workers, delegatedManager, params.id)
+          : extractWorkers(snapshot, params.id)[0];
         if (!worker.unit) throw new Error(`Worker ${worker.id} does not use a systemd unit`);
         const [logs, unitStatus] = await Promise.all([
           readUnitLogs(runner, worker.unit, params.lines),
@@ -2078,13 +2271,16 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       if (params.action === "renew") {
         const owner = managerSessionId(ctx);
         const now = Date.now();
+        if (delegatedManager && !params.id) throw new Error("Delegated renew requires an exact direct-child id");
         const pauseProtectedWorkerKeys = new Set(await trustedLocalBossStore.pauseProtectedWorkerKeys());
         const workers = await store.mutate((state) => {
-          const selected = extractWorkers(state, params.id);
+          const selected = delegatedManager
+            ? [delegatedDirectChildForRenewal(state as WorkerStateFileV4, delegatedManager, params.id!, now)]
+            : extractWorkers(state, params.id);
           const renewed: WorkerRecord[] = [];
           for (const worker of selected) {
             if (!worker.owned || !isLiveState(worker.state) || worker.stateReason === "stop_in_progress") continue;
-            if (worker.managerSessionId !== owner) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before renewing`);
+            if (!delegatedManager && worker.managerSessionId !== owner) throw new Error(`Worker ${worker.id} belongs to another manager session; adopt it before renewing`);
             if (bossWorkerTimersSuspended(worker) || pauseProtectedWorkerKeys.has(`${worker.id}\u0000${workerIncarnation(worker)}`)) continue;
             recordWorkerActivity(worker, config, now);
             renewed.push(structuredClone(worker));
@@ -2097,6 +2293,29 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
 
       if (params.action === "forget") {
         if (!params.id) throw new Error("forget requires id");
+        if (delegatedManager) {
+          const order = delegatedSubtreeForgetOrder((await store.read()).workers, delegatedManager, params.id);
+          const forgotten: string[] = [];
+          for (const worker of order) {
+            const terminalAt = terminalWorkerAt(worker);
+            if (terminalAt === undefined) throw new Error(`Worker ${worker.id} changed before its runtime could be deleted`);
+            if (worker.unit) await stopUnit(runner, worker.unit);
+            const deleted = await deleteTerminalRuntimeSafely({
+              store,
+              runner,
+              agentDir,
+              workerId: worker.id,
+              runId: workerIncarnation(worker),
+              terminalAt,
+              action: "full",
+              eligible: (candidate) => isTerminalState(candidate.state),
+            });
+            if (!deleted) throw new Error(`Worker ${worker.id} changed or a same-ID unit could not be verified absent before runtime deletion`);
+            forgotten.push(worker.id);
+          }
+          await updateStatus(ctx);
+          return textResult(`Forgot ${forgotten.length} terminal subtree worker record${forgotten.length === 1 ? "" : "s"}.`, { forgotten });
+        }
         const owner = managerSessionId(ctx);
         const worker = extractWorkers(await store.read(), params.id)[0];
         if (!isTerminalState(worker.state)) {
@@ -2195,19 +2414,37 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       throw new Error(`Unsupported action: ${params.action}`);
     },
 
-    renderCall(args, theme) {
+    renderCall(args: FleetParams, theme: any) {
       const id = args.id ? ` ${args.id}` : "";
       const harness = args.harness ? ` [${args.harness}]` : "";
       const permission = args.permissionProfile ? ` permission=${args.permissionProfile}` : "";
       return new Text(`${theme.fg("toolTitle", theme.bold("agent_fleet "))}${theme.fg("accent", args.action)}${theme.fg("muted", `${id}${harness}${permission}`)}`, 0, 0);
     },
 
-    renderResult(result, { isPartial }, theme) {
+    renderResult(result: ReturnType<typeof textResult>, { isPartial }: { isPartial: boolean }, theme: any) {
       const first = result.content[0];
       const text = first?.type === "text" ? first.text : "(no output)";
       return new Text(theme.fg(isPartial ? "warning" : "toolOutput", text), 0, 0);
     },
-  });
+  };
+
+  let fleetToolRegistered = false;
+  const registerFleetTool = (delegated: boolean) => {
+    if (fleetToolRegistered) return;
+    pi.registerTool({
+      ...fleetToolDefinition,
+      parameters: delegated ? DelegatedAgentFleetParams : AgentFleetParams,
+      description: delegated
+        ? "Manage only the authenticated delegated manager's own worker subtree within its durable grant. Administrative and global fleet actions are unavailable."
+        : fleetToolDefinition.description,
+      promptGuidelines: delegated ? [
+        "This is a restricted delegated fleet surface. You can inspect only your own descendants and cannot request global scope or administrative actions.",
+        "Delegated spawn, route preview, and cascading subtree stop are enabled only within the durable grant; other lifecycle mutations remain unavailable.",
+      ] : promptGuidelines,
+    } as Parameters<ExtensionAPI["registerTool"]>[0]);
+    fleetToolRegistered = true;
+  };
+  if (!delegatedRegistrationRequested) registerFleetTool(false);
 
   async function trustedLocalBossReadiness(ctx: ExtensionContext) {
     const available = await systemdAvailable(runner);
@@ -2534,6 +2771,23 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         }
         result = await trustedLocalBossStore.execute(request, managerSessionId(ctx));
       }
+    } else if (request.action === "authorize-growth") {
+      result = await trustedLocalBossStore.authorizeDynamicGrowth({
+        bossRunId: request.bossRunId,
+        managerSessionId: managerSessionId(ctx),
+        participantRole: request.participantRole,
+        participantWorkerId: request.participantWorkerId,
+        participantWorkerIncarnationId: request.participantWorkerIncarnationId,
+        expectedAcceptanceRevision: request.expectedAcceptanceRevision,
+        expectedDesignRevision: request.expectedDesignRevision,
+        delegationGrant: request.delegationGrant,
+      });
+    } else if (request.action === "revoke-growth") {
+      result = await trustedLocalBossStore.revokeDynamicGrowth({
+        bossRunId: request.bossRunId,
+        managerSessionId: managerSessionId(ctx),
+        expectedGrowthGrantRevision: request.expectedGrowthGrantRevision,
+      });
     } else if (request.action === "freeze" || request.action === "unfreeze") {
       const ownerSessionId = managerSessionId(ctx);
       const status = await trustedLocalBossStore.execute({ action: "status", bossRunId: request.bossRunId }, ownerSessionId);
@@ -2691,7 +2945,15 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     }
 
     const bossRunId = result.run.bossRunId;
+    const teamTargetSourcePath = bossTeamTargetSource(bossRunId);
     const [managerTarget, workerTarget, scoutTarget] = trustedLocalBossParticipantTargets(bossRunId);
+    await writeTrustedLocalBossTeamTargetSource(teamTargetSourcePath, buildTrustedLocalBossTeamTargetSource({
+      bossRunId,
+      controllerTarget: result.run.managerSessionId,
+      managerTarget,
+      targets: trustedLocalBossParticipantTargets(bossRunId),
+      updatedAt: new Date().toISOString(),
+    }));
     const staffing = [
       { role: "manager" as const, fleetRole: "manager", id: managerTarget, task: `You are the sole Manager for trusted-local Boss run ${bossRunId}. Build a bounded plan, coordinate the assigned Worker and Scout through ordinary Agent Intercom, track evidence and blockers, and report progress to the owning Pi session.` },
       { role: "worker" as const, fleetRole: "worker", id: workerTarget, task: `You are the implementation Worker for trusted-local Boss run ${bossRunId}. Execute bounded work assigned by the Manager, verify it, and report progress and blockers through ordinary Agent Intercom.` },
@@ -2716,7 +2978,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
         model: config.boss.roles[member.role]?.model,
         effort: config.boss.roles[member.role]?.effort ?? "auto",
         subagents: "auto",
-        bossTeam: { bossRunId, role: member.role, controllerTarget: result.run.managerSessionId },
+        bossTeam: { bossRunId, role: member.role, controllerTarget: result.run.managerSessionId, teamTargetSourcePath },
       };
       let spawnedMember: WorkerRecord | undefined;
       let memberBindingKey: string | undefined;
@@ -2748,6 +3010,23 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
     if (staffed.run?.state === "failed") staffed = await cleanupTerminalBossResource(staffed);
     if (staffed.run) {
       const snapshot = await store.read();
+      const assignedWorkers = staffed.run.assignments
+        .filter((candidate) => candidate.state === "assigned" && candidate.workerId && candidate.workerIncarnationId)
+        .map((assignment) => snapshot.workers.find((candidate) => candidate.id === assignment.workerId
+          && workerIncarnation(candidate) === assignment.workerIncarnationId
+          && candidate.bossRunId === bossRunId
+          && candidate.managerSessionId === staffed.run!.managerSessionId))
+        .filter((candidate) => candidate !== undefined);
+      const managerWorker = assignedWorkers.find((candidate) => candidate.id === managerTarget);
+      if (managerWorker) {
+        await writeTrustedLocalBossTeamTargetSource(teamTargetSourcePath, buildTrustedLocalBossTeamTargetSource({
+          bossRunId,
+          controllerTarget: staffed.run.managerSessionId,
+          managerTarget: managerWorker.intercomTarget ?? managerWorker.id,
+          targets: assignedWorkers.map((candidate) => candidate.intercomTarget ?? candidate.id),
+          updatedAt: new Date().toISOString(),
+        }));
+      }
       for (const assignment of staffed.run.assignments.filter((candidate) => candidate.state === "assigned" && candidate.workerId && candidate.workerIncarnationId)) {
         const worker = snapshot.workers.find((candidate) => candidate.id === assignment.workerId
           && workerIncarnation(candidate) === assignment.workerIncarnationId
@@ -2782,7 +3061,7 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       "Use exact bossRunId values returned by boss for status, pause, resume, freeze, unfreeze, proof, approval, rejection, and cancellation.",
     ],
     parameters: Type.Object({
-      action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "freeze", "unfreeze", "cancel", "proof", "approve", "reject"] as const),
+      action: StringEnum(["create", "doctor", "plan", "status", "resume", "pause", "freeze", "unfreeze", "cancel", "proof", "approve", "reject", "authorize-growth", "revoke-growth"] as const),
       goal: Type.Optional(Type.String({ description: "Explicit goal; required for create." })),
       sourcePath: Type.Optional(Type.String({ description: "Explicit absolute Git source checkout for create with a worktree requirement. Boss provisions a new run-owned canonical worktree; it does not attach this path." })),
       requirements: Type.Optional(Type.Union([
@@ -2800,8 +3079,13 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       expectedDesignRevision: Type.Optional(Type.Integer({ minimum: 1, description: "Exact current design revision; required for freeze." })),
       expectedFreezeRevision: Type.Optional(Type.Integer({ minimum: 1, description: "Exact current authorized freeze revision; required for unfreeze." })),
       expectedFingerprintSha256: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$", description: "Exact current aggregate candidate fingerprint; required for unfreeze." })),
+      participantRole: Type.Optional(StringEnum(["manager", "worker", "scout", "adversary"] as const, { description: "Exact assigned Boss participant role for dynamic-growth authorization." })),
+      participantWorkerId: Type.Optional(Type.String({ description: "Exact assigned participant worker id." })),
+      participantWorkerIncarnationId: Type.Optional(Type.String({ description: "Exact assigned participant worker incarnation id." })),
+      expectedGrowthGrantRevision: Type.Optional(Type.Integer({ minimum: 1, description: "Exact active dynamic-growth grant revision required for revocation." })),
+      delegationGrant: Type.Optional(DelegatedChildGrantParams),
       note: Type.Optional(Type.String({ description: "Optional control or decision note." })),
-    }),
+    }, { additionalProperties: false }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       // Empty RPC discovery sessions deliberately defer heavy startup. A real
       // typed Boss call is an execution boundary, so establish the exact
@@ -2824,11 +3108,28 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
               ? parseBossCommand(`freeze ${params.bossRunId ?? ""} ${params.expectedAcceptanceRevision ?? ""} ${params.expectedDesignRevision ?? ""}`)
               : params.action === "unfreeze"
                 ? parseBossCommand(`unfreeze ${params.bossRunId ?? ""} ${params.expectedFreezeRevision ?? ""} ${params.expectedFingerprintSha256 ?? ""}`)
-                : {
-                    action: params.action,
-                    bossRunId: parseBossRunId(params.bossRunId),
-                    ...(normalizedNote ? { note: normalizedNote } : {}),
-                  };
+                : params.action === "authorize-growth"
+                  ? {
+                      action: "authorize-growth",
+                      bossRunId: parseBossRunId(params.bossRunId),
+                      participantRole: params.participantRole ?? (() => { throw new Error("Boss authorize-growth requires participantRole."); })(),
+                      participantWorkerId: params.participantWorkerId ?? (() => { throw new Error("Boss authorize-growth requires participantWorkerId."); })(),
+                      participantWorkerIncarnationId: params.participantWorkerIncarnationId ?? (() => { throw new Error("Boss authorize-growth requires participantWorkerIncarnationId."); })(),
+                      expectedAcceptanceRevision: params.expectedAcceptanceRevision ?? (() => { throw new Error("Boss authorize-growth requires expectedAcceptanceRevision."); })(),
+                      expectedDesignRevision: params.expectedDesignRevision ?? (() => { throw new Error("Boss authorize-growth requires expectedDesignRevision."); })(),
+                      delegationGrant: params.delegationGrant ?? (() => { throw new Error("Boss authorize-growth requires delegationGrant."); })(),
+                    }
+                  : params.action === "revoke-growth"
+                    ? {
+                        action: "revoke-growth",
+                        bossRunId: parseBossRunId(params.bossRunId),
+                        expectedGrowthGrantRevision: params.expectedGrowthGrantRevision ?? (() => { throw new Error("Boss revoke-growth requires expectedGrowthGrantRevision."); })(),
+                      }
+                    : {
+                        action: params.action,
+                        bossRunId: parseBossRunId(params.bossRunId),
+                        ...(normalizedNote ? { note: normalizedNote } : {}),
+                      };
       const result = await executeTrustedLocalBoss(request, ctx);
       return {
         content: [{ type: "text", text: result.message }],
@@ -3106,6 +3407,10 @@ export default function agentIntercomOrchestrator(pi: ExtensionAPI) {
       pi.events.emit(INTERCOM_CONTROL_REGISTER_EVENT, { type: WORKER_READINESS_ACK, version: 1 });
       registerOwnedWorkerReadinessProbeType(pi);
       await loadConfig();
+      if (delegatedRegistrationRequested) {
+        authenticateDelegatedManagerFromState({ identity: delegatedIdentity, state: await store.read(), config });
+        registerFleetTool(true);
+      }
       try {
         await recoverCleanupClaims();
         await reconcile();

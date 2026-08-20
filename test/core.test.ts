@@ -8,7 +8,7 @@ import { parseOpenCodeModelsVerbose, parsePiModels, recordIntercomWorkerActivity
 import { workerRuntimeRoot } from "../src/runtime.ts";
 import { WorkerStore } from "../src/store.ts";
 import { getUnitStatus, launchUnit, makeUnitName, parseDurationToSeconds, readUnitProcessTree, sanitizeUnitPart, stopUnit, waitForUnitRunning } from "../src/systemd.ts";
-import type { WorkerRecord, WorkerRecordV3 } from "../src/types.ts";
+import type { WorkerRecord, WorkerRecordV4 } from "../src/types.ts";
 import {
   boundedLeaseExpiry,
   buildWorkerArgs,
@@ -112,6 +112,11 @@ test("harness launch args include identity or the initial task", () => {
     assert.match(args.join(" "), /never claim it succeeded/);
   }
   assert.equal(buildWorkerEnvironment("pi", "advisor-a", "advisor").AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1");
+  const grantedPiEnv = buildWorkerEnvironment("pi", "delegated-manager", "manager", undefined, {
+    runId: "delegated-run", unit: "delegated-manager.service", managerSessionId: "controller-a", delegatedFleet: true,
+  });
+  assert.equal(grantedPiEnv.AGENT_INTERCOM_DELEGATED_FLEET_ENABLED, "1");
+  assert.equal(grantedPiEnv.AGENT_INTERCOM_ORCHESTRATOR_DISABLED, undefined);
   assert.equal(buildWorkerEnvironment("codex", "builder-a", "builder", "gpt-5.6-sol").CODEX_INTERCOM_MODEL, "gpt-5.6-sol");
   const ownedEnv = buildWorkerEnvironment("pi", "advisor-a", "advisor", undefined, {
     runId: "run-a", unit: "worker-a.service", managerSessionId: "manager-a", fresh: true,
@@ -387,7 +392,7 @@ test("manager-received worker Intercom activity resets the idle budget but manag
   });
   worker.state = "running";
   worker.checkpointRequestedAt = 2_000;
-  const state = { version: 3 as const, generation: 0, workers: [worker as WorkerRecordV3], workerGenerations: [{ workerId: worker.id, generation: worker.workerGeneration! }] };
+  const state = { version: 4 as const, generation: 0, workers: [worker as WorkerRecordV4], workerGenerations: [{ workerId: worker.id, generation: worker.workerGeneration! }] };
   recordWorkerActivity(worker, DEFAULT_CONFIG, 2_500);
   assert.equal(worker.lastAuthenticatedIntercomActivityAt, undefined, "manual renewal activity must not claim inbound Intercom evidence");
   assert.equal(recordIntercomWorkerActivity(state, "manager-a", { id: "other", name: "other" }, DEFAULT_CONFIG, 3_000), undefined);
@@ -403,7 +408,7 @@ test("pause-protected inbound Intercom activity records communication without cl
   const worker = createSystemdRecord({
     id: "paused-worker", runId: "paused-run", harness: "pi", role: "worker", task: "test", cwd: "/tmp", profile: "pi-peer",
     unit: "paused-worker.service", managerSessionId: "manager-a", config: DEFAULT_CONFIG, now: 1_000,
-  }) as WorkerRecordV3;
+  }) as WorkerRecordV4;
   worker.state = "ready";
   worker.workerIncarnationId = "paused-incarnation";
   worker.checkpointRequestedAt = 1_500;
@@ -418,7 +423,7 @@ test("pause-protected inbound Intercom activity records communication without cl
     checkpointLastAttemptAt: worker.checkpointLastAttemptAt,
     checkpointAttemptCount: worker.checkpointAttemptCount,
   };
-  const state = { version: 3 as const, generation: 0, workers: [worker], workerGenerations: [{ workerId: worker.id, generation: worker.workerGeneration! }] };
+  const state = { version: 4 as const, generation: 0, workers: [worker], workerGenerations: [{ workerId: worker.id, generation: worker.workerGeneration! }] };
   const updated = recordIntercomWorkerActivity(
     state,
     "manager-a",

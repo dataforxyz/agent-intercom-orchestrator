@@ -1,7 +1,38 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, buildTrustedLocalBossTeamEnvironment, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, trustedLocalBossParticipantTargets, trustedLocalBossRalphLoopName } from "../src/boss-team-environment.ts";
+import { assertTrustedLocalBossControllerTarget, assertTrustedLocalBossWorkerAdoptionAllowed, buildOptionalTrustedLocalBossTeamEnvironment, buildTrustedLocalBossDelegatedManagerEnvironment, buildTrustedLocalBossParticipantPrompt, buildTrustedLocalBossSupervisionEnvironment, buildTrustedLocalBossTeamEnvironment, buildTrustedLocalBossTeamTargetSource, TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, trustedLocalBossParticipantTargets, trustedLocalBossRalphLoopName, trustedLocalBossTeamTargetSourcePath, writeTrustedLocalBossTeamTargetSource } from "../src/boss-team-environment.ts";
 import { buildWorkerEnvironment } from "../src/workers.ts";
+
+test("Boss delegated manager environment binds the exact active growth grant and participant incarnation", () => {
+  const growthGrant = {
+    version: "orc.boss-dynamic-growth-grant.v1" as const,
+    revision: 3,
+    bossRunId: "boss-00000000-0000-4000-8000-123456789abc",
+    participantRole: "manager" as const,
+    participantWorkerId: "boss-manager-123456789abc",
+    participantWorkerIncarnationId: "manager-incarnation-1",
+    acceptanceRevision: 2,
+    designRevision: 4,
+    delegationGrant: {
+      version: 1 as const, grantId: "growth-grant-3", issuedAt: 1_700_000_000_000, issuedByWorkerIncarnationId: "manager-incarnation-1",
+      roles: ["scout"], harnesses: ["pi" as const], profiles: ["boss-dynamic-pi"], permissionProfiles: ["boss-dynamic-scout"],
+      cwdRoots: [{ path: "/tmp" }], modelPatterns: ["anthropic/claude-*"], efforts: ["high" as const],
+      maxLiveDirectChildren: 1, maxLiveDescendants: 1, maxDepth: 1, canSubdelegate: false,
+    },
+    state: "active" as const, authorizedBySessionId: "controller-session", authorizedAt: "2023-11-14T22:13:20.000Z",
+  };
+  const environment = buildTrustedLocalBossDelegatedManagerEnvironment({
+    workerId: growthGrant.participantWorkerId, workerIncarnationId: growthGrant.participantWorkerIncarnationId,
+    workerUnit: "agent-worker.service", managerSessionId: "controller-session", rootWorkerIncarnationId: "root-incarnation", depth: 0, growthGrant,
+  });
+  assert.equal(environment.AGENT_INTERCOM_DELEGATED_FLEET_ENABLED, "1");
+  assert.equal(environment.AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID, "growth-grant-3");
+  assert.equal(environment.AGENT_INTERCOM_BOSS_GROWTH_GRANT_REVISION, "3");
+  assert.throws(() => buildTrustedLocalBossDelegatedManagerEnvironment({ workerId: growthGrant.participantWorkerId, workerIncarnationId: "stale", workerUnit: "agent-worker.service", managerSessionId: "controller-session", rootWorkerIncarnationId: "root-incarnation", depth: 0, growthGrant }), /exact active participant incarnation/);
+});
 
 test("Boss team environment binds every role to one deterministic Pi team including prospective adversary", () => {
   assert.equal(TRUSTED_LOCAL_BOSS_PARTICIPANT_HARNESS, "pi");
@@ -54,6 +85,28 @@ test("Boss team environment binds every role to one deterministic Pi team includ
       assert.equal(launched.AGENT_INTERCOM_ORCHESTRATOR_DISABLED, "1", `${harness} Boss ${role} must remain unable to orchestrate`);
     }
   }
+});
+
+test("Boss team target source is canonical, private, and atomically replaceable", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "boss-team-targets-"));
+  const bossRunId = "boss-00000000-0000-4000-8000-123456789abc";
+  const path = trustedLocalBossTeamTargetSourcePath(agentDir, bossRunId);
+  const source = buildTrustedLocalBossTeamTargetSource({
+    bossRunId,
+    controllerTarget: "controller-exact-target",
+    managerTarget: "boss-manager-123456789abc",
+    targets: ["dynamic-scout-target", "boss-manager-123456789abc"],
+    updatedAt: "2026-08-19T12:00:00.000Z",
+  });
+  await writeTrustedLocalBossTeamTargetSource(path, source);
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+    ...source,
+    targets: ["boss-manager-123456789abc", "dynamic-scout-target"],
+  });
+  assert.equal((await stat(path)).mode & 0o077, 0);
+  assert.equal(buildTrustedLocalBossTeamEnvironment({ bossRunId, role: "manager", controllerTarget: "controller-exact-target", teamTargetSourcePath: path }).AGENT_INTERCOM_BOSS_TEAM_TARGET_SOURCE, path);
+  assert.throws(() => buildTrustedLocalBossTeamTargetSource({ ...source, targets: [source.managerTarget, source.controllerTarget] }), /invalid or duplicate/);
+  assert.throws(() => buildTrustedLocalBossTeamTargetSource({ ...source, targets: [source.managerTarget, source.managerTarget] }), /invalid or duplicate/);
 });
 
 test("Boss Ralph prompts use deterministic role loops and active bounded supervision", () => {

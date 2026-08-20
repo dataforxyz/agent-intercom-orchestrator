@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Replace free-form model entry in `/agents-config` with a live per-harness model selector using the exact identifiers accepted by each harness, while retaining an explicit manual-entry escape hatch.
+- Add explicit, durable, incarnation-bound delegated Pi manager grants with strict resolved model/profile/permission/cwd allowlists, atomic hierarchy budgets, subtree-scoped lifecycle operations, and fail-closed recovery.
+- Add Controller-only trusted-local Boss dynamic-growth grants and released assignment audit retention, while keeping real Boss dynamic spawning fenced off until participant rebind and cross-store launch compensation are complete.
+- Project delegated parent/direct-child relationships through Agent Intercom and reread Controller-owned Boss target sources at operation boundaries.
 
 ## 0.12.0 - 2026-08-18
 

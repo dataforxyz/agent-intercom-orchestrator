@@ -1,9 +1,9 @@
-import type { UnitStatus, WorkerRecord, WorkerStateFileV3 } from "./types.ts";
+import type { UnitStatus, WorkerRecord, WorkerStateFileV4 } from "./types.ts";
 
 export type WorkerRegistryRecoveryAssessment =
   | { status: "healthy" }
   | { status: "unavailable"; reason: string }
-  | { status: "recoverable"; state: WorkerStateFileV3; units: string[] }
+  | { status: "recoverable"; state: WorkerStateFileV4; units: string[] }
   | { status: "degraded"; units: string[]; reason: string };
 
 export function workerRegistryUnitLiveness(status: UnitStatus | undefined): "live" | "absent" | "indeterminate" {
@@ -27,6 +27,13 @@ function indeterminate(status: UnitStatus | undefined): boolean {
 
 function exactIdentity(worker: WorkerRecord, unit: string, status: UnitStatus): boolean {
   const identity = status.workerIdentity;
+  const requiresHierarchyIdentity = worker.hierarchy?.parentWorkerIncarnationId !== undefined || worker.hierarchy?.grantId !== undefined;
+  const hasHierarchyIdentity = identity?.rootWorkerIncarnationId !== undefined || identity?.parentWorkerIncarnationId !== undefined || identity?.depth !== undefined || identity?.grantId !== undefined;
+  const hierarchyMatches = (!requiresHierarchyIdentity && !hasHierarchyIdentity)
+    || (identity?.rootWorkerIncarnationId === worker.hierarchy?.rootWorkerIncarnationId
+      && identity?.parentWorkerIncarnationId === worker.hierarchy?.parentWorkerIncarnationId
+      && identity?.depth === worker.hierarchy?.depth
+      && identity?.grantId === worker.hierarchy?.grantId);
   return worker.owned === true
     && worker.managerOwner !== undefined
     && worker.unit === unit
@@ -35,7 +42,8 @@ function exactIdentity(worker: WorkerRecord, unit: string, status: UnitStatus): 
     && identity.workerIncarnationId === (worker.workerIncarnationId ?? worker.runId)
     && identity.unit === unit
     && identity.managerSessionId === worker.managerOwner.sessionId
-    && identity.managerContext === worker.managerOwner.context;
+    && identity.managerContext === worker.managerOwner.context
+    && hierarchyMatches;
 }
 
 /**
@@ -44,8 +52,8 @@ function exactIdentity(worker: WorkerRecord, unit: string, status: UnitStatus): 
  * unless every live managed unit has one exact owned incarnation match.
  */
 export function assessWorkerRegistryRecovery(input: {
-  current: WorkerStateFileV3;
-  recovery?: WorkerStateFileV3;
+  current: WorkerStateFileV4;
+  recovery?: WorkerStateFileV4;
   inventory: { verified: boolean; units: string[]; reason?: string };
   statuses: ReadonlyMap<string, UnitStatus>;
 }): WorkerRegistryRecoveryAssessment {

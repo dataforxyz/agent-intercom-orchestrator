@@ -332,6 +332,16 @@ export const DEFAULT_PERMISSION_PROFILES: Record<string, PermissionProfile> = {
     inaccessiblePaths: SENSITIVE_HOME_PATHS,
     environment: SCRUBBED_CREDENTIAL_ENV,
   },
+  "boss-delegated-manager-restricted": {
+    description: "Explicitly authorized Boss participant manager with read-only workspace and bounded delegated fleet access",
+    workspace: "read-only",
+    git: "read-only",
+    hardened: true,
+    allowsDelegation: true,
+    piTools: [...SAFE_PI_MANAGER_TOOLS, "agent_fleet"],
+    inaccessiblePaths: SENSITIVE_HOME_PATHS,
+    environment: SCRUBBED_CREDENTIAL_ENV,
+  },
 };
 
 function expandHome(path: string): string {

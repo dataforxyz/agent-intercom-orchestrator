@@ -97,6 +97,8 @@ export interface PermissionProfile {
   workspace: WorkspacePolicy;
   git: GitPolicy;
   hardened?: boolean;
+  /** Defense-in-depth opt-in required before a Pi worker may use delegated fleet authority. */
+  allowsDelegation?: boolean;
   piTools?: string[];
   inaccessiblePaths?: string[];
   writablePaths?: string[];
@@ -220,6 +222,38 @@ export interface OrchestratorConfig {
   pruneRuntimeCachesOnStop: boolean;
 }
 
+export interface DelegationCwdRoot {
+  path: string;
+  gitCommonDir?: string;
+  gitWorktreeRoot?: string;
+}
+
+export interface DelegationGrantV1 {
+  version: 1;
+  grantId: string;
+  issuedByWorkerIncarnationId?: string;
+  issuedAt: number;
+  roles: string[];
+  harnesses: Harness[];
+  permissionProfiles: string[];
+  profiles: string[];
+  cwdRoots: DelegationCwdRoot[];
+  modelPatterns: string[];
+  efforts: Effort[];
+  maxLiveDirectChildren: number;
+  maxLiveDescendants: number;
+  maxDepth: number;
+  canSubdelegate: boolean;
+  expiresAt?: number;
+}
+
+export interface WorkerHierarchy {
+  rootWorkerIncarnationId: string;
+  parentWorkerIncarnationId?: string;
+  depth: number;
+  grantId?: string;
+}
+
 export interface WorkerRecord {
   id: string;
   /** @deprecated Use workerIncarnationId. This remains a lossless API alias during migration. */
@@ -245,6 +279,8 @@ export interface WorkerRecord {
   managerSessionId: string;
   managerOwner?: ManagerOwnerBinding;
   migrationAudit?: WorkerMigrationAudit;
+  hierarchy?: WorkerHierarchy;
+  delegationGrant?: DelegationGrantV1;
   intercomTarget?: string;
   unit?: string;
   mainPid?: number;
@@ -289,6 +325,15 @@ export interface WorkerRecordV3 extends WorkerRecord {
   managerOwner: ManagerOwnerBinding;
 }
 
+/** WorkerStore v4 adds durable hierarchy identity and bounded delegation authority. */
+export interface WorkerRecordV4 extends WorkerRecord {
+  workerIncarnationId: string;
+  workerGeneration: number;
+  state: CanonicalWorkerState | "migration_pending";
+  managerOwner: ManagerOwnerBinding;
+  hierarchy: WorkerHierarchy;
+}
+
 export interface RuntimeCleanupClaim {
   token: string;
   workerId: string;
@@ -310,7 +355,7 @@ export interface WorkerGenerationLedgerEntry {
 
 export interface WorkerStateFile {
   /** Versions 1 and 2 are accepted only as compatibility inputs and explicit migration sources. */
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   /** Monotonic compare-and-swap generation. Required for version 2 and canonical version 3 snapshots. */
   generation?: number;
   workers: WorkerRecord[];
@@ -329,11 +374,19 @@ export interface WorkerStateFileV2 extends WorkerStateFile {
   workerGenerations: WorkerGenerationLedgerEntry[];
 }
 
-/** Exact canonical snapshot returned by WorkerStore reads. */
+/** Legacy version-3 snapshot accepted only for explicit migration. */
 export interface WorkerStateFileV3 extends WorkerStateFile {
   version: 3;
   generation: number;
   workers: WorkerRecordV3[];
+  workerGenerations: WorkerGenerationLedgerEntry[];
+}
+
+/** Exact canonical snapshot returned by WorkerStore reads. */
+export interface WorkerStateFileV4 extends WorkerStateFile {
+  version: 4;
+  generation: number;
+  workers: WorkerRecordV4[];
   workerGenerations: WorkerGenerationLedgerEntry[];
 }
 
@@ -366,6 +419,10 @@ export interface UnitStatus {
     unit: string;
     managerSessionId: string;
     managerContext: ManagerOwnerKind;
+    rootWorkerIncarnationId?: string;
+    parentWorkerIncarnationId?: string;
+    depth?: number;
+    grantId?: string;
     owned: true;
   };
   error?: string;

@@ -9,6 +9,8 @@ One agent builds and tries to prove the work is finished. Another agent challeng
 A manager controls the agents, evidence, limits, context resets, and stopping rule so the useful disagreement does not turn into an endless argument.
 
 > **Status:** The orchestrator provides one `agent_fleet` lifecycle implementation for Pi and opt-in OpenCode managers, with systemd-cgroup cleanup, leases, adoption, durable OpenCode readiness/session resume, model and variant selection, diagnostics, enumeration, and interactive Pi defaults. Pi, Codex, Claude, and OpenCode can all run as persistent Intercom peers; OpenCode also has a one-shot profile.
+>
+> Explicitly authorized Pi coworkers can also receive bounded, incarnation-bound hierarchical delegation. See [Delegated managers](docs/delegated-managers.md) for API examples, model allowlists, lifecycle constraints, and the current fail-closed Boss dynamic-growth fence.
 
 ## Install the Pi plugin
 

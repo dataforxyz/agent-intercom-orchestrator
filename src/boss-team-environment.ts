@@ -1,5 +1,7 @@
-import { join } from "node:path";
-import type { TrustedLocalBossAssignmentRole } from "./boss-trusted-local.ts";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import type { TrustedLocalBossAssignmentRole, TrustedLocalBossDynamicGrowthGrant } from "./boss-trusted-local.ts";
 
 // Trusted-local team policy is currently implemented by the Pi Intercom adapter.
 // Keep every participant on Pi until coordinated non-Pi adapters implement the
@@ -11,6 +13,52 @@ export interface TrustedLocalBossTeamIdentity {
   bossRunId: string;
   role: TrustedLocalBossAssignmentRole;
   controllerTarget: string;
+  teamTargetSourcePath?: string;
+}
+
+export interface TrustedLocalBossTeamTargetSource {
+  version: "orc.boss-team-targets.v1";
+  bossRunId: string;
+  controllerTarget: string;
+  managerTarget: string;
+  targets: readonly string[];
+  updatedAt: string;
+}
+
+const BOSS_RUN_ID_PATTERN = /^boss-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function exactTarget(value: string, label: string): string {
+  if (!value || value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${label} must be an exact non-empty stable session ID`);
+  return value;
+}
+
+export function trustedLocalBossTeamTargetSourcePath(agentDir: string, bossRunId: string): string {
+  if (!BOSS_RUN_ID_PATTERN.test(bossRunId)) throw new Error("Trusted-local Boss team target source run id is invalid");
+  return join(agentDir, "intercom", "orchestrator", "boss-team-targets", `${bossRunId}.json`);
+}
+
+export function buildTrustedLocalBossTeamTargetSource(input: Omit<TrustedLocalBossTeamTargetSource, "version">): TrustedLocalBossTeamTargetSource {
+  if (!BOSS_RUN_ID_PATTERN.test(input.bossRunId)) throw new Error("Trusted-local Boss team target source run id is invalid");
+  const controllerTarget = exactTarget(input.controllerTarget, "Boss Controller target");
+  const managerTarget = exactTarget(input.managerTarget, "Boss Manager target");
+  const targets = input.targets.map((target) => exactTarget(target, "Boss team target"));
+  if (managerTarget === controllerTarget || targets.includes(controllerTarget) || !targets.includes(managerTarget) || new Set(targets).size !== targets.length || targets.length > 260) {
+    throw new Error("Trusted-local Boss team target source contains invalid or duplicate target correlation");
+  }
+  if (!Number.isFinite(Date.parse(input.updatedAt))) throw new Error("Trusted-local Boss team target source updatedAt is invalid");
+  return { version: "orc.boss-team-targets.v1", bossRunId: input.bossRunId, controllerTarget, managerTarget, targets: Object.freeze([...targets].sort()), updatedAt: new Date(input.updatedAt).toISOString() };
+}
+
+export async function writeTrustedLocalBossTeamTargetSource(path: string, source: TrustedLocalBossTeamTargetSource): Promise<void> {
+  const canonical = buildTrustedLocalBossTeamTargetSource(source);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temp, `${JSON.stringify(canonical, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await rename(temp, path);
+  } finally {
+    await rm(temp, { force: true }).catch(() => undefined);
+  }
 }
 
 export function trustedLocalBossParticipantTargets(bossRunId: string): readonly string[] {
@@ -27,6 +75,41 @@ export function assertTrustedLocalBossWorkerAdoptionAllowed(worker: { id: string
   if (worker.bossRunId) throw new Error(`Boss-bound worker ${worker.id} cannot be adopted by another Controller; cancel the owning Boss run instead`);
 }
 
+export function buildTrustedLocalBossDelegatedManagerEnvironment(input: {
+  workerId: string;
+  workerIncarnationId: string;
+  workerUnit: string;
+  managerSessionId: string;
+  rootWorkerIncarnationId: string;
+  depth: number;
+  hierarchyGrantId?: string;
+  growthGrant: TrustedLocalBossDynamicGrowthGrant;
+}): Record<string, string> {
+  const { growthGrant } = input;
+  if (growthGrant.state !== "active"
+    || growthGrant.participantWorkerId !== input.workerId
+    || growthGrant.participantWorkerIncarnationId !== input.workerIncarnationId
+    || growthGrant.delegationGrant.issuedByWorkerIncarnationId !== input.workerIncarnationId) {
+    throw new Error("Trusted-local Boss delegated manager binding does not match the exact active participant incarnation");
+  }
+  if (!input.workerUnit || !input.managerSessionId || !input.rootWorkerIncarnationId || !Number.isInteger(input.depth) || input.depth < 0) {
+    throw new Error("Trusted-local Boss delegated manager binding identity is invalid");
+  }
+  return {
+    AGENT_INTERCOM_DELEGATED_FLEET_ENABLED: "1",
+    AGENT_INTERCOM_WORKER_ID: input.workerId,
+    AGENT_INTERCOM_WORKER_INCARNATION_ID: input.workerIncarnationId,
+    AGENT_INTERCOM_SYSTEMD_UNIT: input.workerUnit,
+    AGENT_INTERCOM_MANAGER_SESSION_ID: input.managerSessionId,
+    AGENT_INTERCOM_ROOT_WORKER_INCARNATION_ID: input.rootWorkerIncarnationId,
+    AGENT_INTERCOM_WORKER_DEPTH: String(input.depth),
+    ...(input.hierarchyGrantId ? { AGENT_INTERCOM_DELEGATION_GRANT_ID: input.hierarchyGrantId } : {}),
+    AGENT_INTERCOM_ACTIVE_DELEGATION_GRANT_ID: growthGrant.delegationGrant.grantId,
+    AGENT_INTERCOM_BOSS_RUN_ID: growthGrant.bossRunId,
+    AGENT_INTERCOM_BOSS_GROWTH_GRANT_REVISION: String(growthGrant.revision),
+  };
+}
+
 export function buildTrustedLocalBossTeamEnvironment(identity: TrustedLocalBossTeamIdentity): Record<string, string> {
   const targets = trustedLocalBossParticipantTargets(identity.bossRunId);
   return {
@@ -35,6 +118,7 @@ export function buildTrustedLocalBossTeamEnvironment(identity: TrustedLocalBossT
     AGENT_INTERCOM_BOSS_CONTROLLER_TARGET: identity.controllerTarget,
     AGENT_INTERCOM_BOSS_MANAGER_TARGET: targets[0],
     AGENT_INTERCOM_BOSS_TEAM_TARGETS: JSON.stringify(targets),
+    ...(identity.teamTargetSourcePath ? { AGENT_INTERCOM_BOSS_TEAM_TARGET_SOURCE: identity.teamTargetSourcePath } : {}),
     AGENT_INTERCOM_BOSS_VISIBILITY: "team-only",
     AGENT_INTERCOM_ORCHESTRATOR_DISABLED: "1",
   };

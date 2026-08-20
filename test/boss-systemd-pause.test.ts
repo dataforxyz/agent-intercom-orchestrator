@@ -36,6 +36,8 @@ function run(): TrustedLocalBossRun {
     currentPause: null,
     pauseReconciliations: [],
     currentPauseDegradation: null,
+    dynamicGrowthGrants: [],
+    dynamicAssignments: [],
     assignments: [assignment("manager"), assignment("worker"), assignment("scout"), assignment("adversary", "requested")],
     deliveries: [], assignmentResults: [], lifecycle: [], proofPackets: [], decisions: [], cancellation: null,
     createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
